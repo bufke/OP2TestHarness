@@ -3,7 +3,7 @@
 #   make install    copy it to OPU/Harness/ and register it (opt-in at runtime via OP2H_MISSION)
 #   make uninstall  remove it and its ini registration
 #   make check      end-to-end self-test (needs Xvfb and Wine; run outside the Claude sandbox)
-# Also builds the sample bot (build/sample_bot.dll), the easter egg bot (build/easter_bot.dll, see bots/easter_bot.cpp), the self-test mission (build/zHarnessEnd.dll) and the scenario
+# Also builds the sample bot (build/sample_bot.dll), the easter egg bot (build/easter_bot.dll, see bots/easter_bot.cpp), the cheat code bot (build/cheat_bot.dll), the self-test mission (build/zHarnessEnd.dll) and the scenario
 # mission used by `run.sh --scenario` (build/zScenario.dll, installed next to harness.dll, not in OPU/maps).
 
 CXX      := i686-w64-mingw32-g++
@@ -17,7 +17,7 @@ CXXFLAGS := -std=c++17 -O2 -Wall -Wno-return-type -Wno-array-bounds \
             -isystem ../vendor/include
 LDFLAGS  := -shared -static -static-libgcc -static-libstdc++ -s -Wl,--kill-at -lgdi32
 
-all: build/harness.dll build/sample_bot.dll build/easter_bot.dll build/zHarnessEnd.dll build/zScenario.dll
+all: build/harness.dll build/sample_bot.dll build/easter_bot.dll build/cheat_bot.dll build/zHarnessEnd.dll build/zScenario.dll
 
 build/harness.dll: src/harness.cpp src/mingw_compat.h
 	@mkdir -p build
