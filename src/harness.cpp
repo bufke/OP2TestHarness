@@ -314,6 +314,8 @@ void WriteTraceUnit(FILE* f, bool& first, Unit u, int spawnIndex) {
           u.GetMaxHitpoints() - u.GetDamage(), CommandName(mo->command_), ActionName(int(mo->action_)), mo->isBusy_,
           mo->pixelX_, mo->pixelY_, mo->frameIndex_, mo->animationIndex_);
   if (u.IsVehicle()) {
+    // Headlights (MoFlagVecHeadlights, flags bit 0).
+    fprintf(f, ",\"lights\":%d", int(mo->flags_ & 1));
     if (pc) {
       fprintf(f, ",\"dest\":[%d,%d],\"path\":{\"start\":[%d,%d],\"moved\":[%d,%d],\"toMove\":[%d,%d],\"rotSpeed\":%d,"
                  "\"wp\":%d,\"numWp\":%d,\"pt\":%d,\"numPts\":%d,\"steps\":\"",
@@ -886,6 +888,44 @@ void IssueMove(Unit u, Location where, CommandType type = CommandType::Move) {
   g_gameImpl.GetPlayer(u.GetOwner())->ProcessCommandPacket(packet);
 }
 
+// Unit orders with more than a Move's arguments, built the way PlayerImpl::ProcessCommandPacket (0x40E300) parses
+// them: Move/Dock/StandGround/Patrol at 0x40E3B0, Attack/Guard at 0x40FAB7. `waypoints` are tiles, each with a range
+// in the waypoint's top 3 bits (how near counts as reached, 0x44BFD0; the UI uses 2 for Ctrl+click waypoints and 3 for
+// patrol points); Patrol appends the waypoint index the patrol loops back to (stored at MapObject +0x5E).
+void IssueWaypoints(Unit u, CommandType type, const std::vector<Location>& waypoints, const std::vector<int>& ranges,
+                    int patrolLoop = -1) {
+  if (!u.IsLive() || waypoints.empty() || waypoints.size() > 8) return;
+  CommandPacket packet = { type, 0 };
+  auto& m = packet.data.move;
+  m.numUnits     = 1;
+  m.unitID[0]    = uint16(u.GetID());
+  m.numWaypoints = uint16(waypoints.size());
+  Waypoint* wp = m.waypoint;
+  for (size_t i = 0; i < waypoints.size(); ++i) {
+    wp[i] = waypoints[i].AsWaypoint();
+    wp[i].u32All = (wp[i].u32All & 0x1FFFFFFF) | (uint32(i < ranges.size() ? ranges[i] & 7 : 0) << 29);
+  }
+  size_t size = sizeof(MoveCommand) + (waypoints.size() - 1) * sizeof(Waypoint);
+  if (patrolLoop >= 0) {
+    const uint16 loop = uint16(patrolLoop);
+    memcpy(reinterpret_cast<uint8*>(&m) + size, &loop, 2);
+    size += 2;
+  }
+  packet.dataLength = uint16(size);
+  g_gameImpl.GetPlayer(u.GetOwner())->ProcessCommandPacket(packet);
+}
+
+// Attack or Guard on a unit (`tile` false: x = unit id) or on a tile.
+void IssueTargeted(Unit u, CommandType type, int x, int y, bool tile) {
+  if (!u.IsLive()) return;
+  CommandPacket packet = { type, sizeof(AttackCommand) };
+  packet.data.attack.numUnits  = 1;
+  packet.data.attack.unitID[0] = uint16(u.GetID());
+  packet.data.attack.unknown   = 0;
+  packet.data.attack.target    = { uint16(x), uint16(tile ? y : 0xFFFF) };
+  g_gameImpl.GetPlayer(u.GetOwner())->ProcessCommandPacket(packet);
+}
+
 MapID TypeByName(const std::string& name) {
   if (name.empty() || name == "-") return MapID::None;
   for (size_t i = 1; i < MapObjectManager::NumMapObjTypes(); ++i)
@@ -1192,6 +1232,24 @@ void RunScriptCmd(const ScriptCmd& c, int tick) {
   if      (c.verb == "move")         IssueMove(unit(0), loc(1));
   else if (c.verb == "dock")         IssueMove(unit(0), loc(1), CommandType::Dock);  // ctMoDock, to a dock tile
   else if (c.verb == "attack")       unit(0).DoAttack(unit(1));
+  else if (c.verb == "guard")        IssueTargeted(unit(0), CommandType::Guard, unit(1).GetID(), 0, false);
+  else if (c.verb == "attackground") IssueTargeted(unit(0), CommandType::Attack, loc(1).x, loc(1).y, true);
+  else if (c.verb == "lights")       unit(0).DoSetLights(num(1) != 0);
+  else if (c.verb == "movewp" || c.verb == "standground" || c.verb == "patrol") {
+    // movewp/standground <unit> x,y[,range] ...; patrol <unit> <loop index> x,y[,range] ...
+    const bool patrol = c.verb == "patrol";
+    std::vector<Location> wps;
+    std::vector<int> ranges;
+    for (size_t i = patrol ? 2 : 1; i < c.args.size(); ++i) {
+      int x = 0, y = 0, r = 0;
+      if (sscanf(c.args[i].c_str(), "%d,%d,%d", &x, &y, &r) < 2) continue;
+      wps.push_back(Location(x + (c.fileCoords ? PadTiles() : 0), y));
+      ranges.push_back(r);
+    }
+    const CommandType type = patrol ? CommandType::Patrol
+                           : c.verb == "standground" ? CommandType::StandGround : CommandType::Move;
+    IssueWaypoints(unit(0), type, wps, ranges, patrol ? num(1) : -1);
+  }
   else if (c.verb == "stop")         unit(0).DoStop();
   else if (c.verb == "selfdestruct") unit(0).DoSelfDestruct();
   else if (c.verb == "research")     unit(0).DoResearch(num(1), num(2));

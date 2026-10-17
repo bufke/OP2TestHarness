@@ -109,7 +109,13 @@ or `@N` for the unit made by the Nth `spawn` command. Coordinates are internal t
 10   move      @0 40 30     # the first spawned unit
 0    view      60 64        # centre the view on a tile (for screenshots)
      stop <id> | selfdestruct <id> | research <labId> <techId> <scientists> | shot | telemetry | trace | quit
+     guard <id> <id> | attackground <id> x y | lights <id> 0|1
+     movewp <id> x,y[,r] ... | standground <id> x,y[,r] ... | patrol <id> <loop> x,y[,r] ...   # waypoints, range r
 ```
+
+The last group builds the packets the UI sends (Guard, Attack on a tile, LightToggle, Move/Stand Ground/Patrol with up
+to 8 waypoints; `r` is the waypoint's range in its top 3 bits, `loop` the waypoint a patrol returns to). See
+`../notes/findings-commands-audio.md`.
 
 Commands for a tick run after that game cycle. A move at tick T shows `cmd: Move` in tick T's trace line and the unit
 starts turning or moving in cycle T+1.
@@ -204,7 +210,9 @@ it:
 ```
 
 - Tiles are file coordinates. `type` and `weapon` are sheet code names. `dir` (optional) is the starting rotation.
-  `orders[].unit` is a spawn index. `cmd` is Move, Dock (with `tile`), Attack (with `target`, a spawn index), Stop or SelfDestruct.
+  `orders[].unit` is a spawn index. `cmd` is Move, Dock (with `tile`), Attack (with `target`, a spawn index, or a
+  `tile`), Guard (`target`), Lights (`on`), StandGround or Patrol (`tile`, or `waypoints` as `[x, y]` / `[x, y, range]`;
+  Patrol also `loop`), Stop or SelfDestruct. Move takes `waypoints` too.
   `view` (optional tile, default the spawns' centroid) centres the camera for screenshots.
   `setcell` (optional) repaints cell types before spawning (`cell` is a CellType id or name). An older `cells` key is
   read too. Unknown keys such as `note` are ignored.

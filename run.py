@@ -98,10 +98,24 @@ def scenario_script(scn: dict) -> str:
         lines.append(f"0 view {view[0]} {view[1]}")
     for o in scn.get("orders", []):
         cmd, unit, tick = o["cmd"].lower(), f"@{o['unit']}", o["tick"]
-        if cmd in ("move", "dock"):
+        # Waypoints are [x, y] or [x, y, range] (op2-sim's Waypoint {tile, range} is accepted too).
+        points = [[w["tile"][0], w["tile"][1], w.get("range", 0)] if isinstance(w, dict) else w
+                  for w in o.get("waypoints") or ([o["tile"]] if "tile" in o else [])]
+        wps = " ".join(",".join(str(v) for v in w) for w in points)
+        if cmd == "move" and "waypoints" in o:
+            lines.append(f"{tick} movewp {unit} {wps}")
+        elif cmd in ("move", "dock"):
             lines.append(f"{tick} {cmd} {unit} {o['tile'][0]} {o['tile'][1]}")
-        elif cmd == "attack":
-            lines.append(f"{tick} attack {unit} @{o['target']}")
+        elif cmd == "standground":
+            lines.append(f"{tick} standground {unit} {wps}")
+        elif cmd == "patrol":
+            lines.append(f"{tick} patrol {unit} {o.get('loop', 0)} {wps}")
+        elif cmd == "attack" and "tile" in o:
+            lines.append(f"{tick} attackground {unit} {o['tile'][0]} {o['tile'][1]}")
+        elif cmd in ("attack", "guard"):
+            lines.append(f"{tick} {cmd} {unit} @{o['target']}")
+        elif cmd == "lights":
+            lines.append(f"{tick} lights {unit} {int(bool(o['on']))}")
         elif cmd in ("stop", "selfdestruct"):
             lines.append(f"{tick} {cmd} {unit}")
         else:
