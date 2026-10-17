@@ -306,7 +306,10 @@ before each run.
   and `timeout_screen.png` shows it. A crash ends the run with a non-zero exit (winedbg is disabled for harness runs).
 - Scenario runs are single player only. Spawns are vehicles and buildings of players 0 and 1 via
   `Game::CreateUnit`.
-- Telemetry covers what is cheap to read, and is easy to extend in `WriteTelemetry()`. It does not cover research in
-  progress, factory queues, cargo amounts, or disasters.
+- Telemetry covers what is cheap to read, and is easy to extend in `WriteTelemetry()`. Research progress, factory
+  timers and cargo amounts need `--eco` (raw object bytes, decoded in `oracle/eco_check.py`); disasters aren't covered.
+- TethysAPI's `Unit::DoBuild` (its `Location - Location` is a distance, not a difference) and `DoMiningRoute` build
+  broken packets, and `DoTransferCargo` takes the AI path, which crashed: the `build`, `route` and `transfercargo`
+  verbs send their own packets.
 - The game's code addresses are hard-coded for Outpost2.exe 1.2 as patched by OPU 1.4.x. They are the same addresses
   TethysAPI and OPUPatch use.
