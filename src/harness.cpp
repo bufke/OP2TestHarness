@@ -1060,7 +1060,7 @@ void RunInputCmd(const ScriptCmd& c, int tick) {
 //   route <truck> <mine> <smelter>    cargo route (ctMoCargoRoute), as the UI builds it
 //   produce <factory> <TYPE> [weapon] | idle <bldg> | unidle <bldg> | train <university> <n>
 //   kit <convec> <TYPE> [weapon]      put a structure kit in a ConVec
-//   build <convec> <x> <y>            ctMoBuild: the bottom-right tile of the structure's footprint
+//   build <convec> <x> <y> [TYPE]     ctMoBuild to the bottom-right tile of footprint+margin (TYPE: Robo-Miner, GeoCon)
 //   bay <factory> <bay> <TYPE> [weapon] | transfercargo <factory> <bay>
 //   cargo <truck> <type 0-10> <amount> | load <truck> | unload <truck>
 bool RunEcoCmd(const ScriptCmd& c, int tick) {
@@ -1156,7 +1156,8 @@ bool RunEcoCmd(const ScriptCmd& c, int tick) {
   if (v == "build") {
     // The ctMoBuild packet of the legacy Unit::DoBuild export (0x476350): waypoint = the centre of the bottom-right tile,
     // rect = the footprint plus its 1-tile margin.
-    const MapID kit = MapID(u.IsLive() ? u.GetMapObject()->cargo_ : 0);
+    // A Robo-Miner or GeoCon has no kit: name the structure (MINE, GEOTHERMAL) as the 4th argument for its size.
+    const MapID kit = c.args.size() > 3 ? TypeByName(arg(3)) : MapID(u.IsLive() ? u.GetMapObject()->cargo_ : 0);
     if (!u.IsLive() || kit == MapID::None) { Log("script: build: no ConVec kit");  return true; }
     const auto& s = MapObjectType::GetInstance(kit)->stats_.building;
     const Location br = loc(1);
