@@ -449,7 +449,7 @@ void WriteGameData(const char* path) {
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Scripted input. One command per line: `<tick> <verb> <args...>`; '#' starts a comment.
-//   move <unit> <x> <y> | attack <unit> <target> | stop <unit> | selfdestruct <unit>
+//   move <unit> <x> <y> | dock <unit> <x> <y> | attack <unit> <target> | stop <unit> | selfdestruct <unit>
 //   research <labId> <techId> <scientists> | shot | telemetry | trace | quit
 //   spawn <TYPE> <owner> <x> <y> [weapon|-] [dir 0-255]   (TYPE/weapon are sheet code names, e.g. LIGHT_TANK LASER)
 //   setcell <x1> <y1> <x2> <y2> <cellTypeId>                 (overwrite terrain cell types in a rect, inclusive)
@@ -783,9 +783,9 @@ void PressKey(const KeySpec& k) {
 // multiplayer-safe version would have to queue packets through the network layer instead).
 // Unit::DoMove() goes through MapObject::CmdMove() (the ScGroup/AI path), which crashed the renderer when used on a
 // human player's unit, so build the same Move packet that clicking produces.
-void IssueMove(Unit u, Location where) {
+void IssueMove(Unit u, Location where, CommandType type = CommandType::Move) {
   if (!u.IsLive()) return;
-  CommandPacket packet = { CommandType::Move, sizeof(MoveCommand) };
+  CommandPacket packet = { type, sizeof(MoveCommand) };
   packet.data.move.numUnits     = 1;
   packet.data.move.unitID[0]    = uint16(u.GetID());
   packet.data.move.numWaypoints = 1;
@@ -973,6 +973,7 @@ void RunScriptCmd(const ScriptCmd& c, int tick) {
   Log("script: tick %d: %s%s", tick, c.verb.c_str(), all.c_str());
 
   if      (c.verb == "move")         IssueMove(unit(0), loc(1));
+  else if (c.verb == "dock")         IssueMove(unit(0), loc(1), CommandType::Dock);  // ctMoDock, to a dock tile
   else if (c.verb == "attack")       unit(0).DoAttack(unit(1));
   else if (c.verb == "stop")         unit(0).DoStop();
   else if (c.verb == "selfdestruct") unit(0).DoSelfDestruct();

@@ -98,8 +98,8 @@ def scenario_script(scn: dict) -> str:
         lines.append(f"0 view {view[0]} {view[1]}")
     for o in scn.get("orders", []):
         cmd, unit, tick = o["cmd"].lower(), f"@{o['unit']}", o["tick"]
-        if cmd == "move":
-            lines.append(f"{tick} move {unit} {o['tile'][0]} {o['tile'][1]}")
+        if cmd in ("move", "dock"):
+            lines.append(f"{tick} {cmd} {unit} {o['tile'][0]} {o['tile'][1]}")
         elif cmd == "attack":
             lines.append(f"{tick} attack {unit} @{o['target']}")
         elif cmd in ("stop", "selfdestruct"):
