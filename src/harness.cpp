@@ -189,6 +189,8 @@ void WriteUnit(FILE* f, bool& first, Unit u) {
     fputc('"', f);
     if (u.IsVehicle() && u.GetType() == MapID::CargoTruck)
       fprintf(f, ",\"truck\":[%d,%d]", int(mo->truckCargoType_), int(mo->truckCargoAmount_));
+    if (u.IsBuilding())
+      if (const Location d = u.GetDockLocation(); d) fprintf(f, ",\"dock\":[%d,%d]", d.x, d.y);
   }
   fputc('}', f);
   first = false;
@@ -462,6 +464,13 @@ void WriteEcoData(FILE* f) {
   for (int k = 0; k < 9; ++k)
     fprintf(f, "%s{\"variant\":%d,\"bar\":%d,\"trucks\":[%d,%d,%d],\"yield\":[%d,%d,%d]}", k ? "," : "", k / 3, k % 3,
             mine[k * 3], mine[k * 3 + 1], mine[k * 3 + 2], mine[27 + k * 3], mine[27 + k * 3 + 1], mine[27 + k * 3 + 2]);
+  // Tech tree as loaded, in techNum order: [techID, plymouthCost, edenCost, maxScientists, lab, category].
+  fputs("],\n\"techTree\":[", f);
+  for (int k = 0; k < g_research.numTechs_; ++k) {
+    const TechInfo* ti = g_research.ppTechInfos_[k];
+    fprintf(f, "%s[%d,%d,%d,%d,%d,%d]", k ? "," : "", ti->techID, ti->plymouthCost, ti->edenCost, ti->maxScientists,
+            int(ti->lab), int(ti->category));
+  }
   fputs("],\n\"typeExtra\":[", f);
   bool first = true;
   for (size_t i = 1; i < MapObjectManager::NumMapObjTypes(); ++i) {
@@ -1066,6 +1075,14 @@ bool RunEcoCmd(const ScriptCmd& c, int tick) {
       for (int x = a.x; x <= b.x; ++x) Game::CreateWall(type, Location(x, y));
     return true;
   }
+  if (v == "mem") {  // mem <address> <1|2|4> <value>: write game memory, e.g. the forced-morale masks at 0x56EAEC
+    uint8_t* b = reinterpret_cast<uint8_t*>(uintptr_t(strtoul(arg(0).c_str(), nullptr, 0)));
+    const int size = num(1), value = num(2);
+    if (IsBadWritePtr(b, size)) { Log("script: mem: bad address %s", arg(0).c_str());  return true; }
+    if (size == 1) *b = uint8_t(value); else if (size == 2) *reinterpret_cast<uint16_t*>(b) = uint16_t(value);
+    else *reinterpret_cast<int*>(b) = value;
+    return true;
+  }
   if (v == "player") {
     PlayerImpl* p = g_gameImpl.GetPlayer(num(0));
     static const std::pair<const char*, int> fields[] = {
@@ -1094,9 +1111,9 @@ bool RunEcoCmd(const ScriptCmd& c, int tick) {
     const Location at = loc(0);
     const std::string kind = arg(2);
     const MapID type = kind == "vent" ? MapID::MagmaVent : kind == "fumarole" ? MapID::Fumarole : MapID::MiningBeacon;
-    const int mineType = kind == "vent" ? -2 : kind == "fumarole" ? -3 : num(2);
+    const int mineType = type == MapID::MiningBeacon ? num(2) : -1;  // as CreateMine: max(type, RandomOre)
     const ibool ok = OP2Thunk<0x478940, ibool FASTCALL(MapID, int, int, int, int, int)>(
-      type, at.x, at.y, mineType, type == MapID::MiningBeacon ? num(3) : 0, type == MapID::MiningBeacon ? num(4) : 0);
+      type, at.x, at.y, mineType, type == MapID::MiningBeacon ? num(3) : -1, type == MapID::MiningBeacon ? num(4) : -1);
     Log("beacon %s at (%d,%d): %d", kind.c_str(), at.x, at.y, ok);
     return true;
   }
@@ -1127,8 +1144,33 @@ bool RunEcoCmd(const ScriptCmd& c, int tick) {
   if (v == "kit")      { if (u.IsLive()) u.SetCargo(TypeByName(arg(1)), TypeByName(arg(2)));  return true; }
   if (v == "cargo")    { if (u.IsLive()) u.SetCargo(CargoType(num(1)), num(2));  return true; }
   if (v == "bay")      { if (u.IsLive()) u.SetFactoryCargo(num(1), TypeByName(arg(2)), TypeByName(arg(3)));  return true; }
-  if (v == "transfercargo") { if (u.IsLive()) u.DoTransferCargo(num(1));  return true; }
-  if (v == "build")    { if (u.IsLive()) u.DoBuild(loc(1));  return true; }
+  if (v == "transfercargo") {  // a ctMoTransferCargo packet (TethysAPI's DoTransferCargo is the AI path; it crashed)
+    if (!u.IsLive()) return true;
+    CommandPacket packet = { CommandType::TransferCargo, sizeof(TransferCargoCommand) };
+    packet.data.transferCargo.unitID  = uint16(u.GetID());
+    packet.data.transferCargo.bay     = uint16(num(1));
+    packet.data.transferCargo.unknown = 0;
+    g_gameImpl.GetPlayer(u.GetOwner())->ProcessCommandPacket(packet);
+    return true;
+  }
+  if (v == "build") {
+    // The ctMoBuild packet of the legacy Unit::DoBuild export (0x476350): waypoint = the centre of the bottom-right tile,
+    // rect = the footprint plus its 1-tile margin.
+    const MapID kit = MapID(u.IsLive() ? u.GetMapObject()->cargo_ : 0);
+    if (!u.IsLive() || kit == MapID::None) { Log("script: build: no ConVec kit");  return true; }
+    const auto& s = MapObjectType::GetInstance(kit)->stats_.building;
+    const Location br = loc(1);
+    CommandPacket packet = { CommandType::Build, sizeof(BuildCommand) };
+    packet.data.build.numUnits     = 1;
+    packet.data.build.unitID[0]    = uint16(u.GetID());
+    packet.data.build.numWaypoints = 1;
+    packet.data.build.waypoint[0]  = br.AsWaypoint(true, true);  // as the legacy export 0x476350 (TethysAPI uses y = tile top)
+    packet.data.build.rect         = MapRect(br.x - s.width - 1, br.y - s.height - 1, br.x, br.y).AsPacked();
+    packet.data.build.unknown      = -1;
+    const ibool ok = g_gameImpl.GetPlayer(u.GetOwner())->ProcessCommandPacket(packet);
+    Log("build: %s at (%d,%d) -> %d", TypeName(kit), br.x, br.y, ok);
+    return true;
+  }
   (void)tick;
   return false;
 }
