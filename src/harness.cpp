@@ -651,8 +651,8 @@ bool UiToClient(const std::string& name, POINT* out) {
   std::string want = name;
   for (char& ch : want) ch = ch == '_' ? ' ' : char(tolower(ch));
   for (const auto& c : UiControls()) {
-    std::string h = c.help;
-    for (char& ch : h) ch = char(tolower(ch));
+    std::string h;
+    for (char ch : c.help) if (ch != '&') h += char(tolower(ch));  // '&' marks the hotkey letter.
     if (!want.empty() && h.find(want) != std::string::npos) {
       *out = { (c.rc.left + c.rc.right) / 2, (c.rc.top + c.rc.bottom) / 2 };
       return true;

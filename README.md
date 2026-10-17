@@ -113,6 +113,57 @@ or `@N` for the unit made by the Nth `spawn` command. Coordinates are internal t
 Commands for a tick run after that game cycle. A move at tick T shows `cmd: Move` in tick T's trace line and the unit
 starts turning or moving in cycle T+1.
 
+## Mouse and keyboard input
+
+Script verbs that drive the game's UI the way a player does (the orders above bypass the UI):
+
+```
+10  click    unit @0              # left click on a unit (select it)
+20  click    tile 34 28 +shot     # left click on a tile; +shot = screenshot one tick later
+30  rclick   432 416              # right click at game window client pixels (as in screenshots)
+40  drag     tile 22 22 tile 28 28          # left-button drag (box select); `right`/`middle` for other buttons
+50  click    unit @1 shift        # modifiers: shift, ctrl, alt (held while the button goes down)
+60  click    mini 50 50 hold 2    # minimap pixel showing tile (50,50); release the button 2 ticks later
+70  click    ui tab2              # command pane tab 0-5 (Factories, Labs, Resources, Communications, Space, Game Options)
+80  click    ui Self_Destruct     # a control by tooltip substring ('_' = space); `uilist` logs every control
+90  key      ctrl+1 alt+c f5 enter          # key presses, through the frame's accelerators like real input
+100 type     hello world          # characters (chat: `key enter`, `type ...`, `key enter`)
+    mouse <pos> | down <pos> [button] | up <pos> [button] | dblclick <pos> | mclick <pos> | keydown <key> | keyup <key>
+    select <unit>                 # left click on the unit, centring the view first if it is off screen
+```
+
+- A `<pos>` is `<x> <y>` (client pixels), `tile <x> <y>` (centre of that tile in the detail pane's current view;
+  `coords file` applies), `unit <id|@N>`, `mini <x> <y>`, or `ui <name>` (`tabN`, `minimapN`, or tooltip text).
+- Keys: letters, digits, `f1`-`f12`, `enter`, `esc`, `space`, `tab`, `backspace`, `delete`, `home`, `end`, `pageup`,
+  `pagedown`, arrows, `pause`, `plus`, `minus`, `numplus`, `numminus`, `vk:0xNN`, with `shift+`/`ctrl+`/`alt+`.
+- With `--scenario`, `--script` lines are appended to the scenario's own script (so in file coordinates), and a
+  scenario may carry raw script lines as `"script": ["10 click unit @0", ...]`. `oracle/input/` has the controls
+  experiments (`ui_base.json` plus one script per behaviour, see oracle/FINDINGS.md "Controls"):
+  `harness/run.sh --scenario harness/oracle/input/ui_base.json --script harness/oracle/input/box_rules.txt
+  --telemetry-every 1 --out /tmp/x`.
+- When a script uses input verbs, each telemetry line adds `selected` (unit IDs, the game's selection list at
+  0x547210) and `view` (the detail pane's top-left corner in file pixels). `harness.log` logs every input with the
+  pane and map tile it hit, plus the pane rectangles.
+
+How it works, and what is deterministic:
+- Input runs in process right after the game cycle of its tick, like everything else in the script. Mouse messages
+  go straight to the pane under the cursor (or the one with capture); key and character messages go through
+  `GameFrame::TranslateAccelerators` and `IDlgWnd::PretranslateModeless`, then to the frame, as `TApp::PumpMessage`
+  would. The game also polls `GetCursorPos` and `GetAsyncKeyState`; their IAT slots point at the virtual cursor and
+  keys, so nothing depends on the X pointer (which is parked off the window). Same script, same output: repeated and
+  parallel runs give byte-identical telemetry and traces. With `--no-turbo` the same orders land on the same ticks
+  (only the draw-dependent `frame`/`anim` trace fields differ, as always).
+- Orders made through the UI are not immediate: a click at tick T executes in the first cycle 4k+1 after T+8 (9 to
+  12 ticks later), where the `move` verb executes at once. Selection changes are immediate.
+- Some UI only advances when the panes are drawn: the view change from `view` or a minimap click, arrow-key and
+  edge scrolling, the bandbox. In turbo mode the harness draws for 4 ticks around every input (and every `view` in an
+  input run), so give a `view` a tick before inputs that depend on it, and hold the minimap button over a tick
+  (`hold 1+`). Scroll distances depend on how many frames are drawn; use `--draw-every 1` for realistic ones.
+- Input runs keep the game window active (parallel runs share a wineserver and take the foreground from each other;
+  an inactive game ignores keys and scrolling).
+- Don't pause the game (`ctrl+p`, `pause`): no cycles run while paused, so the script can't unpause it and the run
+  ends at `--timeout`.
+
 ## Scenarios (`--scenario`): oracle runs of the original game
 
 `--scenario FILE` runs a scenario in the ENGINE_PLAN.md format against the real game, so op2-sim can be compared with
