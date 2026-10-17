@@ -578,8 +578,8 @@ POINT MapToClient(int mapX, int mapY) {
   return { org.x + dx / scale, org.y + (mapY - o0.y) / scale };
 }
 
-// Finds the minimap pane point that shows internal tile `t` (searching the pane: the minimap's scale and centring
-// depend on map size and zoom).
+// Finds the minimap pane point that shows internal tile `t`, searching the pane with MiniMap::TranslateCoordinates
+// (0x48D930): the minimap's scale and centring depend on the map size and zoom.
 bool MinimapToClient(Location t, POINT* out) {
   TPane* mp = &g_gameFrame.miniMapPane_;
   RECT rc;
@@ -589,7 +589,7 @@ bool MinimapToClient(Location t, POINT* out) {
   for (int y = 0; y < rc.bottom; ++y)
     for (int x = 0; x < rc.right; ++x) {
       POINT m;
-      if (!PaneToMap(mp, x, y, &m)) continue;
+      if (!g_miniMap.TranslateCoordinates({ x, y }, &m)) continue;  // What the minimap pane's click handler calls.
       const long d = labs(m.x - wantX) + labs(m.y - wantY);
       if (d < best) { best = d;  *out = { x, y }; }
     }
@@ -812,12 +812,15 @@ bool IsInputVerb(const std::string& v) {
   return false;
 }
 
-std::vector<int> g_pendingShots;  // Ticks of screenshots requested with `+shot`.
+std::vector<int> g_pendingShots;      // Ticks of screenshots requested with `+shot`.
+std::vector<ScriptCmd> g_deferred;    // Button releases scheduled by `hold N`.
 
 // Input verbs. A <pos> is `<x> <y>` (game window client pixels, as in screenshots), `tile <x> <y>` (that tile's centre in
 // the detail pane), `unit <id>` (the unit's centre), `mini <x> <y>` (the minimap pixel showing that tile) or
 // `ui <name>` (a control's centre, see UiToClient). Mouse verbs take optional `left|right|middle` and `shift`/`ctrl`/`alt`
-// held for the action; any verb takes `+shot` (screenshot one tick later, showing the frame drawn after the input).
+// held while the button goes down; `hold N` on click/rclick/mclick/drag releases the button N ticks later instead of in
+// the same tick (the minimap only pans while the button is held during a drawn frame). Any verb takes `+shot`
+// (screenshot one tick later, showing the frame drawn after the input).
 void RunInputCmd(const ScriptCmd& c, int tick) {
   g_lastInputTick = tick;
   std::vector<std::string> a;
@@ -852,9 +855,11 @@ void RunInputCmd(const ScriptCmd& c, int tick) {
   // Trailing words: button and modifiers.
   int button = 0;  // 0 left, 1 right, 2 middle
   bool mod[3] = {};  // shift, ctrl, alt
+  int hold = 0;
   auto words = [&] {
     for (size_t k = i; k < a.size(); ++k) {
-      if      (a[k] == "left")   button = 0;
+      if      (a[k] == "hold" && k + 1 < a.size()) hold = std::max(0, atoi(a[++k].c_str()));
+      else if (a[k] == "left")   button = 0;
       else if (a[k] == "right")  button = 1;
       else if (a[k] == "middle") button = 2;
       else if (a[k] == "shift")  mod[0] = true;
@@ -872,7 +877,15 @@ void RunInputCmd(const ScriptCmd& c, int tick) {
   static const UINT upMsg[3]   = { WM_LBUTTONUP,   WM_RBUTTONUP,   WM_MBUTTONUP   };
   static const int  btnVk[3]   = { VK_LBUTTON,     VK_RBUTTON,     VK_MBUTTON     };
   auto press   = [&](POINT p) { g_in.keys[btnVk[button]] = 1;  SendMouse(downMsg[button], p); };
-  auto release = [&](POINT p) { g_in.keys[btnVk[button]] = 0;  SendMouse(upMsg[button], p); };
+  auto release = [&](POINT p) {
+    if (hold > 0) {
+      static const char* const names[3] = { "left", "right", "middle" };
+      g_deferred.push_back({ tick + hold, "up", { std::to_string(p.x), std::to_string(p.y), names[button] }, false });
+      return;
+    }
+    g_in.keys[btnVk[button]] = 0;
+    SendMouse(upMsg[button], p);
+  };
   auto logAt = [&](POINT p) {
     TPane* pane = PaneAt(p);
     POINT m = {}, local = p;
@@ -890,6 +903,7 @@ void RunInputCmd(const ScriptCmd& c, int tick) {
     words();
     if (v == "rclick") button = 1;
     if (v == "mclick") button = 2;
+    if (v == "dblclick" || v == "down" || v == "up" || v == "mouse") hold = 0;
     logAt(p);
     holdMods();
     SendMouse(WM_MOUSEMOVE, p);
@@ -978,7 +992,11 @@ void RunScriptCmd(const ScriptCmd& c, int tick) {
     g_spawnGone.push_back(!u.IsLive());
     g_spawnType.push_back(type);
   }
-  else if (c.verb == "view")         Player[0].CenterViewOn(loc(0));
+  else if (c.verb == "view") {
+    Player[0].CenterViewOn(loc(0));
+    // The detail pane applies the new view when it is next drawn; in input runs draw now, so later inputs see it.
+    if (g_inputUsed) g_lastInputTick = tick;
+  }
   else if (IsInputVerb(c.verb))      RunInputCmd(c, tick);
   else if (c.verb == "setcell") {
     const int pad = c.fileCoords ? PadTiles() : 0;
@@ -1067,10 +1085,12 @@ bool WantDraw(int tick) {
   if (cfg.drawEvery > 0 && tick % cfg.drawEvery >= cfg.drawEvery - Lead) return true;
   if (cfg.shotEvery > 0 && (g_nextShot - tick <= Lead || (cfg.ticks > 0 && cfg.ticks - tick <= Lead))) return true;
   for (size_t i = g_scriptPos; i < g_script.size() && g_script[i].tick - tick <= Lead; ++i)
-    if (g_script[i].verb == "shot" || IsInputVerb(g_script[i].verb)) return true;
+    if (g_script[i].verb == "shot" || IsInputVerb(g_script[i].verb) || (g_inputUsed && g_script[i].verb == "view"))
+      return true;
   // Keep the panes current around inputs: UI views and controls are laid out as they are drawn.
   if (tick - g_lastInputTick <= Lead) return true;
   for (int t : g_pendingShots) if (t - tick <= Lead) return true;
+  for (const auto& d : g_deferred) if (d.tick - tick <= Lead) return true;
   return false;
 }
 
@@ -1086,7 +1106,14 @@ void __fastcall GameCycleHook(GameImpl* self, void*) {
     WriteGameData((cfg.out + "\\gamedata.json").c_str());
   }
   g_lastTick = tick;
+  // Parallel runs share one wineserver, so they take the foreground from each other, and an inactive game ignores keys
+  // and edge/arrow scrolling (TApp::OnActivateApp 0x4862F0). Keep it active: this runs before the frame is drawn.
+  if (g_inputUsed && !g_tApp.AppActive()) g_tApp.OnActivateApp(1);
 
+  for (size_t k = 0; k < g_deferred.size();) {
+    if (g_deferred[k].tick <= tick) { const ScriptCmd d = g_deferred[k];  g_deferred.erase(g_deferred.begin() + k);  RunInputCmd(d, tick); }
+    else ++k;
+  }
   for (size_t k = 0; k < g_pendingShots.size();) {
     if (g_pendingShots[k] <= tick) { TakeShot(tick);  g_pendingShots.erase(g_pendingShots.begin() + k); }
     else ++k;
