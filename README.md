@@ -254,7 +254,13 @@ tried.
 Measured speed with turbo depends on machine load and map size. Cases seen: a 16-unit map ran at about 500 to 50,000
 ticks/s with occasional screenshots, about 100 ticks/s when rendering every tick, and 36 ticks/s at real-time speed 10.
 Wine and Xvfb startup add about 3 s per run. Parallel runs work: each gets its own Xvfb and output directory, and they
-share the prefix's wineserver.
+share the harness prefix's wineserver.
+
+**Own prefix.** When `prefix-harness/` exists (a plain copy of `prefix/`: `cp -a prefix prefix-harness`), `run.py` and
+`make install` use it instead of `prefix/` (override with `OP2_HARNESS_PREFIX` / `HARNESS_PREFIX`). Harness runs then
+have their own wineserver, so they can't take focus from, or replace DLLs under, a game being played from `prefix/`.
+Mission DLLs are installed into `prefix/` by missions/Makefile; `run.py` mirrors `OPU/maps` into the harness prefix
+before each run.
 
 ## Disabling / removing
 

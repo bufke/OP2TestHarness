@@ -7,7 +7,9 @@
 # mission used by `run.sh --scenario` (build/zScenario.dll, installed next to harness.dll, not in OPU/maps).
 
 CXX      := i686-w64-mingw32-g++
-GAME_DIR := ../prefix/drive_c/GOG Games/Outpost 2
+# Install into the harness's own prefix when it exists (see run.py), else the shared play prefix.
+HARNESS_PREFIX ?= $(if $(wildcard ../prefix-harness),../prefix-harness,../prefix)
+GAME_DIR := $(HARNESS_PREFIX)/drive_c/GOG Games/Outpost 2
 OPU_DIR  := $(GAME_DIR)/OPU
 
 # Same TethysAPI/MinGW workarounds as missions/Makefile.

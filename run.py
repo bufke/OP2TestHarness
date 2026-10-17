@@ -21,9 +21,22 @@ import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PREFIX = ROOT / "prefix"
+# Harness runs use their own Wine prefix when one exists (prefix-harness/, a copy of prefix/), so they get their own
+# wineserver and can't steal focus from, or swap DLLs under, a game David is playing from prefix/.
+PLAY_PREFIX = ROOT / "prefix"
+PREFIX = Path(os.environ.get("OP2_HARNESS_PREFIX") or
+              (ROOT / "prefix-harness" if (ROOT / "prefix-harness").is_dir() else PLAY_PREFIX))
 GAME_DIR = PREFIX / "drive_c" / "GOG Games" / "Outpost 2"
 OPU_DIR = GAME_DIR / "OPU"
+
+
+def sync_missions_from_play_prefix():
+    """Mission DLLs get installed into prefix/ (missions/Makefile); mirror OPU/maps into the harness prefix."""
+    if PREFIX.resolve() == PLAY_PREFIX.resolve():
+        return
+    src = PLAY_PREFIX / "drive_c" / "GOG Games" / "Outpost 2" / "OPU" / "maps"
+    if src.is_dir():
+        shutil.copytree(src, OPU_DIR / "maps", dirs_exist_ok=True)
 
 
 # GameTermReasons from TethysAPI Game/GameStartInfo.h.
@@ -182,6 +195,7 @@ def main() -> int:
     if args.trace_every is None:
         args.trace_every = 1 if scn else 0
 
+    sync_missions_from_play_prefix()
     check_installed()
     width, height = (int(v) for v in args.size.lower().split("x"))
     out = args.out.resolve()
