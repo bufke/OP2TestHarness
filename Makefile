@@ -37,7 +37,9 @@ build/zScenario.dll: test/Scenario.cpp src/mingw_compat.h
 
 install: all
 	mkdir -p "$(OPU_DIR)/Harness"
-	cp build/harness.dll build/zScenario.dll "$(OPU_DIR)/Harness/"
+	# Copy then rename: a game that is running from this prefix keeps its mapped copy of the old file intact.
+	for f in harness.dll zScenario.dll; do cp build/$$f "$(OPU_DIR)/Harness/.$$f.new" && \
+	  mv -f "$(OPU_DIR)/Harness/.$$f.new" "$(OPU_DIR)/Harness/$$f"; done
 	python3 tools/ini.py install "$(OPU_DIR)/outpost2.ini"
 
 uninstall:

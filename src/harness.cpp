@@ -179,6 +179,8 @@ void WriteUnit(FILE* f, bool& first, Unit u) {
 }
 
 int g_lastTelemTick = -1;
+bool g_inputUsed = false;  // The script has input verbs: telemetry adds the selection and the view.
+void WriteInputState(FILE* f);
 
 void WriteTelemetry(int tick) {
   FILE* f = g_telem;
@@ -207,7 +209,9 @@ void WriteTelemetry(int tick) {
     for (Unit u : PlayerBuildingEnum(i)) WriteUnit(f, first, u);
     for (Unit u : PlayerVehicleEnum(i))  WriteUnit(f, first, u);
   }
-  fputs("]}\n", f);
+  fputc(']', f);
+  if (g_inputUsed) WriteInputState(f);
+  fputs("}\n", f);
   fflush(f);
 }
 
@@ -457,6 +461,8 @@ struct ScriptCmd { int tick;  std::string verb;  std::vector<std::string> args; 
 std::vector<ScriptCmd> g_script;
 size_t g_scriptPos = 0;
 
+bool IsInputVerb(const std::string& v);
+
 void LoadScript(const std::string& path) {
   FILE* f = fopen(path.c_str(), "r");
   if (!f) { Log("script: cannot open %s", path.c_str());  return; }
@@ -472,11 +478,306 @@ void LoadScript(const std::string& path) {
   }
   fclose(f);
   std::stable_sort(g_script.begin(), g_script.end(), [](auto& l, auto& r) { return l.tick < r.tick; });
+  for (const auto& c : g_script) g_inputUsed |= IsInputVerb(c.verb);
   Log("script: %u commands from %s", unsigned(g_script.size()), path.c_str());
 }
 
 void Quit(const char* why);
 void TakeShot(int tick);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Virtual mouse and keyboard for the input verbs (see README "Mouse and keyboard input").
+//
+// Input is delivered in process, right after a game cycle, the same way TApp::PumpMessage (0x4867B0) would deliver it:
+// mouse messages go straight to the pane window under the cursor (or the one holding capture), key and character
+// messages go through GameFrame::TranslateAccelerators (0x49B3B0) and IDlgWnd::PretranslateModeless before being
+// dispatched. Everything is synchronous, so an input at tick T is fully handled before cycle T+1 runs.
+// The game also polls the mouse and keys: GetCursorPos (edge scrolling 0x407BBA, the cursor shape, mouse-over) and
+// GetAsyncKeyState (Shift/Ctrl in MouseCommandFilter 0x41B50D/0x41BA60, arrow-key scrolling 0x407BCE). Their IAT slots
+// are pointed at this virtual state, so nothing depends on the X server's pointer.
+
+constexpr uintptr_t IatGetCursorPos      = 0x583898;
+constexpr uintptr_t IatGetAsyncKeyState  = 0x58389C;
+constexpr uintptr_t SelectedCount        = 0x547210;  // Selected units: count, then up to 32 unit indices (0x41ADF0).
+constexpr uintptr_t SelectedUnits        = 0x547214;
+
+struct VirtualInput {
+  bool    active = false;  // Set once the cursor is parked at the first cycle; until then the real functions answer.
+  POINT   pos    = {};     // Client coordinates of the game window (the same pixels as screenshots).
+  uint8_t keys[256] = {};  // Held keys, by virtual-key code (VK_LBUTTON/VK_RBUTTON/VK_MBUTTON for mouse buttons).
+} g_in;
+int  g_lastInputTick = -1000;
+
+using GetCursorPosFn     = BOOL(WINAPI*)(LPPOINT);
+using GetAsyncKeyStateFn = SHORT(WINAPI*)(int);
+GetCursorPosFn     g_realGetCursorPos     = nullptr;
+GetAsyncKeyStateFn g_realGetAsyncKeyState = nullptr;
+
+BOOL WINAPI VirtualGetCursorPos(LPPOINT p) {
+  if (!g_in.active) return g_realGetCursorPos(p);
+  if (!p) return FALSE;
+  *p = g_in.pos;
+  ClientToScreen(g_gameFrame.hWnd_, p);
+  return TRUE;
+}
+
+SHORT WINAPI VirtualGetAsyncKeyState(int vk) {
+  if (!g_in.active) return g_realGetAsyncKeyState(vk);
+  return (vk >= 0 && vk < 256 && g_in.keys[vk]) ? SHORT(0x8000) : 0;
+}
+
+void* PatchIat(uintptr_t slot, void* fn) {
+  void* prev = *reinterpret_cast<void**>(slot);
+  WriteCode(slot, &fn, sizeof(fn));
+  return prev;
+}
+
+// TPane::GetAbsolutePos (vtable slot 10): pane client point -> internal map pixel. Returns 0 outside the map.
+int PaneToMap(TPane* pane, int x, int y, POINT* out) {
+  using Fn = int(__thiscall*)(TPane*, int, int, POINT*);
+  return reinterpret_cast<Fn>((*reinterpret_cast<void***>(pane))[10])(pane, x, y, out);
+}
+
+// The pane's top-left corner in game window client coordinates.
+POINT PaneOrigin(const IWnd& pane) {
+  POINT p = {0, 0};
+  MapWindowPoints(pane.hWnd_, g_gameFrame.hWnd_, &p, 1);
+  return p;
+}
+
+TPane* PaneAt(POINT client) {
+  TPane* panes[] = { &g_gameFrame.detailPane_, &g_gameFrame.miniMapPane_, &g_gameFrame.commandPane_ };
+  for (TPane* p : panes) {
+    RECT rc;
+    if (!p->hWnd_ || !GetClientRect(p->hWnd_, &rc)) continue;
+    const POINT o = PaneOrigin(*p);
+    if (client.x >= o.x && client.y >= o.y && client.x < o.x + rc.right && client.y < o.y + rc.bottom) return p;
+  }
+  return nullptr;
+}
+
+const char* PaneName(const IWnd* p) {
+  return p == &g_gameFrame.detailPane_ ? "detail" : p == &g_gameFrame.miniMapPane_ ? "minimap" :
+         p == &g_gameFrame.commandPane_ ? "command" : "frame";
+}
+
+// Internal map pixel -> game window client point through the detail pane's current view. The view origin comes from the
+// game's own pane->map conversion, so zoom-free 1:1 pixels are the only assumption (checked in the log).
+POINT MapToClient(int mapX, int mapY) {
+  TPane* dp = &g_gameFrame.detailPane_;
+  POINT o0 = {}, o1 = {};
+  PaneToMap(dp, 0, 0, &o0);
+  PaneToMap(dp, 64, 64, &o1);
+  const int scale = std::max(1L, (o1.x - o0.x) / 64);  // 1 at normal zoom.
+  int dx = mapX - o0.x;
+  if (PadTiles() == 0) {  // World maps wrap: take the nearest copy.
+    const int w = GameMap::GetWidth() * 32;
+    dx = ((dx % w) + w + w / 2) % w - w / 2;
+  }
+  const POINT org = PaneOrigin(*dp);
+  return { org.x + dx / scale, org.y + (mapY - o0.y) / scale };
+}
+
+// Finds the minimap pane point that shows internal tile `t` (searching the pane: the minimap's scale and centring
+// depend on map size and zoom).
+bool MinimapToClient(Location t, POINT* out) {
+  TPane* mp = &g_gameFrame.miniMapPane_;
+  RECT rc;
+  if (!mp->hWnd_ || !GetClientRect(mp->hWnd_, &rc)) return false;
+  const int wantX = t.x * 32 + 16, wantY = t.y * 32 + 16;
+  long best = LONG_MAX;
+  for (int y = 0; y < rc.bottom; ++y)
+    for (int x = 0; x < rc.right; ++x) {
+      POINT m;
+      if (!PaneToMap(mp, x, y, &m)) continue;
+      const long d = labs(m.x - wantX) + labs(m.y - wantY);
+      if (d < best) { best = d;  *out = { x, y }; }
+    }
+  if (best == LONG_MAX) return false;
+  const POINT o = PaneOrigin(*mp);
+  out->x += o.x;
+  out->y += o.y;
+  return true;
+}
+
+// UI controls of the minimap and command panes (TPane::pControls_): UIElement objects with pane-relative rectangles.
+// Buttons (UIButton::GetHelpText at vtable slot 7, checked against the known implementations) have a tooltip text.
+std::string ControlHelp(UIElement* e) {
+  void** vtbl = *reinterpret_cast<void***>(e);
+  const uintptr_t f = reinterpret_cast<uintptr_t>(vtbl[7]);
+  if (f != 0x40B2B0 && f != 0x462940) return std::string();  // UIGraphicalButton, BayButton
+  char buf[256] = {};
+  using Fn = void(__thiscall*)(UIElement*, char*, int);
+  reinterpret_cast<Fn>(vtbl[7])(e, buf, sizeof(buf) - 1);
+  return buf;
+}
+
+struct UiControl { TPane* pane;  int index;  UIElement* e;  RECT rc;  std::string help; };
+
+std::vector<UiControl> UiControls() {
+  std::vector<UiControl> out;
+  TPane* panes[] = { &g_gameFrame.miniMapPane_, &g_gameFrame.commandPane_ };
+  for (TPane* p : panes) {
+    const POINT o = PaneOrigin(*p);
+    for (int i = 0; i < p->numControls_ && i < 20; ++i) {
+      auto* e = static_cast<UIElement*>(p->pControls_[i]);
+      if (!e || IsBadReadPtr(e, sizeof(UIElement))) continue;
+      RECT rc = e->position_;
+      OffsetRect(&rc, o.x, o.y);
+      out.push_back({ p, i, e, rc, ControlHelp(e) });
+    }
+  }
+  return out;
+}
+
+void LogUiControls() {
+  for (const auto& c : UiControls())
+    Log("ui: %s[%d] (%ld,%ld)-(%ld,%ld) flags %x \"%s\"", PaneName(c.pane), c.index, c.rc.left, c.rc.top, c.rc.right,
+        c.rc.bottom, unsigned(c.e->flags_), c.help.c_str());
+}
+
+// `name`: "tabN" (command pane report tab N, 0 = top), "minimapN" (minimap button N), or a case-insensitive substring of
+// a control's tooltip with '_' for spaces (e.g. "Mission_Objectives").
+bool UiToClient(const std::string& name, POINT* out) {
+  auto centre = [&](const IWnd& pane, const RECT& r) {
+    const POINT o = PaneOrigin(pane);
+    *out = { o.x + (r.left + r.right) / 2, o.y + (r.top + r.bottom) / 2 };
+    return true;
+  };
+  if (name.size() == 4 && _strnicmp(name.c_str(), "tab", 3) == 0 && name[3] >= '0' && name[3] <= '5')
+    return centre(g_gameFrame.commandPane_, g_gameFrame.commandPane_.reportButtons_[name[3] - '0'].position_);
+  if (name.size() == 8 && _strnicmp(name.c_str(), "minimap", 7) == 0 && name[7] >= '0' && name[7] <= '3')
+    return centre(g_gameFrame.miniMapPane_, g_gameFrame.miniMapPane_.buttons_[name[7] - '0'].position_);
+  std::string want = name;
+  for (char& ch : want) ch = ch == '_' ? ' ' : char(tolower(ch));
+  for (const auto& c : UiControls()) {
+    std::string h = c.help;
+    for (char& ch : h) ch = char(tolower(ch));
+    if (!want.empty() && h.find(want) != std::string::npos) {
+      *out = { (c.rc.left + c.rc.right) / 2, (c.rc.top + c.rc.bottom) / 2 };
+      return true;
+    }
+  }
+  return false;
+}
+
+// Telemetry extension for input runs: the selected unit IDs and the detail pane's top-left corner in file pixels.
+void WriteInputState(FILE* f) {
+  const int n = std::min(*reinterpret_cast<const int*>(SelectedCount), 32);
+  fputs(",\"selected\":[", f);
+  for (int k = 0; k < n; ++k) fprintf(f, "%s%d", k ? "," : "", reinterpret_cast<const int*>(SelectedUnits)[k]);
+  POINT o = {};
+  PaneToMap(&g_gameFrame.detailPane_, 0, 0, &o);
+  fprintf(f, "],\"view\":[%ld,%ld]", o.x - PadTiles() * 32, o.y);
+}
+
+WPARAM MouseKeyFlags() {
+  return (g_in.keys[VK_LBUTTON] ? MK_LBUTTON : 0) | (g_in.keys[VK_RBUTTON] ? MK_RBUTTON : 0) |
+         (g_in.keys[VK_MBUTTON] ? MK_MBUTTON : 0) | (g_in.keys[VK_SHIFT] ? MK_SHIFT : 0) |
+         (g_in.keys[VK_CONTROL] ? MK_CONTROL : 0);
+}
+
+// Mirrors the held keys into the thread's keyboard state, which TranslateAccelerator reads through GetKeyState.
+void SyncKeyboardState() {
+  BYTE ks[256] = {};
+  for (int vk = 0; vk < 256; ++vk) if (g_in.keys[vk]) ks[vk] = 0x80;
+  ks[VK_LSHIFT] = ks[VK_SHIFT];  ks[VK_LCONTROL] = ks[VK_CONTROL];  ks[VK_LMENU] = ks[VK_MENU];
+  SetKeyboardState(ks);
+}
+
+// Sends a mouse message at client point `at`, to the pane holding capture or else the pane under the point.
+void SendMouse(UINT msg, POINT at) {
+  g_in.pos = at;
+  HWND target = GetCapture();
+  if (!target || (target != g_gameFrame.detailPane_.hWnd_ && target != g_gameFrame.miniMapPane_.hWnd_ &&
+                  target != g_gameFrame.commandPane_.hWnd_)) {
+    TPane* p = PaneAt(at);
+    target = p ? p->hWnd_ : g_gameFrame.hWnd_;
+  }
+  POINT local = at;
+  MapWindowPoints(g_gameFrame.hWnd_, target, &local, 1);
+  SendMessageA(target, msg, MouseKeyFlags(), MAKELPARAM(int16_t(local.x), int16_t(local.y)));
+}
+
+// One message through the same steps as TApp::PumpMessage. Returns true when an accelerator took it.
+bool PumpOne(UINT msg, WPARAM w, LPARAM l) {
+  MSG m = {};
+  m.hwnd    = g_gameFrame.hWnd_;  // The frame has the keyboard focus in play.
+  m.message = msg;
+  m.wParam  = w;
+  m.lParam  = l;
+  m.time    = DWORD(g_gameImpl.tick_);
+  m.pt      = g_in.pos;
+  ClientToScreen(g_gameFrame.hWnd_, &m.pt);
+  if (g_gameFrame.TranslateAccelerators(&m)) return true;
+  if (IDlgWnd::PretranslateModeless(&m)) return false;
+  DispatchMessageA(&m);
+  return false;
+}
+
+struct KeySpec { int vk = 0;  bool shift = false, ctrl = false, alt = false; };
+
+// "a", "7", "enter", "f5", "ctrl+1", "alt+c", "shift+tab", "vk:0x41" ...
+bool ParseKey(std::string s, KeySpec* k) {
+  for (;;) {
+    const size_t plus = s.find('+', 1);
+    if (plus == std::string::npos) break;
+    const std::string mod = s.substr(0, plus);
+    if      (_stricmp(mod.c_str(), "shift") == 0) k->shift = true;
+    else if (_stricmp(mod.c_str(), "ctrl") == 0)  k->ctrl = true;
+    else if (_stricmp(mod.c_str(), "alt") == 0)   k->alt = true;
+    else return false;
+    s = s.substr(plus + 1);
+  }
+  static const std::pair<const char*, int> names[] = {
+    {"enter", VK_RETURN}, {"return", VK_RETURN}, {"esc", VK_ESCAPE}, {"escape", VK_ESCAPE}, {"space", VK_SPACE},
+    {"tab", VK_TAB}, {"backspace", VK_BACK}, {"delete", VK_DELETE}, {"insert", VK_INSERT}, {"home", VK_HOME},
+    {"end", VK_END}, {"pageup", VK_PRIOR}, {"pagedown", VK_NEXT}, {"left", VK_LEFT}, {"right", VK_RIGHT},
+    {"up", VK_UP}, {"down", VK_DOWN}, {"pause", VK_PAUSE}, {"shift", VK_SHIFT}, {"ctrl", VK_CONTROL},
+    {"alt", VK_MENU}, {"numplus", VK_ADD}, {"numminus", VK_SUBTRACT}, {"plus", VK_OEM_PLUS}, {"minus", VK_OEM_MINUS} };
+  for (const auto& [n, vk] : names) if (_stricmp(s.c_str(), n) == 0) { k->vk = vk;  return true; }
+  if ((s[0] == 'f' || s[0] == 'F') && s.size() > 1 && isdigit(uint8_t(s[1]))) {
+    const int n = atoi(s.c_str() + 1);
+    if (n >= 1 && n <= 12) { k->vk = VK_F1 + n - 1;  return true; }
+  }
+  if (_strnicmp(s.c_str(), "vk:", 3) == 0) { k->vk = int(strtol(s.c_str() + 3, nullptr, 0)) & 0xFF;  return true; }
+  if (s.size() == 1) {
+    const SHORT v = VkKeyScanA(s[0]);
+    if (v == -1) return false;
+    k->vk = v & 0xFF;
+    k->shift |= (v & 0x100) != 0;
+    return true;
+  }
+  return false;
+}
+
+void KeyEvent(int vk, bool down) {
+  const bool sys = g_in.keys[VK_MENU] || vk == VK_MENU || vk == VK_F10;
+  g_in.keys[vk] = down;
+  if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU) {
+    g_in.keys[vk == VK_SHIFT ? VK_LSHIFT : vk == VK_CONTROL ? VK_LCONTROL : VK_LMENU] = down;
+  }
+  SyncKeyboardState();
+  const UINT scan = MapVirtualKeyA(vk, 0);
+  const LPARAM l = 1 | (LPARAM(scan) << 16) | (sys && g_in.keys[VK_MENU] ? (1 << 29) : 0) |
+                   (down ? 0 : (LPARAM(3) << 30));
+  const UINT msg = down ? (sys ? WM_SYSKEYDOWN : WM_KEYDOWN) : (sys ? WM_SYSKEYUP : WM_KEYUP);
+  if (PumpOne(msg, vk, l) || !down) return;
+  // What TranslateMessage would post: the character, pumped the same way (some accelerators are characters: + - = _).
+  BYTE ks[256];
+  GetKeyboardState(ks);
+  WORD ch = 0;
+  if (ToAscii(vk, scan, ks, &ch, 0) == 1) PumpOne(sys ? WM_SYSCHAR : WM_CHAR, ch & 0xFF, l);
+}
+
+void PressKey(const KeySpec& k) {
+  const int mods[3][2] = { {VK_CONTROL, k.ctrl}, {VK_MENU, k.alt}, {VK_SHIFT, k.shift} };
+  bool pressed[3] = {};
+  for (int i = 0; i < 3; ++i) if (mods[i][1] && !g_in.keys[mods[i][0]]) { KeyEvent(mods[i][0], true);  pressed[i] = true; }
+  KeyEvent(k.vk, true);
+  KeyEvent(k.vk, false);
+  for (int i = 2; i >= 0; --i) if (pressed[i]) KeyEvent(mods[i][0], false);
+}
 
 // All of these go through the unit command packet path the game uses for local input (single-player only; a
 // multiplayer-safe version would have to queue packets through the network layer instead).
@@ -497,6 +798,151 @@ MapID TypeByName(const std::string& name) {
   for (size_t i = 1; i < MapObjectManager::NumMapObjTypes(); ++i)
     if (auto* t = MapObjectType::GetInstance(int(i)); t && _stricmp(t->GetCodeName(), name.c_str()) == 0) return MapID(i);
   return MapID::None;
+}
+
+Unit ScriptUnit(const std::string& s) {
+  if (!s.empty() && s[0] == '@') { const size_t n = atoi(s.c_str() + 1);  return Unit(n < g_spawned.size() ? g_spawned[n] : 0); }
+  return Unit(atoi(s.c_str()));
+}
+
+bool IsInputVerb(const std::string& v) {
+  static const char* const verbs[] = { "mouse", "click", "rclick", "mclick", "dblclick", "down", "up", "drag", "key",
+                                       "keydown", "keyup", "type", "select", "uilist" };
+  for (const char* n : verbs) if (v == n) return true;
+  return false;
+}
+
+std::vector<int> g_pendingShots;  // Ticks of screenshots requested with `+shot`.
+
+// Input verbs. A <pos> is `<x> <y>` (game window client pixels, as in screenshots), `tile <x> <y>` (that tile's centre in
+// the detail pane), `unit <id>` (the unit's centre), `mini <x> <y>` (the minimap pixel showing that tile) or
+// `ui <name>` (a control's centre, see UiToClient). Mouse verbs take optional `left|right|middle` and `shift`/`ctrl`/`alt`
+// held for the action; any verb takes `+shot` (screenshot one tick later, showing the frame drawn after the input).
+void RunInputCmd(const ScriptCmd& c, int tick) {
+  g_lastInputTick = tick;
+  std::vector<std::string> a;
+  bool shot = false;
+  for (const auto& s : c.args) { if (s == "+shot") shot = true;  else a.push_back(s); }
+  if (shot) g_pendingShots.push_back(tick + 1);
+  size_t i = 0;
+  auto num = [&](size_t k) { return k < a.size() ? atoi(a[k].c_str()) : 0; };
+  auto pos = [&](POINT* p) -> bool {
+    if (i >= a.size()) return false;
+    const std::string kind = a[i];
+    if (kind == "tile" || kind == "mini") {
+      const Location t(num(i + 1) + (c.fileCoords ? PadTiles() : 0), num(i + 2));
+      i += 3;
+      if (kind == "mini") return MinimapToClient(t, p);
+      *p = MapToClient(t.x * 32 + 16, t.y * 32 + 16);
+      return true;
+    }
+    if (kind == "unit") {
+      const Unit u = ScriptUnit(i + 1 < a.size() ? a[i + 1] : "");
+      i += 2;
+      if (!u.IsLive()) return false;
+      *p = MapToClient(u.GetMapObject()->pixelX_, u.GetMapObject()->pixelY_);
+      return true;
+    }
+    if (kind == "ui") { i += 2;  return UiToClient(i - 1 < a.size() ? a[i - 1] : "", p); }
+    if (!isdigit(uint8_t(kind[0])) && kind[0] != '-') return false;
+    *p = { num(i), num(i + 1) };
+    i += 2;
+    return true;
+  };
+  // Trailing words: button and modifiers.
+  int button = 0;  // 0 left, 1 right, 2 middle
+  bool mod[3] = {};  // shift, ctrl, alt
+  auto words = [&] {
+    for (size_t k = i; k < a.size(); ++k) {
+      if      (a[k] == "left")   button = 0;
+      else if (a[k] == "right")  button = 1;
+      else if (a[k] == "middle") button = 2;
+      else if (a[k] == "shift")  mod[0] = true;
+      else if (a[k] == "ctrl")   mod[1] = true;
+      else if (a[k] == "alt")    mod[2] = true;
+    }
+  };
+  const int modVk[3] = { VK_SHIFT, VK_CONTROL, VK_MENU };
+  bool pressedMod[3] = {};
+  auto holdMods = [&] {
+    for (int k = 0; k < 3; ++k) if (mod[k] && !g_in.keys[modVk[k]]) { KeyEvent(modVk[k], true);  pressedMod[k] = true; }
+  };
+  auto releaseMods = [&] { for (int k = 2; k >= 0; --k) if (pressedMod[k]) KeyEvent(modVk[k], false); };
+  static const UINT downMsg[3] = { WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN };
+  static const UINT upMsg[3]   = { WM_LBUTTONUP,   WM_RBUTTONUP,   WM_MBUTTONUP   };
+  static const int  btnVk[3]   = { VK_LBUTTON,     VK_RBUTTON,     VK_MBUTTON     };
+  auto press   = [&](POINT p) { g_in.keys[btnVk[button]] = 1;  SendMouse(downMsg[button], p); };
+  auto release = [&](POINT p) { g_in.keys[btnVk[button]] = 0;  SendMouse(upMsg[button], p); };
+  auto logAt = [&](POINT p) {
+    TPane* pane = PaneAt(p);
+    POINT m = {}, local = p;
+    if (pane) MapWindowPoints(g_gameFrame.hWnd_, pane->hWnd_, &local, 1);
+    const bool onMap = pane == &g_gameFrame.detailPane_ && PaneToMap(pane, local.x, local.y, &m);
+    Log("input: tick %d %s at (%ld,%ld): %s pane (%ld,%ld)%s", tick, c.verb.c_str(), p.x, p.y, PaneName(pane), local.x,
+        local.y, onMap ? (" map tile (" + std::to_string(m.x / 32 - PadTiles()) + "," + std::to_string(m.y / 32) +
+                          ") file").c_str() : "");
+  };
+
+  POINT p = g_in.pos, q;
+  const std::string& v = c.verb;
+  if (v == "mouse" || v == "click" || v == "rclick" || v == "mclick" || v == "dblclick" || v == "down" || v == "up") {
+    if (!pos(&p)) { Log("input: tick %d %s: bad position", tick, v.c_str());  return; }
+    words();
+    if (v == "rclick") button = 1;
+    if (v == "mclick") button = 2;
+    logAt(p);
+    holdMods();
+    SendMouse(WM_MOUSEMOVE, p);
+    if (v == "down" || v == "click" || v == "rclick" || v == "mclick" || v == "dblclick") press(p);
+    if (v == "up"   || v == "click" || v == "rclick" || v == "mclick" || v == "dblclick") release(p);
+    // No CS_DBLCLKS on the game's window classes (IWnd::RegisterClassA 0x4314D0 uses style 0x20), so Windows never sends
+    // WM_LBUTTONDBLCLK to them: a double click arrives as a second down/up pair.
+    if (v == "dblclick") { press(p);  release(p); }
+    releaseMods();
+  } else if (v == "drag") {
+    if (!pos(&p) || !pos(&q)) { Log("input: tick %d drag: bad position", tick);  return; }
+    words();
+    logAt(p);
+    logAt(q);
+    holdMods();
+    SendMouse(WM_MOUSEMOVE, p);
+    press(p);
+    for (int s = 1; s <= 4; ++s) SendMouse(WM_MOUSEMOVE, { p.x + (q.x - p.x) * s / 4, p.y + (q.y - p.y) * s / 4 });
+    release(q);
+    releaseMods();
+  } else if (v == "select") {
+    // A left click on the unit, centring the view on it first if it is off screen.
+    const Unit u = ScriptUnit(a.empty() ? "" : a[0]);
+    if (!u.IsLive()) { Log("input: tick %d select: no unit %s", tick, a.empty() ? "" : a[0].c_str());  return; }
+    p = MapToClient(u.GetMapObject()->pixelX_, u.GetMapObject()->pixelY_);
+    if (PaneAt(p) != &g_gameFrame.detailPane_) {
+      Player[0].CenterViewOn(u.GetLocation());
+      p = MapToClient(u.GetMapObject()->pixelX_, u.GetMapObject()->pixelY_);
+    }
+    logAt(p);
+    SendMouse(WM_MOUSEMOVE, p);
+    press(p);
+    release(p);
+  } else if (v == "key" || v == "keydown" || v == "keyup") {
+    for (const auto& s : a) {
+      KeySpec k;
+      if (!ParseKey(s, &k)) { Log("input: tick %d %s: unknown key %s", tick, v.c_str(), s.c_str());  continue; }
+      Log("input: tick %d %s %s (vk 0x%02x%s%s%s)", tick, v.c_str(), s.c_str(), k.vk, k.shift ? " shift" : "",
+          k.ctrl ? " ctrl" : "", k.alt ? " alt" : "");
+      if (v == "key") PressKey(k);
+      else KeyEvent(k.vk, v == "keydown");
+    }
+  } else if (v == "type") {
+    std::string text;
+    for (const auto& s : a) text += (text.empty() ? "" : " ") + s;
+    Log("input: tick %d type \"%s\"", tick, text.c_str());
+    for (char ch : text) {
+      KeySpec k;
+      if (ParseKey(std::string(1, ch), &k)) PressKey(k);
+    }
+  } else if (v == "uilist") {
+    LogUiControls();
+  }
 }
 
 void RunScriptCmd(const ScriptCmd& c, int tick) {
@@ -533,6 +979,7 @@ void RunScriptCmd(const ScriptCmd& c, int tick) {
     g_spawnType.push_back(type);
   }
   else if (c.verb == "view")         Player[0].CenterViewOn(loc(0));
+  else if (IsInputVerb(c.verb))      RunInputCmd(c, tick);
   else if (c.verb == "setcell") {
     const int pad = c.fileCoords ? PadTiles() : 0;
     for (int y = num(1); y <= num(3); ++y)
@@ -584,11 +1031,33 @@ void ParkCursor() {
   GetClientRect(hWnd, &client);
   Log("window %ldx%ld at %ld,%ld, client %ldx%ld", win.right - win.left, win.bottom - win.top, win.left, win.top,
       client.right, client.bottom);
-  // Park the cursor over the empty part of the side pane: outside the window or near an edge it would scroll the
-  // view (the game edge-scrolls on any cursor beyond the detail pane), over the map it would show tooltips.
-  POINT park = { client.right - 90, client.bottom / 2 };
-  ClientToScreen(hWnd, &park);
-  SetCursorPos(park.x, park.y);
+  // The game polls the cursor through the virtual GetCursorPos, which starts over the empty part of the side pane:
+  // outside the window or near an edge it would scroll the view (the game edge-scrolls on any cursor beyond the detail
+  // pane), over the map it would show tooltips. The real X pointer goes to the screen's corner, outside the window, so
+  // Wine sends the game no mouse messages of its own (over a pane they would show button tooltips, for example).
+  g_in.pos = { client.right - 90, client.bottom / 2 };
+  g_in.active = true;
+  SetCursorPos(GetSystemMetrics(SM_CXSCREEN) - 1, GetSystemMetrics(SM_CYSCREEN) - 1);
+  // Without a window manager the window is sometimes not yet active here (an X focus race). An inactive game ignores
+  // view changes until it is activated, so make it the active, focused window now.
+  const bool wasActive = g_tApp.AppActive() && GetFocus() == hWnd;
+  if (!wasActive) {
+    SetForegroundWindow(hWnd);
+    SetActiveWindow(hWnd);
+    SetFocus(hWnd);
+  }
+  if (g_inputUsed) {
+    Log("input: frame %p %s, now active %d paused %d focus %p, class style %lx", (void*)hWnd,
+        wasActive ? "was active" : "activated", g_tApp.AppActive(), g_tApp.AppPaused(), (void*)GetFocus(),
+        GetClassLongA(g_gameFrame.detailPane_.hWnd_, GCL_STYLE));
+    for (const IWnd* p : { (const IWnd*)&g_gameFrame.detailPane_, (const IWnd*)&g_gameFrame.miniMapPane_,
+                           (const IWnd*)&g_gameFrame.commandPane_ }) {
+      RECT rc;
+      GetClientRect(p->hWnd_, &rc);
+      const POINT o = PaneOrigin(*p);
+      Log("input: %s pane %p at (%ld,%ld) size %ldx%ld", PaneName(p), (void*)p->hWnd_, o.x, o.y, rc.right, rc.bottom);
+    }
+  }
 }
 
 // Whether to render after this cycle: frames are drawn for a few ticks ahead of any capture so the panes are current.
@@ -598,7 +1067,10 @@ bool WantDraw(int tick) {
   if (cfg.drawEvery > 0 && tick % cfg.drawEvery >= cfg.drawEvery - Lead) return true;
   if (cfg.shotEvery > 0 && (g_nextShot - tick <= Lead || (cfg.ticks > 0 && cfg.ticks - tick <= Lead))) return true;
   for (size_t i = g_scriptPos; i < g_script.size() && g_script[i].tick - tick <= Lead; ++i)
-    if (g_script[i].verb == "shot") return true;
+    if (g_script[i].verb == "shot" || IsInputVerb(g_script[i].verb)) return true;
+  // Keep the panes current around inputs: UI views and controls are laid out as they are drawn.
+  if (tick - g_lastInputTick <= Lead) return true;
+  for (int t : g_pendingShots) if (t - tick <= Lead) return true;
   return false;
 }
 
@@ -615,6 +1087,10 @@ void __fastcall GameCycleHook(GameImpl* self, void*) {
   }
   g_lastTick = tick;
 
+  for (size_t k = 0; k < g_pendingShots.size();) {
+    if (g_pendingShots[k] <= tick) { TakeShot(tick);  g_pendingShots.erase(g_pendingShots.begin() + k); }
+    else ++k;
+  }
   while (g_scriptPos < g_script.size() && g_script[g_scriptPos].tick <= tick) RunScriptCmd(g_script[g_scriptPos++], tick);
   if (cfg.turbo) SetDrawing(WantDraw(tick));
   if (g_botTick) g_botTick(tick);
@@ -706,6 +1182,9 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   if (cfg.turbo) { const uint8_t jmp = 0xEB;  WriteCode(OnIdleFrameLimiter, &jmp, 1); }
   memcpy(g_drawPanesCode, reinterpret_cast<void*>(OnIdleDrawPanes), 2);
   JumpTo(FnOP2MessageBox, reinterpret_cast<void*>(&MessageBoxHook));
+  g_realGetCursorPos     = reinterpret_cast<GetCursorPosFn>(PatchIat(IatGetCursorPos, reinterpret_cast<void*>(&VirtualGetCursorPos)));
+  g_realGetAsyncKeyState =
+    reinterpret_cast<GetAsyncKeyStateFn>(PatchIat(IatGetAsyncKeyState, reinterpret_cast<void*>(&VirtualGetAsyncKeyState)));
 
   if (!cfg.script.empty()) LoadScript(cfg.script);
   if (!cfg.bot.empty()) {

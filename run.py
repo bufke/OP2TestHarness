@@ -93,6 +93,8 @@ def scenario_script(scn: dict) -> str:
             lines.append(f"{tick} {cmd} {unit}")
         else:
             sys.exit(f"scenario: unsupported order {o}")
+    # Raw script lines (e.g. input verbs: "20 click tile 40 30"), still in file coordinates.
+    lines += scn.get("script", [])
     return "\n".join(lines) + "\n"
 
 
@@ -162,7 +164,8 @@ def main() -> int:
                     help="turbo: render every N ticks (default: only right before screenshots; 1 = always)")
     ap.add_argument("--seed", type=int, help="random number seed (default 1, or the scenario's seed)")
     ap.add_argument("--difficulty", type=int, default=1, choices=(0, 1, 2), help="0 easy, 1 normal, 2 hard")
-    ap.add_argument("--script", type=Path, help="scripted command file (see README)")
+    ap.add_argument("--script", type=Path,
+                    help="scripted command file (see README); with --scenario, appended to the scenario's script")
     ap.add_argument("--bot", type=Path, help="bot DLL exporting HarnessBotTick(int tick)")
     ap.add_argument("--size", default="1024x768", help="game client area WxH")
     ap.add_argument("--timeout", type=float, default=600, help="wall-clock seconds before the game is killed")
@@ -172,8 +175,6 @@ def main() -> int:
     scn = json.loads(args.scenario.read_text()) if args.scenario else None
     if bool(args.mission) == bool(scn):
         ap.error("give exactly one of --mission and --scenario")
-    if scn and args.script:
-        ap.error("--scenario generates the script; --script cannot be combined with it")
     if args.ticks is None:
         args.ticks = scn.get("ticks", 3000) if scn else 3000
     if args.seed is None:
@@ -192,8 +193,9 @@ def main() -> int:
     mission = args.mission
     if scn:
         mission = scenario_mission(scn.get("map", "cm01.map"))
+        extra = args.script.read_text() if args.script else ""  # --script lines run after the scenario's own.
         args.script = out / "scenario_script.txt"
-        args.script.write_text(scenario_script(scn))
+        args.script.write_text(scenario_script(scn) + extra)
         (out / "scenario.json").write_text(json.dumps(scn, indent=1) + "\n")
 
     xvfb, display = (None, args.display) if args.display else start_xvfb(width, height)
