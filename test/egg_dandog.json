@@ -1,0 +1,2 @@
+{"map": "cm01.map", "seed": 1, "ticks": 33400, "spawn": [], "orders": [],
+ "note": "Dan's Dog: run with EGG_MODE=dog and --bot harness/build/easter_bot.dll; the bot drops a meteor that lands at tick 32768 (notes/findings-easter-eggs.md)"}

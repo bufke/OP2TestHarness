@@ -1,0 +1,60 @@
+# Builds the harness op2ext module and installs it into the game's OPU folder.
+#   make            build build/harness.dll
+#   make install    copy it to OPU/Harness/ and register it (opt-in at runtime via OP2H_MISSION)
+#   make uninstall  remove it and its ini registration
+#   make check      end-to-end self-test (needs Xvfb and Wine; run outside the Claude sandbox)
+# Also builds the sample bot (build/sample_bot.dll), the easter egg bot (build/easter_bot.dll, see bots/easter_bot.cpp), the self-test mission (build/zHarnessEnd.dll) and the scenario
+# mission used by `run.sh --scenario` (build/zScenario.dll, installed next to harness.dll, not in OPU/maps).
+
+CXX      := i686-w64-mingw32-g++
+GAME_DIR := ../prefix/drive_c/GOG Games/Outpost 2
+OPU_DIR  := $(GAME_DIR)/OPU
+
+# Same TethysAPI/MinGW workarounds as missions/Makefile.
+CXXFLAGS := -std=c++17 -O2 -Wall -Wno-return-type -Wno-array-bounds \
+            -include src/mingw_compat.h \
+            '-DBEGIN_PACKED=_Pragma("pack(push, 1)")' '-DEND_PACKED=_Pragma("pack(pop)")' \
+            -isystem ../vendor/include
+LDFLAGS  := -shared -static -static-libgcc -static-libstdc++ -s -Wl,--kill-at -lgdi32
+
+all: build/harness.dll build/sample_bot.dll build/easter_bot.dll build/zHarnessEnd.dll build/zScenario.dll
+
+build/harness.dll: src/harness.cpp src/mingw_compat.h
+	@mkdir -p build
+	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
+
+build/%.dll: bots/%.cpp src/mingw_compat.h
+	@mkdir -p build
+	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
+
+build/zHarnessEnd.dll: test/EndTest.cpp src/mingw_compat.h
+	@mkdir -p build
+	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
+
+build/zScenario.dll: test/Scenario.cpp src/mingw_compat.h
+	@mkdir -p build
+	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
+
+install: all
+	mkdir -p "$(OPU_DIR)/Harness"
+	cp build/harness.dll build/zScenario.dll "$(OPU_DIR)/Harness/"
+	python3 tools/ini.py install "$(OPU_DIR)/outpost2.ini"
+
+uninstall:
+	python3 tools/ini.py uninstall "$(OPU_DIR)/outpost2.ini"
+	rm -rf "$(OPU_DIR)/Harness"
+
+# End-to-end self-test: run a mission that wins at tick 800 and check the harness saw it. The test mission is only
+# present in OPU/maps while the check runs, so it never shows up in the in-game colony list.
+check: install
+	mkdir -p "$(OPU_DIR)/maps/HarnessTest"
+	cp build/zHarnessEnd.dll "$(OPU_DIR)/maps/HarnessTest/"
+	./run.sh --mission zHarnessEnd.dll --ticks 3000 --screenshot-every 400 --timeout 120 --out build/check; \
+	  status=$$?; rm -rf "$(OPU_DIR)/maps/HarnessTest"; test $$status = 0
+	python3 -c "import json; s = json.load(open('build/check/summary.json')); \
+	  assert s['game_term_reason'] == 'MissionAccomplished' and s['screenshots'] == 4, s; print('check: OK')"
+
+clean:
+	rm -rf build
+
+.PHONY: all install uninstall check clean

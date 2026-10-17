@@ -1,0 +1,6 @@
+# Example command script for cHello.dll: <tick> <verb> <args...>. Unit IDs come from telemetry.jsonl.
+100  move     7 90 60      # Lynx 7 drives east
+110  telemetry
+400  shot
+3200 attack   8 11         # Lynx 8 engages raider 11
+3210 telemetry
