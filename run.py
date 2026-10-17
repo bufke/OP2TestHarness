@@ -167,16 +167,20 @@ def main() -> int:
     ap.add_argument("--ticks", type=int, help="stop after this game tick (100 ticks = 1 mark); 0 = never. "
                     "Default 3000, or the scenario's ticks")
     ap.add_argument("--screenshot-every", type=int, default=0, metavar="N", help="screenshot every N ticks (0 = off)")
-    ap.add_argument("--telemetry-every", type=int, default=100, metavar="N", help="telemetry every N ticks (0 = off)")
+    ap.add_argument("--telemetry-every", type=int, metavar="N",
+                    help="telemetry every N ticks (0 = off); default 100, or the scenario's telemetryEvery")
     ap.add_argument("--trace-every", type=int, metavar="N",
                     help="trace.jsonl (sub-tile positions) every N ticks; default 1 with --scenario, else 0 (off)")
     ap.add_argument("--trace-raw", action="store_true", help="add raw MapObject/PathContext bytes to trace lines")
+    ap.add_argument("--eco", action="store_true",
+                    help="economy telemetry: colony state per player, building/vehicle internals (also scenario \"eco\")")
     ap.add_argument("--speed", type=int, default=10, help="in-game speed setting 1-10 (only matters with --no-turbo)")
     ap.add_argument("--no-turbo", action="store_true", help="keep the game's frame limiter (real-time at --speed)")
     ap.add_argument("--draw-every", type=int, default=0, metavar="N",
                     help="turbo: render every N ticks (default: only right before screenshots; 1 = always)")
     ap.add_argument("--seed", type=int, help="random number seed (default 1, or the scenario's seed)")
-    ap.add_argument("--difficulty", type=int, default=1, choices=(0, 1, 2), help="0 easy, 1 normal, 2 hard")
+    ap.add_argument("--difficulty", type=int, choices=(0, 1, 2),
+                    help="0 easy, 1 normal, 2 hard (default 1, or the scenario's difficulty)")
     ap.add_argument("--script", type=Path,
                     help="scripted command file (see README); with --scenario, appended to the scenario's script")
     ap.add_argument("--bot", type=Path, help="bot DLL exporting HarnessBotTick(int tick)")
@@ -193,7 +197,12 @@ def main() -> int:
     if args.seed is None:
         args.seed = scn.get("seed", 1) if scn else 1
     if args.trace_every is None:
-        args.trace_every = 1 if scn else 0
+        args.trace_every = scn.get("traceEvery", 1) if scn else 0
+    if args.telemetry_every is None:
+        args.telemetry_every = scn.get("telemetryEvery", 100) if scn else 100
+    if args.difficulty is None:
+        args.difficulty = scn.get("difficulty", 1) if scn else 1
+    args.eco = args.eco or bool(scn and scn.get("eco"))
 
     sync_missions_from_play_prefix()
     check_installed()
@@ -223,6 +232,7 @@ def main() -> int:
                OP2H_MISSION=mission,
                OP2H_TRACE_EVERY=str(args.trace_every),
                OP2H_TRACE_RAW="1" if args.trace_raw else "0",
+               OP2H_ECO="1" if args.eco else "0",
                OP2H_OUT=win_path(out),
                OP2H_TICKS=str(args.ticks),
                OP2H_SHOT_EVERY=str(args.screenshot_every),

@@ -165,6 +165,32 @@ How it works, and what is deterministic:
 - Don't pause the game (`ctrl+p`, `pause`): no cycles run while paused, so the script can't unpause it and the run
   ends at `--timeout`.
 
+## Economy verbs and telemetry (`--eco`)
+
+Script verbs for colony experiments (oracle scenarios `eco_*`, spec in `oracle/ECONOMY.md`):
+
+```
+1    player   0 workers 40          # set a PlayerImpl field: workers scientists kids food common rare morale
+                                    # moraleLevel solarsat, or a byte offset (0x94); sets recalculateValues_
+0    tube     44 47 69 47           # tubes over an inclusive rectangle (Game::CreateWall); `wall x1 y1 x2 y2 [TYPE]`
+0    beacon   40 60 0 1 2           # mining beacon: ore 0 common / 1 rare, bar 0-2 (0 = 3-bar), internal variant 0-2
+0    beacon   44 60 vent            # magma vent (`fumarole` for a fumarole)
+5    route    @3 @1 @2              # cargo truck @3 on a mine (@1) <-> smelter (@2) route, as the UI sends it
+5    produce  @4 CARGO_TRUCK        # factory order (TYPE [weapon]); `idle`/`unidle <bldg>`, `train <university> <n>`
+5    kit      @5 TOKAMAK            # put a structure kit in a ConVec; `build <convec> <x> <y>` (footprint bottom-right)
+5    bay      @4 0 TOKAMAK          # fill a factory bay; `transfercargo <factory> <bay>`
+5    cargo    @3 2 1000             # set a truck's cargo (CargoType, amount); `load`/`unload <truck>`
+5    poke     @2 0x1e 2 1200        # write a MapObject field (offset, size 1/2/4, value), e.g. damage
+```
+
+`--eco` (or `"eco": true` in a scenario) adds to each telemetry player an `eco` object (storage limits, available and
+required workers/scientists, scientists working as workers, food production/consumption, growth and death remainders,
+capacities, morale inputs) and `pi`, every dword of PlayerImpl 0x00..0x1EF; and to each unit `flags` (MapObject +0x44),
+`act`/`timer` (action and its timer), `busy`, `w24` (the cargo/researchTimer word) and `raw` (bytes 0x48..0x7F), plus
+`truck` [cargo type, amount] for Cargo Trucks. `gamedata.json` gets `morale` (levels and modifiers as loaded), `mines`
+(the yield table) and `typeExtra` ([mapId, resource priority, research topic]). Scenarios may also set
+`telemetryEvery`, `traceEvery` and `difficulty`. Runs without `--eco` produce the same output as before.
+
 ## Scenarios (`--scenario`): oracle runs of the original game
 
 `--scenario FILE` runs a scenario in the ENGINE_PLAN.md format against the real game, so op2-sim can be compared with

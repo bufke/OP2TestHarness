@@ -166,6 +166,10 @@ const char* TypeName(MapID id) {
   return t ? t->GetCodeName() : "?";
 }
 
+bool g_eco = false;  // OP2H_ECO: economy telemetry (player colony state, building/vehicle internals). See ECONOMY.md.
+const char* ActionName(int a);
+void Hex(FILE* f, const void* p, size_t n);
+
 void WriteUnit(FILE* f, bool& first, Unit u) {
   if (!u.IsLive()) return;
   const auto loc = u.GetLocation();
@@ -174,8 +178,46 @@ void WriteUnit(FILE* f, bool& first, Unit u) {
           u.GetMaxHitpoints() - u.GetDamage(), u.GetMaxHitpoints(), CommandName(int(u.GetCommand())));
   if (const MapID w = u.GetWeapon(); u.IsVehicle() && w != MapID::None && int(w) > 0)
     fprintf(f, ",\"cargo\":\"%s\"", TypeName(w));
+  if (g_eco) {
+    // flags_ (MoFlagBld*: 0x1 active, 0x2000 power, 0x4000 workers, 0x8000 scientists, 0x40000 infected, 0x80000
+    // EMPed), action and its timer, the 16-bit cargo/researchTimer word (+0x24), and the subclass bytes 0x48..0x7F.
+    const MapObject* mo = u.GetMapObject();
+    const uint8_t* b = reinterpret_cast<const uint8_t*>(mo);
+    fprintf(f, ",\"flags\":%u,\"act\":\"%s\",\"timer\":%d,\"busy\":%d,\"w24\":%u,\"raw\":\"", unsigned(mo->flags_),
+            ActionName(int(mo->action_)), mo->actionTimer_, mo->isBusy_, unsigned(*reinterpret_cast<const uint16_t*>(b + 0x24)));
+    Hex(f, b + 0x48, 0x38);
+    fputc('"', f);
+    if (u.IsVehicle() && u.GetType() == MapID::CargoTruck)
+      fprintf(f, ",\"truck\":[%d,%d]", int(mo->truckCargoType_), int(mo->truckCargoAmount_));
+  }
   fputc('}', f);
   first = false;
+}
+
+// Economy telemetry per player: named PlayerImpl fields (offsets in harness/oracle/ECONOMY.md) plus every dword of
+// PlayerImpl 0x00..0x1EF as `pi`, so fields can be read by offset.
+void WritePlayerEco(FILE* f, const PlayerImpl* p) {
+  const auto& m = p->moraleState_;
+  fprintf(f, ",\"eco\":{\"maxCommon\":%d,\"maxRare\":%d,\"maxFood\":%d,\"availWorkers\":%d,\"availScientists\":%d,"
+             "\"workersReq\":%d,\"scientistsReq\":%d,\"sciAsWorkers\":%d,\"sciResearching\":%d,\"powerAvail\":%d,"
+             "\"powerInactive\":%d,\"foodProd\":%d,\"foodCons\":%d,\"foodLacking\":%d,\"active\":%d,\"unpowered\":%d,"
+             "\"recalc\":%d,\"starveCase\":%d,\"growth\":[%d,%d,%d],\"death\":[%d,%d,%d],\"caps\":[%d,%d,%d,%d],"
+             "\"activeCC\":%d,\"nurseries\":%d,\"universities\":%d,\"moraleEvent\":%d,\"morale08\":%d,\"morale10\":%d,"
+             "\"resDemand\":%d,\"foodSupply\":%d,\"disabledRatio\":%d,\"recForumDemand\":%d,\"morale24\":%d,"
+             "\"medDemand\":%d,\"unoccupied\":%d,\"sciAsWorkersPct\":%d,\"rcc\":%d},\"pi\":[",
+          p->maxCommonOre_, p->maxRareOre_, p->maxFood_, p->numAvailableWorkers_, p->numAvailableScientists_,
+          p->numWorkersRequired_, p->numScientistsRequired_, p->numScientistsAsWorkers_, p->numScientistsResearching_,
+          p->amountPowerAvailable_, p->inactivePowerCapacity_, p->totalFoodProduction_, p->totalFoodConsumption_,
+          p->foodLacking_, p->numActiveBuildings_, p->numUnpoweredStructures_, p->recalculateValues_, p->starvationCase_,
+          p->kidGrowthRemainder_, p->workerGrowthRemainder_, p->scientistGrowthRemainder_, p->kidDeathRemainder_,
+          p->workerDeathRemainder_, p->scientistDeathRemainder_, p->totalResidenceCapacity_, p->totalMedCenterCapacity_,
+          p->totalRecFacilityCapacity_, p->totalForumCapacity_, p->numActiveCommandCenters_, p->numActiveNurseries_,
+          p->numActiveUniversities_, m.eventMoraleModifier, m.field_08, m.field_10, m.residenceDemandPercent,
+          int(m.foodSupply), m.disabledBuildingRatio, m.recForumDemandPercent, m.field_24, m.medCenterDemandPercent,
+          m.unoccupiedColonistsPercent, m.scientistsAsWorkersPercent, p->rccOperational_);
+  const int* d = reinterpret_cast<const int*>(p);
+  for (int k = 0; k < 0x1F0 / 4; ++k) fprintf(f, "%s%d", k ? "," : "", d[k]);
+  fputc(']', f);
 }
 
 int g_lastTelemTick = -1;
@@ -201,7 +243,9 @@ void WriteTelemetry(int tick) {
     for (int t = 0; t < g_research.numTechs_; ++t) {
       if (g_research.HasTech(i, t)) { fprintf(f, "%s%d", first ? "" : ",", g_research.ppTechInfos_[t]->techID);  first = false; }
     }
-    fputs("]}", f);
+    fputc(']', f);
+    if (g_eco) WritePlayerEco(f, p);
+    fputc('}', f);
   }
   fputs("],\"units\":[", f);
   bool first = true;
@@ -391,6 +435,44 @@ void WriteTrace(int tick) {
   fflush(f);
 }
 
+// Economy tables as loaded (eco runs only): the morale levels (MoraleManager 0x565280: name, M_PTS_TOT, then the
+// power/research/factory/food bonuses in 1/256 and the defect/fertility/death rates), the derived maxima at +0xF0..
+// +0x104, every morale modifier (0x4E1F10: name, value, percent flag), the mine yield table (MineManager 0x5651A0),
+// and per unit type the resource priority (+0x2A0, the building list order) and research topic (+0x1E4).
+void WriteEcoData(FILE* f) {
+  const uint8_t* mm = reinterpret_cast<const uint8_t*>(0x565280);
+  fputs(",\n\"morale\":{\"levels\":[", f);
+  for (int k = 0; k < 5; ++k) {
+    const uint8_t* row = mm + k * 0x30;
+    char name[16] = {};
+    memcpy(name, row, 15);
+    fprintf(f, "%s{\"name\":\"%s\",\"v\":[", k ? "," : "", name);
+    for (int j = 0; j < 8; ++j) fprintf(f, "%s%d", j ? "," : "", reinterpret_cast<const int*>(row + 0x10)[j]);
+    fputs("]}", f);
+  }
+  fputs("],\"maxima\":[", f);
+  for (int j = 0; j < 6; ++j) fprintf(f, "%s%d", j ? "," : "", reinterpret_cast<const int*>(mm + 0xF0)[j]);
+  fputs("],\"modifiers\":[", f);
+  struct Mod { const char* name;  int value;  int pct; };
+  const Mod* mods = reinterpret_cast<const Mod*>(0x4E1F10);
+  for (int k = 0; k < 0x43; ++k)
+    fprintf(f, "%s[\"%s\",%d,%d]", k ? "," : "", mods[k].name ? mods[k].name : "", mods[k].value, mods[k].pct);
+  fputs("]},\n\"mines\":[", f);
+  const int* mine = reinterpret_cast<const int*>(0x5651A0);
+  for (int k = 0; k < 9; ++k)
+    fprintf(f, "%s{\"variant\":%d,\"bar\":%d,\"trucks\":[%d,%d,%d],\"yield\":[%d,%d,%d]}", k ? "," : "", k / 3, k % 3,
+            mine[k * 3], mine[k * 3 + 1], mine[k * 3 + 2], mine[27 + k * 3], mine[27 + k * 3 + 1], mine[27 + k * 3 + 2]);
+  fputs("],\n\"typeExtra\":[", f);
+  bool first = true;
+  for (size_t i = 1; i < MapObjectManager::NumMapObjTypes(); ++i) {
+    const uint8_t* t = reinterpret_cast<const uint8_t*>(MapObjectType::GetInstance(int(i)));
+    if (!t) continue;
+    fprintf(f, "%s[%u,%d,%d]", first ? "" : ",", unsigned(i), t[0x2A0], *reinterpret_cast<const int*>(t + 0x1E4));
+    first = false;
+  }
+  fputc(']', f);
+}
+
 // Game constants the engine reimplements: map geometry, cell type speed table, and unit type stats, as loaded by the
 // game (sheets + patches), written once at the first game cycle.
 void WriteGameData(const char* path) {
@@ -438,8 +520,10 @@ void WriteGameData(const char* path) {
     fputc('}', f);
     first = false;
   }
+  fputc(']', f);
+  if (g_eco) WriteEcoData(f);
   // Cell type of every map tile in file coordinates (row-major), to check the coordinate conversion against the .map.
-  fputs("],\n\"cells\":[", f);
+  fputs(",\n\"cells\":[", f);
   for (int y = 0; y < GameMap::GetHeight(); ++y)
     for (int x = 0; x < GameMap::GetWidth(); ++x)
       fprintf(f, "%s%d", (x | y) ? "," : "", int(GameMap::GetCellType(Location(x + PadTiles(), y))));
@@ -959,6 +1043,96 @@ void RunInputCmd(const ScriptCmd& c, int tick) {
   }
 }
 
+// Economy verbs (README "Economy verbs"):
+//   player <p> <field> <value>        set a PlayerImpl field: workers scientists kids food common rare morale
+//                                     moraleLevel solarsat, or a byte offset (0x94); marks colony values for recalculation
+//   poke <unit> <offset> <1|2|4> <value>   write a MapObject field (e.g. damage at 0x1E)
+//   beacon <x> <y> <ore 0|1> <bar 0-2> <variant 0-2> | beacon <x> <y> vent|fumarole
+//   route <truck> <mine> <smelter>    cargo route (ctMoCargoRoute), as the UI builds it
+//   produce <factory> <TYPE> [weapon] | idle <bldg> | unidle <bldg> | train <university> <n>
+//   kit <convec> <TYPE> [weapon]      put a structure kit in a ConVec
+//   build <convec> <x> <y>            ctMoBuild: the bottom-right tile of the structure's footprint
+//   bay <factory> <bay> <TYPE> [weapon] | transfercargo <factory> <bay>
+//   cargo <truck> <type 0-10> <amount> | load <truck> | unload <truck>
+bool RunEcoCmd(const ScriptCmd& c, int tick) {
+  auto arg = [&](size_t i) -> std::string { return i < c.args.size() ? c.args[i] : std::string(); };
+  auto num = [&](size_t i) { return int(strtol(arg(i).c_str(), nullptr, 0)); };
+  auto loc = [&](size_t i) { return Location(num(i) + (c.fileCoords ? PadTiles() : 0), num(i + 1)); };
+  const std::string& v = c.verb;
+  if (v == "tube" || v == "wall") {  // tube|wall x1 y1 x2 y2 [TYPE]: Game::CreateWall over the inclusive rectangle
+    const Location a = loc(0), b = loc(2);
+    const MapID type = v == "tube" ? MapID::Tube : (c.args.size() > 4 ? TypeByName(arg(4)) : MapID::Wall);
+    for (int y = a.y; y <= b.y; ++y)
+      for (int x = a.x; x <= b.x; ++x) Game::CreateWall(type, Location(x, y));
+    return true;
+  }
+  if (v == "player") {
+    PlayerImpl* p = g_gameImpl.GetPlayer(num(0));
+    static const std::pair<const char*, int> fields[] = {
+      {"food", 0x10}, {"common", 0x20}, {"rare", 0x24}, {"moraleLevel", 0x34}, {"morale", 0x40}, {"workers", 0x94},
+      {"scientists", 0x98}, {"kids", 0x9C}, {"solarsat", 0xEC} };
+    int off = -1;
+    for (const auto& [n, o] : fields) if (arg(1) == n) off = o;
+    if (off < 0 && isdigit(uint8_t(arg(1)[0]))) off = num(1);
+    if (!p || off < 0 || off >= int(sizeof(PlayerImpl))) { Log("script: player: bad field %s", arg(1).c_str());  return true; }
+    if (arg(1) == "solarsat") p->satellites_.numSolarSatellites = num(2);
+    else *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(p) + off) = num(2);
+    p->recalculateValues_ = 1;
+    return true;
+  }
+  Unit u = ScriptUnit(arg(0));
+  if (v == "poke") {
+    if (!u.IsLive()) return true;
+    uint8_t* b = reinterpret_cast<uint8_t*>(u.GetMapObject()) + num(1);
+    const int size = num(2), value = num(3);
+    if (size == 1) *b = uint8_t(value); else if (size == 2) *reinterpret_cast<uint16_t*>(b) = uint16_t(value);
+    else *reinterpret_cast<int*>(b) = value;
+    return true;
+  }
+  if (v == "beacon") {
+    // Game::CreateMine's internal call (0x478940), with the internal variant number, so no random draw is made.
+    const Location at = loc(0);
+    const std::string kind = arg(2);
+    const MapID type = kind == "vent" ? MapID::MagmaVent : kind == "fumarole" ? MapID::Fumarole : MapID::MiningBeacon;
+    const int mineType = kind == "vent" ? -2 : kind == "fumarole" ? -3 : num(2);
+    const ibool ok = OP2Thunk<0x478940, ibool FASTCALL(MapID, int, int, int, int, int)>(
+      type, at.x, at.y, mineType, type == MapID::MiningBeacon ? num(3) : 0, type == MapID::MiningBeacon ? num(4) : 0);
+    Log("beacon %s at (%d,%d): %d", kind.c_str(), at.x, at.y, ok);
+    return true;
+  }
+  if (v == "route") {
+    const Unit mine = ScriptUnit(arg(1)), smelter = ScriptUnit(arg(2));
+    if (!u.IsLive() || !mine.IsLive() || !smelter.IsLive()) return true;
+    CommandPacket packet = { CommandType::CargoRoute, sizeof(CargoRouteCommand) };
+    auto& r = packet.data.cargoRoute;
+    r.numUnits = 1;
+    r.unitID[0] = uint16(u.GetID());
+    r.numWaypoints = 3;
+    r.waypoint[0] = mine.GetDockLocation().AsWaypoint();
+    r.waypoint[1] = smelter.GetDockLocation().AsWaypoint();
+    r.waypoint[2] = mine.GetDockLocation().AsWaypoint();
+    r.mineWaypointIndex = 0;
+    r.smelterWaypointIndex = 1;
+    r.mineUnitId = uint16(mine.GetID());
+    r.smelterUnitId = uint16(smelter.GetID());
+    g_gameImpl.GetPlayer(u.GetOwner())->ProcessCommandPacket(packet);
+    return true;
+  }
+  if (v == "produce")  { if (u.IsLive()) u.DoProduce(TypeByName(arg(1)), TypeByName(arg(2)), 0xFFFF, false);  return true; }
+  if (v == "idle")     { u.DoIdle();  return true; }
+  if (v == "unidle")   { u.DoUnidle();  return true; }
+  if (v == "train")    { u.DoTrainScientists(num(1));  return true; }
+  if (v == "load")     { u.DoLoadCargo();  return true; }
+  if (v == "unload")   { u.DoUnloadCargo();  return true; }
+  if (v == "kit")      { if (u.IsLive()) u.SetCargo(TypeByName(arg(1)), TypeByName(arg(2)));  return true; }
+  if (v == "cargo")    { if (u.IsLive()) u.SetCargo(CargoType(num(1)), num(2));  return true; }
+  if (v == "bay")      { if (u.IsLive()) u.SetFactoryCargo(num(1), TypeByName(arg(2)), TypeByName(arg(3)));  return true; }
+  if (v == "transfercargo") { if (u.IsLive()) u.DoTransferCargo(num(1));  return true; }
+  if (v == "build")    { if (u.IsLive()) u.DoBuild(loc(1));  return true; }
+  (void)tick;
+  return false;
+}
+
 void RunScriptCmd(const ScriptCmd& c, int tick) {
   auto arg = [&](size_t i) -> std::string { return i < c.args.size() ? c.args[i] : std::string(); };
   auto num = [&](size_t i) { return atoi(arg(i).c_str()); };
@@ -1004,7 +1178,7 @@ void RunScriptCmd(const ScriptCmd& c, int tick) {
     for (int y = num(1); y <= num(3); ++y)
       for (int x = num(0); x <= num(2); ++x) GameMap::SetCellType(Location(x + pad, y), CellType(num(4)));
   }
-  else Log("script: unknown verb %s", c.verb.c_str());
+  else if (!RunEcoCmd(c, tick)) Log("script: unknown verb %s", c.verb.c_str());
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1173,6 +1347,7 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   cfg.drawEvery  = EnvInt("OP2H_DRAW_EVERY", 0);
   cfg.traceEvery = EnvInt("OP2H_TRACE_EVERY", 0);
   g_traceRaw     = EnvInt("OP2H_TRACE_RAW", 0) != 0;
+  g_eco          = EnvInt("OP2H_ECO", 0) != 0;
   cfg.width      = EnvInt("OP2H_WIDTH", 1024);
   cfg.height     = EnvInt("OP2H_HEIGHT", 768);
 
