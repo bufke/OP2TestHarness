@@ -55,8 +55,12 @@ CELL_TYPES = ["FastPassible1", "Impassible2", "SlowPassible1", "SlowPassible2", 
 MAPNAME_MARKER = b"@@OP2H_MAPNAME_SLOT@@"
 
 
-def scenario_mission(map_name: str) -> str:
-    """Returns the mission name (relative to the game folder) of zScenario.dll patched to load `map_name`."""
+TECHTREE_DEFAULT = b"multitek.txt\0"
+
+
+def scenario_mission(map_name: str, techtree: str = "multitek.txt") -> str:
+    """Returns the mission name (relative to the game folder) of zScenario.dll patched to load `map_name`, and the tech
+    tree `techtree` (its TechtreeName export, 13 bytes: `edentek.txt` and `ply_tek.txt` fit)."""
     src = OPU_DIR / "Harness" / "zScenario.dll"
     if not src.exists():
         sys.exit("scenario mission not installed: run `make -C harness install`")
@@ -69,6 +73,13 @@ def scenario_mission(map_name: str) -> str:
         sys.exit(f"map name too long for the mission's MapName: {map_name}")
     data[at:at + 64] = name + bytes(64 - len(name))
     stem = Path(map_name).stem.lower()
+    if techtree.lower() != "multitek.txt":
+        tree = techtree.encode("ascii")
+        at = data.find(TECHTREE_DEFAULT)
+        if at < 0 or data.count(TECHTREE_DEFAULT) != 1 or len(tree) > 12:
+            sys.exit(f"can't patch the scenario mission's tech tree to {techtree}")
+        data[at:at + 13] = tree + bytes(13 - len(tree))
+        stem = f"{stem}_{Path(techtree).stem.lower()}"
     # GameStartInfo::scriptName holds 31 chars + NUL: "OPU\\Harness\\" + "zs_" + up to 12 + ".dll".
     if len(stem) > 12 or not re.fullmatch(r"[a-z0-9_-]+", stem):
         stem = format(zlib.crc32(map_name.encode()), "08x")
@@ -238,7 +249,7 @@ def main() -> int:
         old.unlink(missing_ok=True)
     mission = args.mission
     if scn:
-        mission = scenario_mission(scn.get("map", "cm01.map"))
+        mission = scenario_mission(scn.get("map", "cm01.map"), scn.get("techtree", "multitek.txt"))
         extra = args.script.read_text() if args.script else ""  # --script lines run after the scenario's own.
         args.script = out / "scenario_script.txt"
         args.script.write_text(scenario_script(scn) + extra)

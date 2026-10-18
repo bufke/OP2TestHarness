@@ -79,7 +79,8 @@ The exit status is 0 when the run reached its tick limit or the mission ended.
     without its dock, a moving vehicle's next tile).
   - A spawn is listed until it dies (the dead flag), and never again: the game recycles object indices, so a dead
     spawn's ID can later belong to a shot or an explosion.
-  - Armed units add `weapon`, `tur`, `reload`, `tgt` (ENGINE_PLAN.md). Top level: `fx` (weapon fire of spawned
+  - Armed units add `weapon`, `tur`, `reload`, `tgt` (ENGINE_PLAN.md). A unit under a weapon status effect adds
+    `status`: its [EMP, stickyfoam, ESG] timers (+0x56, +0x54, +0x58, in 8-tick phases; 0 for an effect that is off). Top level: `fx` (weapon fire of spawned
     units, with `timer`), `ents` (every other live object as `[index, type, action, timer, px, py]`: explosions,
     unspawned units), `alloc` (the object index allocator, 0x439A10: highest index so far and the ring of freed
     objects as `[index, tick freed, reference count]`), `rng` (the gameplay RNG).
@@ -188,6 +189,7 @@ Script verbs for colony experiments (oracle scenarios `eco_*`, spec in `oracle/E
 5    bay      @4 0 TOKAMAK          # fill a factory bay; `transfercargo <factory> <bay>`
 5    cargo    @3 2 1000             # set a truck's cargo (CargoType, amount); `load`/`unload <truck>`
 5    poke     @2 0x1e 2 1200        # write a MapObject field (offset, size 1/2/4, value), e.g. damage
+10   tech     0 5317                # _Player::MarkResearchComplete(techID) for player 0, as a mission grants a topic
 ```
 
 `--eco` (or `"eco": true` in a scenario) adds to each telemetry player an `eco` object (storage limits, available and
@@ -215,6 +217,8 @@ it:
   `tile`), Guard (`target`), Lights (`on`), StandGround or Patrol (`tile`, or `waypoints` as `[x, y]` / `[x, y, range]`;
   Patrol also `loop`), Stop or SelfDestruct. Move takes `waypoints` too.
   `view` (optional tile, default the spawns' centroid) centres the camera for screenshots.
+  `techtree` (optional, default `multitek.txt`) is the tech tree the scenario mission loads (run.py patches its
+  TechtreeName; up to 12 characters, e.g. `edentek.txt`).
   `setcell` (optional) repaints cell types before spawning (`cell` is a CellType id or name). An older `cells` key is
   read too. Unknown keys such as `note` are ignored.
 - run.py turns the scenario into a script (`scenario_script.txt` in the output) and runs the scenario mission

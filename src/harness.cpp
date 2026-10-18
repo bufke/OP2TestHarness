@@ -342,6 +342,18 @@ void WriteTraceUnit(FILE* f, bool& first, Unit u, int spawnIndex) {
     else if (thi == 0xFFFF) fprintf(f, "%d", int(tlo));
     else                    fprintf(f, "[%d,%d]", int(int16_t(tlo)) - PadTiles(), int(int16_t(thi)));
   }
+  // Weapon status effects, only while one is on: [EMP, stickyfoam, ESG] timers (+0x56, +0x54, +0x58; the game counts
+  // them down once per 8-tick phase, 0x43DF7A), each 0 unless its flag (MoFlagEMPed, MoFlagVecStickyfoamed, MoFlagESGed)
+  // is set. Buildings keep only the EMP timer (bit 18 is MoFlagBldInfected on them).
+  {
+    const uint32_t fl = mo->flags_;
+    const uint8_t* b = reinterpret_cast<const uint8_t*>(mo);
+    const bool veh = u.IsVehicle();
+    const bool emp = fl & MoFlagEMPed, foam = veh && (fl & MoFlagVecStickyfoamed), esg = veh && (fl & MoFlagESGed);
+    if (emp || foam || esg)
+      fprintf(f, ",\"status\":[%d,%d,%d]", emp ? *reinterpret_cast<const uint16_t*>(b + 0x56) : 0,
+              foam ? *reinterpret_cast<const uint16_t*>(b + 0x54) : 0, esg ? *reinterpret_cast<const uint16_t*>(b + 0x58) : 0);
+  }
   // Tiles that hold this unit's index (TileData::unitIndex) within 3 tiles of its pixel, file coordinates: a moving
   // vehicle's reserved tile, a building's footprint.
   fputs(",\"tiles\":[", f);
@@ -375,9 +387,14 @@ void WriteTraceFx(FILE* f) {
     int spawn = -1;
     for (size_t k = 0; k < g_spawned.size(); ++k) if (g_spawned[k] == ce->parentIndex_) spawn = int(k);
     if (spawn < 0) continue;
-    fprintf(f, "%s{\"id\":%d,\"type\":\"%s\",\"parent\":%d,\"action\":\"%s\",\"dir\":%d,\"px\":%d,\"py\":%d,\"timer\":%d}",
+    fprintf(f, "%s{\"id\":%d,\"type\":\"%s\",\"parent\":%d,\"action\":\"%s\",\"dir\":%d,\"px\":%d,\"py\":%d,\"timer\":%d",
             first ? "" : ",", int(i), TypeName(mo->GetTypeID()), spawn, ActionName(int(mo->action_)), mo->rotation_,
             mo->pixelX_ - PadTiles() * 32, mo->pixelY_, mo->actionTimer_);
+    // An armed ESG field (flag 0x8000, set by its first DoEvent after landing, 0x481120): the mines left, a bit each
+    // (+0x6E, 13 bits).
+    if (mo->GetTypeID() == MapID::ESG && (mo->flags_ & 0x8000))
+      fprintf(f, ",\"mines\":%d", int(*reinterpret_cast<const uint16_t*>(reinterpret_cast<const uint8_t*>(mo) + 0x6E)));
+    fputc('}', f);
     first = false;
   }
   fputc(']', f);
@@ -1122,6 +1139,10 @@ bool RunEcoCmd(const ScriptCmd& c, int tick) {
     if (IsBadWritePtr(b, size)) { Log("script: mem: bad address %s", arg(0).c_str());  return true; }
     if (size == 1) *b = uint8_t(value); else if (size == 2) *reinterpret_cast<uint16_t*>(b) = uint16_t(value);
     else *reinterpret_cast<int*>(b) = value;
+    return true;
+  }
+  if (v == "tech") {  // tech <player> <techID>: _Player::MarkResearchComplete (0x477510), as a mission DLL grants one
+    Player[num(0)].MarkResearchComplete(num(1));
     return true;
   }
   if (v == "player") {
