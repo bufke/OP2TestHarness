@@ -1409,6 +1409,209 @@ void RunScriptCmd(const ScriptCmd& c, int tick) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Audio log (OP2H_AUDIO, `run.sh --audio`): every sound the game asks for, as `audio.jsonl` (README "Audio log").
+// The game's own sound calls are hooked at their entry, so requests are logged whether or not sound is on:
+//   AddMapSound (SoundManager 0x47EDB0, thiscall x, y, soundID; x = -1 for a sound without a position): every effect;
+//   AddGameSound (0x47EFD0, thiscall soundID, player flag): a sound without a position, through AddMapSound;
+//   AddSavantSound (0x47F010, thiscall soundID, x, y, player flag): a Savant line for the queue (0x47F050, priority
+//   byte 0x56E7D0[id - 0x5E]);
+//   AddMessage (MessageLog 0x439070, thiscall x, y, text, soundID): a status message, with its throttle verdict from
+//   0x439590 (Savant ids 0x60..0xB1 are dropped, message and all, while a recent one of their group stands).
+// The Savant queue is drained by SoundManager's per-frame update (0x47E9F0 -> 0x47F200: next line when the clock passes
+// the last line's length + 750 ms), which only runs with sound on; the harness calls 0x47F200 itself on the same
+// ticks (tick & 3 == 2) and logs what it starts as `play`. The throttle and the queue use timeGetTime: their call sites
+// read a virtual clock instead, tick * 1000 / 36 ms (real time at speed 10), so the run is deterministic.
+// The music playlist (MusicManager 0x565390: +0xC4 count, +0xC8 repeat index, +0xCC song list, +0xD0 position) is
+// logged when it changes.
+
+FILE* g_audio = nullptr;
+bool  g_inPump = false;
+int64_t Now();
+int64_t Frequency();
+constexpr uint32_t VirtualClockBase = 100000000;  // A machine up for a day: no throttle slot looks recent at start.
+DWORD WINAPI VirtualTimeGetTime() { return VirtualClockBase + DWORD(int64_t(g_gameImpl.tick_) * 1000 / 36); }
+void* g_virtualClock = reinterpret_cast<void*>(&VirtualTimeGetTime);  // The `call [ptr]` sites point here.
+
+const char* SoundName(int id) {
+  const auto* names = reinterpret_cast<const char* const*>(0x4E0170);  // SoundManager's file names, by SoundID.
+  if (id == 0) return "";  // A message without a sound (AddMessage plays beep8 for it).
+  return (id > 0 && id < 0xFA && names[id]) ? names[id] : "?";
+}
+
+// Internal pixel -> file pixel (x); -1 stays -1 (no position).
+int FileX(int x) { return x == -1 ? -1 : x - PadTiles() * 32; }
+
+// `at` is the return address in Outpost2.exe of the call that asked for the sound, or "opu" for code outside it (OPU
+// replaces some of the game's message code; its DLL's addresses aren't stable between runs).
+void AudioEvent(const char* ev, int id, int x, int y, void* caller, const char* extra = "") {
+  if (!g_audio) return;
+  const uintptr_t a = reinterpret_cast<uintptr_t>(caller);
+  char at[16];
+  if (a >= 0x401000 && a < 0x4CF000) snprintf(at, sizeof(at), "%06x", unsigned(a));
+  else strcpy(at, "opu");
+  fprintf(g_audio, "{\"tick\":%d,\"ev\":\"%s\",\"id\":%d,\"name\":\"%s\",\"x\":%d,\"y\":%d,\"at\":\"%s\"%s}\n",
+          g_gameImpl.tick_, ev, id, SoundName(id), FileX(x), y, at, extra);
+}
+
+// An inline hook: the function's first `len` bytes (whole, position-independent instructions, checked against
+// `expect`) move to a trampoline that jumps back, and the function starts with a jump to `hook`.
+// A function another mod already starts with a jump (OPU hooks some) is chained: the hook calls that jump's target.
+void* HookEntry(uintptr_t fn, const uint8_t* expect, size_t len, void* hook) {
+  const auto* code = reinterpret_cast<const uint8_t*>(fn);
+  if (code[0] == 0xE9) {
+    int32_t rel;
+    memcpy(&rel, code + 1, 4);
+    void* prev = reinterpret_cast<void*>(fn + 5 + rel);
+    Log("audio: %08x already jumps to %p; chaining", unsigned(fn), prev);
+    JumpTo(fn, hook);
+    return prev;
+  }
+  if (memcmp(code, expect, len) != 0) {
+    Log("audio: unexpected code at %08x: %02x %02x %02x %02x %02x %02x", unsigned(fn), code[0], code[1], code[2], code[3],
+        code[4], code[5]);
+    return nullptr;
+  }
+  auto* t = static_cast<uint8_t*>(VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+  memcpy(t, reinterpret_cast<void*>(fn), len);
+  t[len] = 0xE9;
+  const int32_t rel = int32_t(fn + len - (reinterpret_cast<uintptr_t>(t) + len + 5));
+  memcpy(t + len + 1, &rel, 4);
+  JumpTo(fn, hook);
+  return t;
+}
+
+using AddMapSoundFn = int(__thiscall*)(void*, int, int, int);
+using AddGameSoundFn = int(__thiscall*)(void*, int, int);
+using SavantFn      = int(__thiscall*)(void*, int, int, int, int);
+using AddMessageFn  = int(__thiscall*)(void*, int, int, const char*, int);
+using ThrottleFn    = int(__thiscall*)(void*, int, int, int);
+AddMapSoundFn g_addMapSound;
+AddGameSoundFn g_addGameSound;
+SavantFn      g_savant;
+void*         g_outerCaller = nullptr;  // AddGameSound's caller while it calls AddMapSound.
+AddMessageFn  g_addMessage;
+ThrottleFn    g_throttle;
+int g_throttled = -1;  // The verdict of the throttle call made by the AddMessage in progress.
+
+int __fastcall AddMapSoundHook(void* self, void*, int x, int y, int id) {
+  AudioEvent(g_inPump ? "play" : "sfx", id, x, y, g_outerCaller ? g_outerCaller : __builtin_return_address(0));
+  return g_addMapSound(self, x, y, id);
+}
+
+int __fastcall AddGameSoundHook(void* self, void*, int id, int flag) {
+  g_outerCaller = __builtin_return_address(0);
+  const int r = g_addGameSound(self, id, flag);
+  g_outerCaller = nullptr;
+  return r;
+}
+
+int __fastcall SavantHook(void* self, void*, int id, int x, int y, int flag) {
+  AudioEvent("savant", id, x, y, __builtin_return_address(0));
+  return g_savant(self, id, x, y, flag);
+}
+
+int __fastcall ThrottleHook(void* self, void*, int id, int x, int y) {
+  return g_throttled = g_throttle(self, id, x, y);
+}
+
+int __fastcall AddMessageHook(void* self, void*, int x, int y, const char* text, int sound) {
+  g_throttled = -1;
+  void* caller = __builtin_return_address(0);
+  const int r = g_addMessage(self, x, y, text, sound);
+  // pass: 1 shown (and voiced), 0 dropped by the throttle, -1 not a throttled id.
+  char extra[32];
+  snprintf(extra, sizeof(extra), ",\"pass\":%d", g_throttled);
+  AudioEvent("msg", sound, x, y, caller, extra);
+  return r;
+}
+
+void WriteAudioTables() {
+  if (!g_audio) return;
+  // Savant priorities as SavantQueue reads them (0x47F180), the table SoundManager's constructor fills (0x47DCE0) and
+  // each sound's length in ms (0x56DC00, 12 bytes per id, from the WAV header at load, 0x47F300).
+  const auto* b = reinterpret_cast<const uint8_t*>(0x56E7D0);
+  fprintf(g_audio, "{\"tick\":%d,\"ev\":\"tables\",\"prio\":[", g_gameImpl.tick_);
+  for (int id = 0x5E; id <= 0xE3; ++id) fprintf(g_audio, "%s%d", id > 0x5E ? "," : "", b[id - 0x5E]);
+  fprintf(g_audio, "],\"prio_ctor\":[");
+  for (int id = 0x5E; id <= 0xE3; ++id) fprintf(g_audio, "%s%d", id > 0x5E ? "," : "", b[id]);
+  fprintf(g_audio, "],\"ms\":[");
+  for (int id = 0; id < 0xFA; ++id) fprintf(g_audio, "%s%d", id ? "," : "", *reinterpret_cast<const int*>(0x56DC00 + 12 * id));
+  fprintf(g_audio, "]}\n");
+}
+
+struct MusicState {
+  std::vector<int> songs;
+  int repeat = -1, pos = -1;
+  bool operator==(const MusicState& o) const { return songs == o.songs && repeat == o.repeat && pos == o.pos; }
+};
+MusicState g_music;
+
+void LogMusic(const char* when) {
+  if (!g_audio) return;
+  MusicState m;
+  const int n = *reinterpret_cast<const int*>(0x565454);
+  const int* list = *reinterpret_cast<int* const*>(0x56545C);
+  if (list) m.songs.assign(list, list + std::clamp(n, 0, 64));
+  m.repeat = *reinterpret_cast<const int*>(0x565458);
+  m.pos    = *reinterpret_cast<const int*>(0x565460);
+  if (m == g_music) return;
+  g_music = m;
+  fprintf(g_audio, "{\"tick\":%d,\"ev\":\"music\",\"when\":\"%s\",\"songs\":[", g_gameImpl.tick_, when);
+  for (size_t i = 0; i < m.songs.size(); ++i) fprintf(g_audio, "%s%d", i ? "," : "", m.songs[i]);
+  fprintf(g_audio, "],\"repeat\":%d,\"pos\":%d}\n", m.repeat, m.pos);
+}
+
+// After each game cycle: the Savant queue's turn (as SoundManager's per-frame update would take it), then the music.
+void AudioTick(int tick) {
+  if (!g_audio) return;
+  if ((tick & 3) == 2) {
+    g_inPump = true;
+    reinterpret_cast<void(__thiscall*)(void*)>(0x47F200)(reinterpret_cast<void*>(0x56D250));
+    g_inPump = false;
+  }
+  LogMusic("tick");
+  fflush(g_audio);
+}
+
+// PrepareGame starts the music (MusicManager::Init 0x4508D0, called at 0x489530: the default playlist and a 92 ms
+// streaming timer) before the mission's InitProc runs (0x48987A), so a mission's SetMusicPlayList replaces a list that
+// is already running. Whether the default's first track got to start depends on the time in between: logged here.
+using ThisFn = int(__thiscall*)(void*);
+ThisFn  g_musicInit, g_initProc;
+int64_t g_musicInitAt = 0;
+int __fastcall MusicInitHook(void* self, void*) {
+  g_musicInitAt = Now();
+  return g_musicInit(self);
+}
+int __fastcall InitProcHook(void* self, void*) {
+  Log("audio: InitProc starts %.1f ms after MusicManager::Init", (Now() - g_musicInitAt) * 1000.0 / Frequency());
+  return g_initProc(self);
+}
+
+void InstallAudioHooks() {
+  g_musicInit = reinterpret_cast<ThisFn>(RelinkCall(0x489530, reinterpret_cast<void*>(&MusicInitHook)));
+  g_initProc  = reinterpret_cast<ThisFn>(RelinkCall(0x48987A, reinterpret_cast<void*>(&InitProcHook)));
+  static const uint8_t mapSound[] = { 0x83, 0xEC, 0x10, 0x53, 0x56 };  // sub esp,10h; push ebx; push esi
+  static const uint8_t gameSound[] = { 0x8B, 0x44, 0x24, 0x08, 0x56 };  // mov eax,[esp+8]; push esi
+  static const uint8_t savant[]   = { 0x53, 0x8B, 0xD1, 0x8B, 0x44, 0x24, 0x14 };  // push ebx; mov edx,ecx; mov eax,[esp+14h]
+  static const uint8_t message[]  = { 0x53, 0x56, 0x57, 0x8B, 0xD9 };  // push ebx; push esi; push edi; mov ebx,ecx
+  static const uint8_t throttle[] = { 0x83, 0xEC, 0x04, 0x53, 0x56 };  // sub esp,4; push ebx; push esi
+  g_addMapSound = reinterpret_cast<AddMapSoundFn>(HookEntry(0x47EDB0, mapSound, 5, reinterpret_cast<void*>(&AddMapSoundHook)));
+  g_addGameSound = reinterpret_cast<AddGameSoundFn>(HookEntry(0x47EFD0, gameSound, 5, reinterpret_cast<void*>(&AddGameSoundHook)));
+  g_savant      = reinterpret_cast<SavantFn>(HookEntry(0x47F010, savant, 7, reinterpret_cast<void*>(&SavantHook)));
+  g_addMessage  = reinterpret_cast<AddMessageFn>(HookEntry(0x439070, message, 5, reinterpret_cast<void*>(&AddMessageHook)));
+  g_throttle    = reinterpret_cast<ThrottleFn>(HookEntry(0x439590, throttle, 5, reinterpret_cast<void*>(&ThrottleHook)));
+  // `call [timeGetTime]` (FF 15 E0 38 58 00) in AddMessage, the throttle, the message log reset and the Savant queue.
+  for (uintptr_t site : { 0x4390D1u, 0x439514u, 0x439599u, 0x47F108u, 0x47F206u, 0x47F2DBu }) {
+    static const uint8_t call[] = { 0xFF, 0x15, 0xE0, 0x38, 0x58, 0x00 };
+    if (memcmp(reinterpret_cast<void*>(site), call, 6) != 0) { Log("audio: no timeGetTime call at %08x", unsigned(site));  continue; }
+    void** slot = &g_virtualClock;
+    WriteCode(site + 2, &slot, 4);
+  }
+  Log("audio: hooks %s", g_addMapSound && g_addGameSound && g_savant && g_addMessage && g_throttle ? "installed" : "INCOMPLETE");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Optional bot DLL: exports `void __cdecl HarnessBotTick(int tick)`, called after every game cycle.
 
 using BotTickFn = void(__cdecl*)(int);
@@ -1438,6 +1641,7 @@ void Quit(const char* why) {
   if (cfg.shotEvery > 0) TakeShot(g_gameImpl.tick_);
   if (g_telem) fclose(g_telem);
   if (g_trace) fclose(g_trace);
+  if (g_audio) fclose(g_audio);
   if (g_log) fclose(g_log);
   // Skip normal teardown: it would flush window/ini state and can block on modal dialogs.
   TerminateProcess(GetCurrentProcess(), 0);
@@ -1506,6 +1710,7 @@ void __fastcall GameCycleHook(GameImpl* self, void*) {
     Log("first game cycle: tick %d, map %dx%d, padding %d tiles", tick, GameMap::GetWidth(), GameMap::GetHeight(),
         PadTiles());
     WriteGameData((cfg.out + "\\gamedata.json").c_str());
+    WriteAudioTables();
   }
   g_lastTick = tick;
   // Parallel runs share one wineserver, so they take the foreground from each other, and an inactive game ignores keys
@@ -1523,6 +1728,7 @@ void __fastcall GameCycleHook(GameImpl* self, void*) {
   while (g_scriptPos < g_script.size() && g_script[g_scriptPos].tick <= tick) RunScriptCmd(g_script[g_scriptPos++], tick);
   if (cfg.turbo) SetDrawing(WantDraw(tick));
   if (g_botTick) g_botTick(tick);
+  AudioTick(tick);
 
   // Sample at tick 1 (telemetry) / the first fully drawn frame (screenshot), then at multiples of the interval.
   if (cfg.telemEvery > 0 && tick >= g_nextTelem) { WriteTelemetry(tick);  g_nextTelem = (tick / cfg.telemEvery + 1) * cfg.telemEvery; }
@@ -1598,6 +1804,7 @@ ibool __fastcall StartMissionHook(GameImpl* self, void*) {
   }
   const ibool ok = self->PrepareGame(start);
   Log("PrepareGame(%s) = %d, players %d", cfg.mission.c_str(), ok, self->numPlayers_);
+  LogMusic("start");
   if (!ok) { Log("mission failed to start");  if (g_log) fclose(g_log);  TerminateProcess(GetCurrentProcess(), 2); }
   g_started = true;
   return ok;
@@ -1630,6 +1837,7 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   g_log   = fopen((cfg.out + "\\harness.log").c_str(), "w");
   g_telem = cfg.telemEvery > 0 ? fopen((cfg.out + "\\telemetry.jsonl").c_str(), "w") : nullptr;
   g_trace = cfg.traceEvery > 0 ? fopen((cfg.out + "\\trace.jsonl").c_str(), "w") : nullptr;
+  g_audio = EnvInt("OP2H_AUDIO", 0) ? fopen((cfg.out + "\\audio.jsonl").c_str(), "w") : nullptr;
   Log("harness: mission=%s ticks=%d shot=%d telem=%d speed=%d turbo=%d seed=%d", cfg.mission.c_str(), cfg.ticks,
       cfg.shotEvery, cfg.telemEvery, cfg.speed, cfg.turbo, cfg.seed);
 
@@ -1661,6 +1869,7 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   if (cfg.turbo) { const uint8_t jmp = 0xEB;  WriteCode(OnIdleFrameLimiter, &jmp, 1); }
   memcpy(g_drawPanesCode, reinterpret_cast<void*>(OnIdleDrawPanes), 2);
   JumpTo(FnOP2MessageBox, reinterpret_cast<void*>(&MessageBoxHook));
+  if (g_audio) InstallAudioHooks();
   g_realGetCursorPos     = reinterpret_cast<GetCursorPosFn>(PatchIat(IatGetCursorPos, reinterpret_cast<void*>(&VirtualGetCursorPos)));
   g_realGetAsyncKeyState =
     reinterpret_cast<GetAsyncKeyStateFn>(PatchIat(IatGetAsyncKeyState, reinterpret_cast<void*>(&VirtualGetAsyncKeyState)));

@@ -206,6 +206,9 @@ def main() -> int:
     ap.add_argument("--trace-raw", action="store_true", help="add raw MapObject/PathContext bytes to trace lines")
     ap.add_argument("--campaign", type=Path, metavar="FILE",
                     help="start as a campaign mission with this carry-over (key value lines, see harness.cpp)")
+    ap.add_argument("--audio", action="store_true",
+                    help="audio log: every sound, Savant line, message and music playlist the game asks for (also "
+                         "scenario \"audio\"), see README \"Audio log\"")
     ap.add_argument("--eco", action="store_true",
                     help="economy telemetry: colony state per player, building/vehicle internals (also scenario \"eco\")")
     ap.add_argument("--speed", type=int, default=10, help="in-game speed setting 1-10 (only matters with --no-turbo)")
@@ -237,6 +240,7 @@ def main() -> int:
     if args.difficulty is None:
         args.difficulty = scn.get("difficulty", 1) if scn else 1
     args.eco = args.eco or bool(scn and scn.get("eco"))
+    args.audio = args.audio or bool(scn and scn.get("audio"))
 
     sync_missions_from_play_prefix()
     check_installed()
@@ -244,7 +248,7 @@ def main() -> int:
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     for old in [*out.glob("shot_*.bmp"), *out.glob("shot_*.png"), out / "telemetry.jsonl", out / "harness.log",
-                out / "timeout_screen.png", out / "summary.json", out / "trace.jsonl", out / "gamedata.json",
+                out / "timeout_screen.png", out / "summary.json", out / "trace.jsonl", out / "gamedata.json", out / "audio.jsonl",
                 out / "scenario_script.txt"]:
         old.unlink(missing_ok=True)
     mission = args.mission
@@ -268,6 +272,7 @@ def main() -> int:
                OP2H_TRACE_EVERY=str(args.trace_every),
                OP2H_TRACE_RAW="1" if args.trace_raw else "0",
                OP2H_ECO="1" if args.eco else "0",
+               OP2H_AUDIO="1" if args.audio else "0",
                OP2H_OUT=win_path(out),
                OP2H_TICKS=str(args.ticks),
                OP2H_SHOT_EVERY=str(args.screenshot_every),

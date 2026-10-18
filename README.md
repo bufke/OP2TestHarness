@@ -28,6 +28,7 @@ When run from Claude Code, `run.sh` and `make check` need `dangerouslyDisableSan
 | `--bot DLL` | | bot DLL called every tick, see below |
 | `--seed N` | 1 | random seed (default: the scenario's). Identical seed and inputs give byte-identical telemetry |
 | `--difficulty 0/1/2` | 1 | easy / normal / hard |
+| `--audio` | | `audio.jsonl`: every sound, status message, Savant line and the music playlist the game asks for (see "Audio log") |
 | `--campaign FILE` | | start as a campaign mission with this carry-over (MissionResults): `key value` lines `food`, `common`, `rare`, `workers`, `scientists`, `kids`, `satellites`, `moraleLevel`, `morale`, `event`, `techLevel`, `mission` (the finished mission's number; default the DLL's minus one, as the game starts the next one) |
 | `--no-turbo` | | keep the game's frame limiter and render every frame (real time at `--speed`) |
 | `--speed 1-10` | 10 | in-game speed setting. Only matters with `--no-turbo` |
@@ -199,6 +200,32 @@ capacities, morale inputs) and `pi`, every dword of PlayerImpl 0x00..0x1EF; and 
 `truck` [cargo type, amount] for Cargo Trucks. `gamedata.json` gets `morale` (levels and modifiers as loaded), `mines`
 (the yield table) and `typeExtra` ([mapId, resource priority, research topic]). Scenarios may also set
 `telemetryEvery`, `traceEvery` and `difficulty`. Runs without `--eco` produce the same output as before.
+
+## Audio log (`--audio`)
+
+`audio.jsonl`, one event per line, from hooks on the game's own sound calls (so it works with the run's sound off):
+
+```json
+{"tick":0,"ev":"music","when":"start","songs":[12,13],"repeat":0,"pos":0}
+{"tick":20,"ev":"msg","id":97,"name":"savant4.wav","x":976,"y":1008,"at":"4a3a7a","pass":1}
+{"tick":20,"ev":"savant","id":97,"name":"savant4.wav","x":976,"y":1008,"at":"opu"}
+{"tick":86,"ev":"play","id":97,"name":"savant4.wav","x":-1,"y":-1,"at":"47f236"}
+{"tick":338,"ev":"sfx","id":64,"name":"doc_grab.wav","x":496,"y":624,"at":"43e55d"}
+```
+
+- `sfx`: AddMapSound (0x47EDB0; AddGameSound 0x47EFD0 goes through it with x = y = -1): an effect. `msg`: a status
+  message (MessageLog::AddMessage 0x439070) with its SoundID (0 = none, which beeps) and, for Savant ids, `pass`: the
+  throttle's verdict (ShouldAddMessage 0x439590; -1 = not throttled). `savant`: a line handed to the Savant queue
+  (AddSavantSound 0x47F010). `play`: the queue starting a line (0x47F200; the harness takes the queue's turn itself on
+  ticks with `tick & 3 == 2`, as SoundManager's per-frame update would with sound on). `music`: the MusicManager
+  playlist (song numbers of op2.clm, the repeat index, the position) after PrepareGame and whenever it changes.
+  `tables` (first line): Savant priorities and every sound's length in ms as the game loaded them.
+- `x`/`y` are world pixels in file coordinates (like the trace's `px`/`py`). `at` is the return address of the call in
+  Outpost2.exe that asked, or `opu` for OPU's own code. `tick` is the cycle the request came from.
+- The throttle and the queue run on timeGetTime; in an audio run those call sites read a virtual clock instead,
+  `tick * 1000 / 36` ms (real time at speed 10), so runs are deterministic. Nothing else changes: an audio run's other
+  outputs are the same as without `--audio`. `harness.log` notes the time from MusicManager::Init to the mission's
+  InitProc.
 
 ## Group verbs
 
