@@ -233,7 +233,8 @@ def main() -> int:
         extra = args.script.read_text() if args.script else ""  # --script lines run after the scenario's own.
         args.script = out / "scenario_script.txt"
         args.script.write_text(scenario_script(scn) + extra)
-        (out / "scenario.json").write_text(json.dumps(scn, indent=1) + "\n")
+        # Recorded with the seed and length actually used, so replaying the run's scenario.json reproduces it.
+        (out / "scenario.json").write_text(json.dumps(dict(scn, seed=args.seed, ticks=args.ticks), indent=1) + "\n")
 
     xvfb, display = (None, args.display) if args.display else start_xvfb(width, height)
     env = dict(os.environ,
