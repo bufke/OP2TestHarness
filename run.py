@@ -193,6 +193,8 @@ def main() -> int:
     ap.add_argument("--trace-every", type=int, metavar="N",
                     help="trace.jsonl (sub-tile positions) every N ticks; default 1 with --scenario, else 0 (off)")
     ap.add_argument("--trace-raw", action="store_true", help="add raw MapObject/PathContext bytes to trace lines")
+    ap.add_argument("--campaign", type=Path, metavar="FILE",
+                    help="start as a campaign mission with this carry-over (key value lines, see harness.cpp)")
     ap.add_argument("--eco", action="store_true",
                     help="economy telemetry: colony state per player, building/vehicle internals (also scenario \"eco\")")
     ap.add_argument("--speed", type=int, default=10, help="in-game speed setting 1-10 (only matters with --no-turbo)")
@@ -270,6 +272,8 @@ def main() -> int:
         env["OP2H_SCRIPT"] = win_path(args.script.resolve())
     if args.bot:
         env["OP2H_BOT"] = win_path(args.bot.resolve())
+    if args.campaign:
+        env["OP2H_CAMPAIGN"] = win_path(args.campaign.resolve())
     env.pop("WAYLAND_DISPLAY", None)  # Make sure Wine uses the X display we picked.
 
     start = time.monotonic()

@@ -28,6 +28,7 @@ When run from Claude Code, `run.sh` and `make check` need `dangerouslyDisableSan
 | `--bot DLL` | | bot DLL called every tick, see below |
 | `--seed N` | 1 | random seed (default: the scenario's). Identical seed and inputs give byte-identical telemetry |
 | `--difficulty 0/1/2` | 1 | easy / normal / hard |
+| `--campaign FILE` | | start as a campaign mission with this carry-over (MissionResults): `key value` lines `food`, `common`, `rare`, `workers`, `scientists`, `kids`, `satellites`, `moraleLevel`, `morale`, `event`, `techLevel`, `mission` (the finished mission's number; default the DLL's minus one, as the game starts the next one) |
 | `--no-turbo` | | keep the game's frame limiter and render every frame (real time at `--speed`) |
 | `--speed 1-10` | 10 | in-game speed setting. Only matters with `--no-turbo` |
 | `--draw-every N` | 0 | in turbo mode, also render every N ticks. Default: render only just before screenshots |
@@ -283,8 +284,8 @@ command-processing tick. A multiplayer-safe bot would have to queue packets ther
    name therefore ends the run with exit status 2 instead of hanging.
 
 Startup is set up for single-player missions. Missions whose names start with `t` get the Tutorial type, all others
-Colony. Campaign missions (which have `isCampaign` set, plus campaign state) and multiplayer types have not been
-tried.
+Colony. With `--campaign` the start info is a MissionResults with `isCampaign` set (notes/findings-missions.md).
+Multiplayer types have not been tried.
 
 Measured speed with turbo depends on machine load and map size. Cases seen: a 16-unit map ran at about 500 to 50,000
 ticks/s with occasional screenshots, about 100 ticks/s when rendering every tick, and 36 ticks/s at real-time speed 10.

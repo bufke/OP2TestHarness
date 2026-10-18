@@ -27,6 +27,7 @@ namespace {
 
 struct Config {
   std::string mission, out, script, bot;
+  std::string campaign;  // OP2H_CAMPAIGN: campaign carry-over file (see StartMissionHook).
   int ticks = 0, shotEvery = 0, telemEvery = 100, speed = 10, seed = 1, difficulty = 1, width = 1024, height = 768;
   int drawEvery = 0;  // Turbo only: render every N ticks (0 = only just before screenshots).
   int traceEvery = 0;  // trace.jsonl sample interval (0 = off).
@@ -1422,7 +1423,55 @@ ibool __fastcall StartMissionHook(GameImpl* self, void*) {
   g_gsi.gameSpeed        = cfg.speed * 4;
   g_gsi.randomNumberSeed = cfg.seed;
 
-  const ibool ok = self->PrepareGame(&g_gsi);
+  // Campaign start: PrepareGame takes a MissionResults (GameStartInfo plus the carry-over) when isCampaign is set
+  // and applies it with LoadCampaignState (0x4899C0) before the mission runs. OP2H_CAMPAIGN names a text file of
+  // `key value` lines: mission (the finished campaign mission's number; default the DLL's minus one), food, common, rare, workers, scientists, kids, satellites (raw
+  // SatelliteCounts word), moraleLevel, morale, event, techLevel. The research list stays empty (numTechs 0).
+  static MissionResults mr;
+  GameStartInfo* start = &g_gsi;
+  if (!cfg.campaign.empty()) {
+    mr = {};
+    memcpy(static_cast<GameStartInfo*>(&mr), &g_gsi, sizeof(GameStartInfo));
+    // MissionResults.missionType is the campaign mission just finished: the game starts the next one, picking the
+    // colony's DLL by the local player's isEden flag (measured: number 2 with isEden 0 started p03).
+    int number = atoi(cfg.mission.c_str() + 1) - 1;
+    for (auto& f : mr.playerFlags) f.isEden = (cfg.mission[0] == 'e' || cfg.mission[0] == 'E');
+    if (FILE* f = fopen(cfg.campaign.c_str(), "r")) {
+      char key[64];
+      int v;
+      while (fscanf(f, "%63s %d", key, &v) == 2) {
+        const std::string k = key;
+        auto& ps = mr.playerStartInfo;
+        auto& ms = mr.moraleState;
+        if      (k == "mission")     number = v;
+        else if (k == "food")        ps.food = v;
+        else if (k == "common")      ps.commonOre = v;
+        else if (k == "rare")        ps.rareOre = v;
+        else if (k == "workers")     ps.workers = v;
+        else if (k == "scientists")  ps.scientists = v;
+        else if (k == "kids")        ps.kids = v;
+        else if (k == "satellites")  memcpy(&ps.satelliteCounts, &v, sizeof(v));
+        else if (k == "moraleLevel") ms.moraleLevel = MoraleLevel(v);
+        else if (k == "morale")      ms.morale = v;
+        else if (k == "event")       ms.eventMoraleModifier = v;
+        else if (k == "techLevel")   mr.researchState.techLevel = uint16(v);
+        else Log("campaign: unknown key %s", key);
+      }
+      fclose(f);
+    } else {
+      Log("campaign: cannot open %s", cfg.campaign.c_str());
+    }
+    mr.startupFlags.isCampaign  = 1;
+    mr.startupFlags.missionType = uint32(number) & 0x1F;
+    mr.missionType              = TethysAPI::MissionType(number);
+    mr.gameTermReason           = GameTermReasons::MissionAccomplished;
+    Log("campaign start: mission %d, food %d common %d rare %d workers %d scientists %d kids %d, morale %d level %d",
+        number, mr.playerStartInfo.food, mr.playerStartInfo.commonOre, mr.playerStartInfo.rareOre,
+        mr.playerStartInfo.workers, mr.playerStartInfo.scientists, mr.playerStartInfo.kids, mr.moraleState.morale,
+        int(mr.moraleState.moraleLevel));
+    start = &mr;
+  }
+  const ibool ok = self->PrepareGame(start);
   Log("PrepareGame(%s) = %d, players %d", cfg.mission.c_str(), ok, self->numPlayers_);
   if (!ok) { Log("mission failed to start");  if (g_log) fclose(g_log);  TerminateProcess(GetCurrentProcess(), 2); }
   g_started = true;
@@ -1438,6 +1487,7 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   cfg.out        = Env("OP2H_OUT", ".");
   cfg.script     = Env("OP2H_SCRIPT");
   cfg.bot        = Env("OP2H_BOT");
+  cfg.campaign   = Env("OP2H_CAMPAIGN");
   cfg.ticks      = EnvInt("OP2H_TICKS", 0);
   cfg.shotEvery  = EnvInt("OP2H_SHOT_EVERY", 0);
   cfg.telemEvery = EnvInt("OP2H_TELEM_EVERY", 100);
