@@ -297,6 +297,11 @@ have their own wineserver, so they can't take focus from, or replace DLLs under,
 Mission DLLs are installed into `prefix/` by missions/Makefile; `run.py` mirrors `OPU/maps` into the harness prefix
 before each run.
 
+**One installed harness for every checkout.** `make install` replaces `OPU/Harness/harness.dll` and `zScenario.dll` for
+all checkouts and worktrees. The builds are reproducible (no PE timestamps), and `run.py` warns when the installed
+copy differs from the checkout's `harness/build/` (someone else's version is installed, or yours isn't). Before
+installing, check that no other agent's runs depend on the installed version.
+
 ## Disabling / removing
 
 - Normal play is unaffected while `OP2H_MISSION` is unset. To unregister the module completely:

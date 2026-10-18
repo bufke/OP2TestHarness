@@ -17,7 +17,7 @@ CXXFLAGS := -std=c++17 -O2 -Wall -Wno-return-type -Wno-array-bounds \
             -include src/mingw_compat.h \
             '-DBEGIN_PACKED=_Pragma("pack(push, 1)")' '-DEND_PACKED=_Pragma("pack(pop)")' \
             -isystem ../vendor/include
-LDFLAGS  := -shared -static -static-libgcc -static-libstdc++ -s -Wl,--kill-at -lgdi32
+LDFLAGS  := -shared -static -static-libgcc -static-libstdc++ -s -Wl,--kill-at -Wl,--no-insert-timestamp -lgdi32
 
 all: build/harness.dll build/sample_bot.dll build/easter_bot.dll build/cheat_bot.dll build/zHarnessEnd.dll build/zScenario.dll
 

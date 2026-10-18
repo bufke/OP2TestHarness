@@ -133,6 +133,13 @@ def check_installed() -> None:
     ini = (OPU_DIR / "outpost2.ini").read_text(errors="replace")
     if not (OPU_DIR / "Harness" / "harness.dll").exists() or "Harness=yes" not in ini:
         sys.exit("harness module not installed: run `make -C harness install`")
+    # All checkouts share one installed copy. Builds are reproducible (no PE timestamps), so a differing file means
+    # another checkout installed its own version, or this checkout's changes aren't installed yet.
+    for dll in ("harness.dll", "zScenario.dll"):
+        built = ROOT / "harness" / "build" / dll
+        if built.exists() and built.read_bytes() != (OPU_DIR / "Harness" / dll).read_bytes():
+            print(f"run.py: warning: the installed {dll} differs from this checkout's harness/build/{dll}; the run uses "
+                  "the installed one (another checkout's, or yours needs `make -C harness install`)", file=sys.stderr)
 
 
 def start_xvfb(width: int, height: int) -> tuple[subprocess.Popen, str]:
