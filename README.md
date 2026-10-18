@@ -200,6 +200,24 @@ capacities, morale inputs) and `pi`, every dword of PlayerImpl 0x00..0x1EF; and 
 (the yield table) and `typeExtra` ([mapId, resource priority, research topic]). Scenarios may also set
 `telemetryEvery`, `traceEvery` and `difficulty`. Runs without `--eco` produce the same output as before.
 
+## Group verbs
+
+`group <name> <op> [args]` calls the mission API's AI group exports on a group the script names (op2-sim's script
+runner understands the same verbs, `op2_sim::groups`):
+
+```
+1 group g new fight 1               # CreateFightGroup(Player[1]) (also mining, building)
+1 group g guardrect                 # DoGuardRect (patrolonly attackenemy guardgroup guardunit attackunit exitmap)
+1 group g rect 30 25 36 30          # SetRect; guardedrect x1 y1 x2 y2 = AddGuardedRect; clearguarded
+1 group g patrol 0 20,20 34,20      # SetPatrolMode(loop, waypoints); clearpatrol
+1 group g take @0 @1                # TakeUnit; remove <unit>; lights 0|1; enable; disable; destroy
+1 group g combine 1                 # Set/ClearCombineFire; follow <mode>; targetunit <unit>; targetgroup <name>; attacktype TYPE
+1 group m mine @3 @4 x1 y1 x2 y2    # MiningGroup::Setup(Unit, Unit, MAP_RECT)
+1 group g targcount TYPE WEAPON n   # SetTargCount; cleartargcount; reinforce <group> <priority>; unreinforce <group>
+1 group b building x y TYPE WEAPON [group]   # RecordBuilding; tube x y; wall x y [TYPE]
+1 group g dump                      # harness.log: members in list order (unit:class@issue tick), fight group state
+```
+
 ## Scenarios (`--scenario`): oracle runs of the original game
 
 `--scenario FILE` runs a scenario in the ENGINE_PLAN.md format against the real game, so op2-sim can be compared with

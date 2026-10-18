@@ -1238,6 +1238,104 @@ bool RunEcoCmd(const ScriptCmd& c, int tick) {
   return false;
 }
 
+// Mission AI groups (README "Group verbs"): `group <name> <op> [args]`, the mission API's ScGroup calls on a named group.
+//   new fight|mining|building <player> | take <unit>... | remove <unit> | lights 0|1 | enable | disable | destroy
+//   rect x1 y1 x2 y2 (FightGroup or BuildingGroup SetRect) | guardedrect x1 y1 x2 y2 | clearguarded
+//   guardrect | patrolonly | attackenemy | guardgroup | guardunit | attackunit | exitmap      (the Do* objectives)
+//   patrol <loop> x,y ... | clearpatrol | combine 0|1 | follow <mode> | targetunit <unit> | targetgroup <name>
+//   attacktype <TYPE> | mine <mine unit> <smelter unit> x1 y1 x2 y2 | targcount <TYPE> <WEAPON|-> <n> | cleartargcount
+//   reinforce <group> <priority> | unreinforce <group> | building x y <TYPE> <WEAPON|-> [group] | tube x y | wall x y [TYPE]
+//   dump  (log the group's members in list order, and a fight group's state)
+std::vector<std::pair<std::string, int>> g_groups;
+
+int GroupId(const std::string& name) {
+  for (const auto& [n, id] : g_groups) if (n == name) return id;
+  return -1;
+}
+
+void RunGroupCmd(const ScriptCmd& c) {
+  auto arg = [&](size_t i) -> std::string { return i < c.args.size() ? c.args[i] : std::string(); };
+  auto num = [&](size_t i) { return int(strtol(arg(i).c_str(), nullptr, 0)); };
+  auto loc = [&](size_t i) { return Location(num(i) + (c.fileCoords ? PadTiles() : 0), num(i + 1)); };
+  auto rect = [&](size_t i) { const Location a = loc(i), b = loc(i + 2);  return MapRect(a.x, a.y, b.x, b.y); };
+  const std::string name = arg(0), op = arg(1);
+  if (op == "new") {
+    const std::string kind = arg(2);
+    const _Player p = Player[num(3)];
+    const int id = kind == "mining" ? CreateMiningGroup(p).GetID() : kind == "building" ? CreateBuildingGroup(p).GetID()
+                 : CreateFightGroup(p).GetID();
+    g_groups.emplace_back(name, id);
+    Log("group %s: %s group of player %d -> stub %d", name.c_str(), kind.c_str(), num(3), id);
+    return;
+  }
+  const int id = GroupId(name);
+  if (id < 0) { Log("script: group %s: unknown group", name.c_str());  return; }
+  ScGroup g(id);
+  FightGroup f(id);
+  BuildingGroup b(id);
+  MiningGroup m(id);
+  auto* impl = g.GetImpl();
+  const bool fight = impl && *reinterpret_cast<uintptr_t*>(impl) == 0x4CFF00;  // FightGroupImpl's vtable
+  if      (op == "take")       for (size_t i = 2; i < c.args.size(); ++i) g.TakeUnit(ScriptUnit(arg(i)));
+  else if (op == "remove")     g.RemoveUnit(ScriptUnit(arg(2)));
+  else if (op == "lights")     g.SetLights(num(2) != 0);
+  else if (op == "enable")     g.Enable();
+  else if (op == "disable")    g.Disable();
+  else if (op == "destroy")    g.Destroy();
+  else if (op == "rect")       { if (fight) f.SetRect(rect(2));  else b.SetRect(rect(2)); }
+  else if (op == "guardedrect") f.AddGuardedRect(rect(2));
+  else if (op == "clearguarded") f.ClearGuardedRects();
+  else if (op == "guardrect")  f.DoGuardRect();
+  else if (op == "patrolonly") f.DoPatrolOnly();
+  else if (op == "attackenemy") f.DoAttackEnemy();
+  else if (op == "guardgroup") f.DoGuardGroup();
+  else if (op == "guardunit")  f.DoGuardUnit();
+  else if (op == "attackunit") f.DoAttackUnit();
+  else if (op == "exitmap")    f.DoExitMap();
+  else if (op == "clearpatrol") f.ClearPatrolMode();
+  else if (op == "combine")    { if (num(2)) f.SetCombineFire();  else f.ClearCombineFire(); }
+  else if (op == "follow")     f.SetFollowMode(num(2));
+  else if (op == "targetunit") f.SetTargetUnit(ScriptUnit(arg(2)));
+  else if (op == "targetgroup") f.SetTargetGroup(ScGroup(GroupId(arg(2))));
+  else if (op == "attacktype") f.SetAttackType(TypeByName(arg(2)));
+  else if (op == "patrol") {
+    static Location points[9];
+    int n = 0;
+    for (size_t i = 3; i < c.args.size() && n < 8; ++i) {
+      int x = 0, y = 0;
+      if (sscanf(c.args[i].c_str(), "%d,%d", &x, &y) == 2) points[n++] = Location(x + (c.fileCoords ? PadTiles() : 0), y);
+    }
+    points[n] = Location(-1, -1);
+    PatrolRoute route = { num(2), points };
+    f.SetPatrolMode(route);
+  }
+  else if (op == "mine")       m.Setup(ScriptUnit(arg(2)), ScriptUnit(arg(3)), rect(4));
+  else if (op == "targcount")  g.SetTargCount(TypeByName(arg(2)), TypeByName(arg(3)), num(4));
+  else if (op == "cleartargcount") g.ClearTargCount();
+  else if (op == "reinforce")  b.RecordVehReinforceGroup(ScGroup(GroupId(arg(2))), num(3));
+  else if (op == "unreinforce") b.UnRecordVehGroup(ScGroup(GroupId(arg(2))));
+  else if (op == "building") {
+    if (c.args.size() > 6) b.RecordBuilding(loc(2), TypeByName(arg(4)), TypeByName(arg(5)), ScGroup(GroupId(arg(6))));
+    else b.RecordBuilding(loc(2), TypeByName(arg(4)), TypeByName(arg(5)));
+  }
+  else if (op == "tube")       b.RecordTube(loc(2));
+  else if (op == "wall")       b.RecordWall(loc(2), c.args.size() > 4 ? TypeByName(arg(4)) : MapID::Wall);
+  else if (op == "dump") {
+    std::string members;
+    if (impl) for (auto* n = impl->pUnitListHead_; n; n = n->pNext)
+      members += " " + std::to_string(n->pUnit->index_) + ":" + std::to_string(int(n->classification)) + "@" +
+                 std::to_string(n->issueCommandTick);
+    Log("group %s (stub %d): %d units:%s", name.c_str(), id, impl ? impl->numUnits_ : -1, members.c_str());
+    if (fight) {
+      const auto* fi = f.GetImpl();
+      Log("group %s: objective %d combine %d/%d@%d patrol %d follow %d rect (%ld,%ld,%ld,%ld) guarded %d", name.c_str(),
+          fi->field_3E4, fi->combineFire_, fi->combineFireUnitIndex_, fi->field_310, fi->patrolMode_, fi->followMode_,
+          fi->pixelRect_.left, fi->pixelRect_.top, fi->pixelRect_.right, fi->pixelRect_.bottom, fi->numGuardedRects_);
+    }
+  }
+  else Log("script: group: unknown op %s", op.c_str());
+}
+
 void RunScriptCmd(const ScriptCmd& c, int tick) {
   auto arg = [&](size_t i) -> std::string { return i < c.args.size() ? c.args[i] : std::string(); };
   auto num = [&](size_t i) { return atoi(arg(i).c_str()); };
@@ -1296,6 +1394,7 @@ void RunScriptCmd(const ScriptCmd& c, int tick) {
     if (g_inputUsed) g_lastInputTick = tick;
   }
   else if (IsInputVerb(c.verb))      RunInputCmd(c, tick);
+  else if (c.verb == "group")        RunGroupCmd(c);
   else if (c.verb == "setcell") {
     const int pad = c.fileCoords ? PadTiles() : 0;
     for (int y = num(1); y <= num(3); ++y)
