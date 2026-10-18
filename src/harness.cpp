@@ -1296,7 +1296,12 @@ void RunGroupCmd(const ScriptCmd& c) {
   else if (op == "combine")    { if (num(2)) f.SetCombineFire();  else f.ClearCombineFire(); }
   else if (op == "follow")     f.SetFollowMode(num(2));
   else if (op == "targetunit") f.SetTargetUnit(ScriptUnit(arg(2)));
-  else if (op == "targetgroup") f.SetTargetGroup(ScGroup(GroupId(arg(2))));
+  else if (op == "targetgroup") {
+    // SetTargetGroup takes ScGroup by value: MSVC copies its one int onto the stack, but MinGW passes a class with
+    // a destructor by reference, so call the export with the stub index itself.
+    using Fn = void(__thiscall*)(FightGroup*, int);
+    reinterpret_cast<Fn>(0x479F90)(&f, GroupId(arg(2)));
+  }
   else if (op == "attacktype") f.SetAttackType(TypeByName(arg(2)));
   else if (op == "patrol") {
     static Location points[9];
