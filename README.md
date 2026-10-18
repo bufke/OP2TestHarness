@@ -273,6 +273,10 @@ tanks at the nearest enemy. Build it with `make -C harness`, then run with `--bo
 `bots/easter_bot.cpp` reproduces Dan's Dog (`EGG_MODE=dog`, with `test/egg_dandog.json`) and shows the unused Santa
 (`EGG_MODE=santa`, with `test/egg_santa.json`) in the original; see `../notes/findings-easter-eggs.md`.
 
+`bots/hitmask_bot.cpp` writes `hitmask.jsonl`: for every pixel round each unit, what a click there selects and what a
+command targets, asked of the game's own point query at the scenario's `hitTicks` (`oracle/input/make_hit.py`,
+`../notes/findings-input.md` "What a click hits").
+
 All orders, from scripts or bots, should use command packets: `Unit::Do*` helpers that build a `CommandPacket`, or
 `PlayerImpl::ProcessCommandPacket`. Avoid TethysAPI's `Unit::DoMove()`. It calls `MapObject::CmdMove()`, the AI/ScGroup
 path, and on a human player's unit it crashed the game as soon as a frame was rendered. The harness `move` verb builds
