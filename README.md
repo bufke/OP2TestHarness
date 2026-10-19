@@ -282,6 +282,65 @@ Recording a scenario as video frames: `--screenshot-every 1` (or 2, 5...) saves 
 centred on the units, about 20 frames/s of wall time. Assemble them with e.g.
 `ffmpeg -framerate 25 -pattern_type glob -i 'shot_*.png' out.mp4`.
 
+## Shell mode (`shell.sh`): the original's menus and movies
+
+`shell.sh` boots the game normally (intro video, title, OP2Shell menus, briefings, movies) in a Wine virtual desktop
+on a private Xvfb, drives it with real X input (XTEST) from a driver script, screenshots the whole screen and logs
+what the game does. The startup flow it measured is in `../notes/findings-shell.md`.
+
+```sh
+harness/shell.sh --drive harness/oracle/shell/eden1.txt --script harness/oracle/missions/e01.txt \
+  --ini Music=0 --ini GameSpeed=10 --audio --out /tmp/shell     # about 3 minutes: the movies play in real time
+```
+
+| option | |
+|---|---|
+| `--drive FILE` | driver script (below) |
+| `--out DIR` | output directory |
+| `--desktop WxH` | virtual desktop and X screen, default 800x600; the game's 640x480 window is centred in it |
+| `--ini KEY=VALUE` | a `[Game]` key in the run's private outpost2.ini (repeatable): `IntroAVI`, `ShowMovies`, `Music`, `Sound`, `GameSpeed`, `Demo` ... |
+| `--script FILE` | in-game tick script (the order verbs of "Scripted input", e.g. a mission's winning orders); its ticks count from each game's start. Input verbs don't apply: the driver's real input does |
+| `--audio`, `--telemetry-every N` | in-game audio.jsonl and telemetry.jsonl, as in mission runs |
+| `--timeout S` | wall-clock limit (default 600) |
+
+Driver steps, one per line (`#` comments; times in wall-clock seconds):
+
+```
+wait <ev> [field=value | field=~regex ...] [timeout=S]   the next shell.jsonl event of kind <ev> whose fields match
+sleep <S>                                                 e.g. to let a movie play
+shot <name> | shots <name> <count> <every S>             screenshots, cropped to the game's window
+click <x> <y> [right] | move <x> <y>                     desktop pixels
+ctl <text | id=N> [in=<window regex>] [right]             click a control's centre ('_' = space, '&' ignored)
+key <keysym> ...                                          X keysyms: Escape Return space n alt+n Down F1 ...
+dump [tag] | mark <text> | quit
+```
+
+Outputs: `shell.jsonl` (below), `driver.jsonl` (every step with its time on shell.jsonl's clock), `shot_<name>.png`
+(640x480, the game's window), `flow.json` (the deterministic part of shell.jsonl: dialogs and their controls,
+layouts from the `dump`s in window coordinates, state messages, files, movies and how they ended, game start and
+end; byte-identical between runs), `summary.json` (movies with timings, the window rectangle), the private
+`outpost2.ini`, `harness.log`, `wine.log`. Shots of static screens (named `ref_*` by convention) double as reference
+images: they reproduce too, except that dialog text (OPU's fonts) occasionally lands 2 px lower in one run than
+another, probably a race between OPU loading its private fonts and the first dialog, so compare with a tolerance.
+
+`shell.jsonl`, one event per line with `ms` since the module loaded (harness.cpp "Shell mode"):
+- `mci`: every `mciSendCommandA` of OP2Shell.dll (the movies through the `avivideo` device, `music1.wav` through
+  `waveaudio`), `notify`: MM_MCINOTIFY as the shell gets it (1 = played to the end).
+- `post`/`send`: the shell's state messages (0x720 main menu, 0x72B play the movie in this+0x53C ...).
+- `modal`/`modal_end`/`modeless`: IDlgWnd::DoModal/DoModeless (0x431A80/0x431BF0) with the dialog resource and its
+  DLL, the caller and the return value (the next state); `dialog` (after WM_INITDIALOG, with every control),
+  `show`/`hide`/`destroy` for top-level windows.
+- `file`: ResManager::OpenStream/GetFilePath asked by the shell; `lib`: its LoadLibraryA; `input`: key and button
+  messages as the game receives them; `start`: TApp::StartSingleGame's GameStartInfo; `activate_shell`:
+  TApp::ActivateShell (0x486DB0), the game handing back to the shell with its end reason; `game`: first cycle, every
+  500 ticks, the end reason changing; `dump`: windows and controls on request.
+
+Notes: the program must be started by its full Windows path (`wine explorer /desktop=NAME,WxH Outpost2.exe` with a
+relative name silently starts nothing). The harness Wine has no audio device, so MCI `waveaudio` fails at once and the
+shell's music loop (close and reopen music1.wav on every notification) floods the message queue, starving the main
+menu's timers and the driver's input: use `--ini Music=0` (the default ini plays music). Movies play at the right
+speed without a device. Each run uses its own desktop name, so parallel runs on other displays don't share it.
+
 ## Coordinates
 
 - Internal tile x = file tile x + 32 on non-wrapping maps (`GameMap::GetPaddingWidth()`), and + 0 on 512-wide world

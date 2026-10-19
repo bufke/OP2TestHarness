@@ -1,13 +1,16 @@
 // OP2 test harness: an op2ext ini module that, when OP2H_MISSION is set in the environment, skips the shell and
 // starts that mission directly, optionally runs uncapped, writes JSONL telemetry and BMP screenshots every N ticks,
 // replays a scripted command file, calls an optional bot DLL every tick, and exits after a tick limit.
-// With OP2H_MISSION unset the module does nothing, so normal play is unaffected.
+// With OP2H_SHELL=1 it lets the game boot normally instead and only logs what the shell and game do (shell.py).
+// With neither set the module does nothing, so normal play is unaffected.
 #include <windows.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <type_traits>
 #include <vector>
+#include <mmsystem.h>
 #include "Tethys/API/API.h"
 #include "Tethys/Game/TApp.h"
 #include "Tethys/Game/GameImpl.h"
@@ -1810,9 +1813,438 @@ ibool __fastcall StartMissionHook(GameImpl* self, void*) {
   return ok;
 }
 
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Shell mode (OP2H_SHELL=1, `harness/shell.py`): the game boots normally (intro video, title, menus, briefings) to
+// measure the original's startup flow. The harness only watches and logs; shell.py drives the game with real X input
+// and takes X screenshots of the whole (virtual) desktop. Events go to shell.jsonl, one JSON object per line, with
+// `ms` since InitMod:
+//   mci     every mciSendCommandA of OP2Shell.dll (movies: device type, file, window, rectangles, notifications)
+//   notify  MM_MCINOTIFY as the shell receives it (1 = played to the end, 2 superseded, 4 aborted, 8 failed)
+//   post    OP2Shell's PostMessage/SendMessage calls with message >= WM_USER: the shell's state machine (0x72B = play
+//           the movie in +0x53C, then post +0x540; see notes/findings-shell.md)
+//   modal / modal_end, modeless   IDlgWnd::DoModal/DoModeless (0x431A80/0x431BF0): dialog resource id and DLL, caller
+//   activate_shell   TApp::ActivateShell (0x486DB0): back to the shell from a game, with the end reason
+//   dialog  a dialog after WM_INITDIALOG, with every control (id, class, text, screen rectangle)
+//   show / hide / destroy   top-level windows and dialogs
+//   file    ResManager::OpenStream / GetFilePath asked by the shell (briefing RTFs, story text, music)
+//   lib     LoadLibraryA from OP2Shell
+//   input   key and mouse button messages as the game receives them (to confirm the driver's input landed)
+//   start   TApp::StartSingleGame: the GameStartInfo the shell built
+//   game    in-game milestones: the first cycle, every 500 ticks, the end reason changing
+//   dump    windows and controls, on request (shell.py `dump`)
+// shell.py's control file (ctl.txt in the output directory) is polled by a thread: `dump <tag>` logs every window of
+// the game, `quit` ends the process.
+
+bool    g_shellMode = false;
+FILE*   g_shell = nullptr;
+int64_t g_shellT0 = 0;
+CRITICAL_SECTION g_shellLock;
+DWORD   g_mainThread = 0;
+
+std::string JsonStr(const char* s, size_t max = 400) {
+  std::string out = "\"";
+  for (size_t i = 0; s && s[i] && i < max; ++i) {
+    const unsigned char c = s[i];
+    if (c == '"' || c == '\\') { out += '\\';  out += char(c); }
+    else if (c < 0x20) { char b[8];  snprintf(b, sizeof(b), "\\u%04x", c);  out += b; }
+    else if (c >= 0x80) { char b[8];  snprintf(b, sizeof(b), "\\u%04x", c);  out += b; }  // Windows-1252, as code points.
+    else out += char(c);
+  }
+  return out + "\"";
+}
+
+void ShellEvent(const char* fmt, ...) {
+  if (!g_shell) return;
+  va_list args, copy;
+  va_start(args, fmt);
+  va_copy(copy, args);
+  std::string body(size_t(std::max(0, vsnprintf(nullptr, 0, fmt, copy))) + 1, '\0');
+  va_end(copy);
+  vsnprintf(body.data(), body.size(), fmt, args);
+  va_end(args);
+  body.pop_back();
+  EnterCriticalSection(&g_shellLock);
+  fprintf(g_shell, "{\"ms\":%.1f,%s}\n", (Now() - g_shellT0) * 1000.0 / Frequency(), body.c_str());
+  fflush(g_shell);
+  LeaveCriticalSection(&g_shellLock);
+}
+
+std::string ResName(const char* res) {
+  if (IS_INTRESOURCE(res)) return std::to_string(unsigned(reinterpret_cast<uintptr_t>(res)));
+  return JsonStr(res);
+}
+
+std::string WindowText(HWND h) {
+  char buf[256] = {};
+  DWORD_PTR n = 0;
+  // Through a timeout: the dump thread asks for windows owned by the busy main thread.
+  if (!SendMessageTimeoutA(h, WM_GETTEXT, sizeof(buf), reinterpret_cast<LPARAM>(buf), SMTO_ABORTIFHUNG, 500, &n)) buf[0] = 0;
+  return buf;
+}
+
+std::string WindowJson(HWND h) {
+  char cls[64] = {};
+  GetClassNameA(h, cls, sizeof(cls));
+  RECT r = {};
+  GetWindowRect(h, &r);
+  const LONG style = GetWindowLongA(h, GWL_STYLE);
+  char buf[1024];
+  snprintf(buf, sizeof(buf), "\"hwnd\":\"%p\",\"cls\":%s,\"text\":%s,\"id\":%d,\"rect\":[%ld,%ld,%ld,%ld],\"style\":\"%08lx\","
+           "\"visible\":%d,\"enabled\":%d,\"parent\":\"%p\"",
+           (void*)h, JsonStr(cls).c_str(), JsonStr(WindowText(h).c_str()).c_str(), GetDlgCtrlID(h), r.left, r.top,
+           r.right - r.left, r.bottom - r.top, (unsigned long)style, IsWindowVisible(h) ? 1 : 0, IsWindowEnabled(h) ? 1 : 0,
+           (void*)GetParent(h));
+  return buf;
+}
+
+BOOL CALLBACK AddChildJson(HWND c, LPARAM p) {
+  auto& s = *reinterpret_cast<std::string*>(p);
+  s += (s.empty() ? "{" : ",{") + WindowJson(c) + "}";
+  return TRUE;
+}
+
+std::string ChildrenJson(HWND h) {
+  std::string out;
+  EnumChildWindows(h, &AddChildJson, reinterpret_cast<LPARAM>(&out));
+  return "[" + out + "]";
+}
+
+bool IsDialog(HWND h) { char cls[16] = {};  GetClassNameA(h, cls, sizeof(cls));  return strcmp(cls, "#32770") == 0; }
+bool IsTopOrDialog(HWND h) { return !(GetWindowLongA(h, GWL_STYLE) & WS_CHILD) || IsDialog(h); }
+
+LRESULT CALLBACK ShellCallWndRet(int code, WPARAM w, LPARAM l) {
+  if (code == HC_ACTION) {
+    const auto* m = reinterpret_cast<const CWPRETSTRUCT*>(l);
+    switch (m->message) {
+    case WM_INITDIALOG:
+      ShellEvent("\"ev\":\"dialog\",%s,\"controls\":%s", WindowJson(m->hwnd).c_str(), ChildrenJson(m->hwnd).c_str());
+      break;
+    case WM_SHOWWINDOW:
+      if (IsTopOrDialog(m->hwnd)) ShellEvent("\"ev\":\"%s\",%s", m->wParam ? "show" : "hide", WindowJson(m->hwnd).c_str());
+      break;
+    case WM_DESTROY:
+      if (IsTopOrDialog(m->hwnd)) ShellEvent("\"ev\":\"destroy\",%s", WindowJson(m->hwnd).c_str());
+      break;
+    }
+  }
+  return CallNextHookEx(nullptr, code, w, l);
+}
+
+LRESULT CALLBACK ShellGetMsg(int code, WPARAM w, LPARAM l) {
+  if (code == HC_ACTION && w == PM_REMOVE) {
+    const auto* m = reinterpret_cast<const MSG*>(l);
+    char cls[64] = {};
+    switch (m->message) {
+    case MM_MCINOTIFY:
+      ShellEvent("\"ev\":\"notify\",\"flags\":%u,\"dev\":%u,\"hwnd\":\"%p\"", unsigned(m->wParam), unsigned(m->lParam), (void*)m->hwnd);
+      break;
+    case WM_KEYDOWN: case WM_SYSKEYDOWN: case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_LBUTTONUP:
+      GetClassNameA(m->hwnd, cls, sizeof(cls));
+      ShellEvent("\"ev\":\"input\",\"msg\":\"%s\",\"w\":%u,\"x\":%d,\"y\":%d,\"hwnd\":\"%p\",\"cls\":%s,\"id\":%d",
+                 m->message == WM_KEYDOWN ? "keydown" : m->message == WM_SYSKEYDOWN ? "syskeydown" :
+                 m->message == WM_LBUTTONDOWN ? "ldown" : m->message == WM_LBUTTONUP ? "lup" : "rdown",
+                 unsigned(m->wParam), short(LOWORD(m->lParam)), short(HIWORD(m->lParam)), (void*)m->hwnd,
+                 JsonStr(cls).c_str(), GetDlgCtrlID(m->hwnd));
+      break;
+    }
+  }
+  return CallNextHookEx(nullptr, code, w, l);
+}
+
+// ---- Hooks on OP2Shell.dll's imports (patched whenever op2ext reports the shell loaded, see RunMod).
+
+// Patches `fn` imported from `dll` in `mod`'s import table; returns the previous target, or nullptr if the import isn't
+// there or already points at `hook` (the shell can be loaded again into the same place).
+void* PatchImport(HMODULE mod, const char* dll, const char* fn, void* hook) {
+  auto* base = reinterpret_cast<uint8_t*>(mod);
+  const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+  const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+  for (auto* d = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress); d->Name; ++d) {
+    if (_stricmp(reinterpret_cast<const char*>(base + d->Name), dll) != 0 || !d->OriginalFirstThunk) continue;
+    auto* names = reinterpret_cast<IMAGE_THUNK_DATA32*>(base + d->OriginalFirstThunk);
+    auto* slots = reinterpret_cast<IMAGE_THUNK_DATA32*>(base + d->FirstThunk);
+    for (; names->u1.AddressOfData; ++names, ++slots) {
+      if (names->u1.Ordinal & IMAGE_ORDINAL_FLAG32) continue;
+      const auto* ibn = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(base + names->u1.AddressOfData);
+      if (strcmp(reinterpret_cast<const char*>(ibn->Name), fn) != 0) continue;
+      if (reinterpret_cast<void*>(slots->u1.Function) == hook) return nullptr;
+      return PatchIat(reinterpret_cast<uintptr_t>(&slots->u1.Function), hook);
+    }
+  }
+  Log("shell: import %s!%s not found", dll, fn);
+  return nullptr;
+}
+
+const char* MciName(UINT m) {
+  switch (m) {
+  case MCI_OPEN: return "open";      case MCI_CLOSE: return "close";    case MCI_PLAY: return "play";
+  case MCI_STOP: return "stop";      case MCI_PAUSE: return "pause";    case MCI_SEEK: return "seek";
+  case MCI_SET: return "set";        case MCI_STATUS: return "status";  case MCI_WINDOW: return "window";
+  case MCI_PUT: return "put";        case MCI_WHERE: return "where";    case MCI_REALIZE: return "realize";
+  case MCI_UPDATE: return "update";  case MCI_GETDEVCAPS: return "getdevcaps";  case MCI_INFO: return "info";
+  case MCI_CUE: return "cue";        case MCI_RESUME: return "resume";
+  default: return "?";
+  }
+}
+
+using MciSendCommandFn = MCIERROR(WINAPI*)(MCIDEVICEID, UINT, DWORD_PTR, DWORD_PTR);
+MciSendCommandFn g_mciSendCommand = nullptr;
+MCIERROR WINAPI MciHook(MCIDEVICEID id, UINT msg, DWORD_PTR flags, DWORD_PTR parms) {
+  const MCIERROR r = g_mciSendCommand(id, msg, flags, parms);
+  char extra[600] = "";
+  if (msg == MCI_OPEN && parms) {
+    const auto* p = reinterpret_cast<const MCI_OPEN_PARMSA*>(parms);
+    const std::string type = !(flags & MCI_OPEN_TYPE) ? "null"
+                           : (flags & MCI_OPEN_TYPE_ID) ? std::to_string(uintptr_t(p->lpstrDeviceType)) : JsonStr(p->lpstrDeviceType);
+    snprintf(extra, sizeof(extra), ",\"type\":%s,\"file\":%s,\"newdev\":%u", type.c_str(),
+             (flags & MCI_OPEN_ELEMENT) ? JsonStr(p->lpstrElementName).c_str() : "null", unsigned(p->wDeviceID));
+  } else if (msg == MCI_PLAY && parms) {
+    const auto* p = reinterpret_cast<const MCI_PLAY_PARMS*>(parms);
+    snprintf(extra, sizeof(extra), ",\"from\":%ld,\"to\":%ld,\"callback\":\"%p\"", (flags & MCI_FROM) ? long(p->dwFrom) : -1L,
+             (flags & MCI_TO) ? long(p->dwTo) : -1L, (flags & MCI_NOTIFY) ? (void*)p->dwCallback : nullptr);
+  } else if ((msg == MCI_PUT || msg == MCI_WHERE) && parms) {
+    const auto* p = reinterpret_cast<const MCI_ANIM_RECT_PARMS*>(parms);
+    snprintf(extra, sizeof(extra), ",\"rect\":[%ld,%ld,%ld,%ld]", p->rc.left, p->rc.top, p->rc.right, p->rc.bottom);
+  } else if (msg == MCI_WINDOW && parms) {
+    const auto* p = reinterpret_cast<const MCI_ANIM_WINDOW_PARMSA*>(parms);
+    snprintf(extra, sizeof(extra), ",\"window\":\"%p\",\"show\":%u", (flags & MCI_ANIM_WINDOW_HWND) ? (void*)p->hWnd : nullptr,
+             (flags & MCI_ANIM_WINDOW_STATE) ? unsigned(p->nCmdShow) : 999u);
+  } else if (msg == MCI_STATUS && parms) {
+    const auto* p = reinterpret_cast<const MCI_STATUS_PARMS*>(parms);
+    snprintf(extra, sizeof(extra), ",\"item\":%lu,\"value\":%lu", (unsigned long)p->dwItem, (unsigned long)p->dwReturn);
+  } else if (msg == MCI_SET && parms) {
+    const auto* p = reinterpret_cast<const MCI_SET_PARMS*>(parms);
+    snprintf(extra, sizeof(extra), ",\"timeFormat\":%lu", (flags & MCI_SET_TIME_FORMAT) ? (unsigned long)p->dwTimeFormat : 0ul);
+  }
+  ShellEvent("\"ev\":\"mci\",\"cmd\":\"%s\",\"msg\":\"%#x\",\"dev\":%u,\"flags\":\"%#lx\",\"ret\":%lu%s", MciName(msg), msg,
+             unsigned(id), (unsigned long)flags, (unsigned long)r, extra);
+  return r;
+}
+
+using PostMessageFn = BOOL(WINAPI*)(HWND, UINT, WPARAM, LPARAM);
+using SendMessageFn = LRESULT(WINAPI*)(HWND, UINT, WPARAM, LPARAM);
+PostMessageFn g_postMessage = nullptr;
+SendMessageFn g_sendMessage = nullptr;
+BOOL WINAPI PostMessageHook(HWND h, UINT m, WPARAM w, LPARAM l) {
+  if (m >= WM_USER) ShellEvent("\"ev\":\"post\",\"msg\":\"%#x\",\"w\":%u,\"l\":%ld,\"hwnd\":\"%p\"", m, unsigned(w), long(l), (void*)h);
+  return g_postMessage(h, m, w, l);
+}
+LRESULT WINAPI SendMessageHook(HWND h, UINT m, WPARAM w, LPARAM l) {
+  // Below 0x7FF: the shell's own messages; dialog/control messages (BM_*, LB_*...) start at WM_USER too, so skip the
+  // common control ranges.
+  if (m >= 0x700 && m < 0x800)
+    ShellEvent("\"ev\":\"send\",\"msg\":\"%#x\",\"w\":%u,\"l\":%ld,\"hwnd\":\"%p\"", m, unsigned(w), long(l), (void*)h);
+  return g_sendMessage(h, m, w, l);
+}
+
+using DoModalFn    = int(__thiscall*)(void*, const char*, HINSTANCE);
+using DoModelessFn = int(__thiscall*)(void*, const char*, HINSTANCE, HWND);
+DoModalFn    g_doModal = nullptr;
+DoModelessFn g_doModeless = nullptr;
+// `module`: the resource DLL (op2shres.dll for the shell's dialogs, out2res.dll for the game's); `at`: the caller.
+std::string ModuleName(HINSTANCE h) {
+  char path[MAX_PATH] = {};
+  GetModuleFileNameA(h, path, sizeof(path));
+  const char* slash = strrchr(path, '\\');
+  return slash ? slash + 1 : path;
+}
+int __fastcall DoModalHook(void* self, void*, const char* res, HINSTANCE inst) {
+  void* at = __builtin_return_address(0);
+  ShellEvent("\"ev\":\"modal\",\"res\":%s,\"module\":%s,\"at\":\"%p\",\"vtbl\":\"%p\"", ResName(res).c_str(),
+             JsonStr(ModuleName(inst).c_str()).c_str(), at, *reinterpret_cast<void**>(self));
+  const int r = g_doModal(self, res, inst);
+  ShellEvent("\"ev\":\"modal_end\",\"res\":%s,\"ret\":%d", ResName(res).c_str(), r);
+  return r;
+}
+int __fastcall DoModelessHook(void* self, void*, const char* res, HINSTANCE inst, HWND parent) {
+  void* at = __builtin_return_address(0);
+  ShellEvent("\"ev\":\"modeless\",\"res\":%s,\"module\":%s,\"at\":\"%p\",\"vtbl\":\"%p\"", ResName(res).c_str(),
+             JsonStr(ModuleName(inst).c_str()).c_str(), at, *reinterpret_cast<void**>(self));
+  return g_doModeless(self, res, inst, parent);
+}
+
+// TApp::ActivateShell (0x486DB0): the game hands control back to the shell with the end reason and the results.
+using ActivateShellFn = int(__thiscall*)(void*, int, MissionResults*);
+ActivateShellFn g_activateShell = nullptr;
+int __fastcall ActivateShellHook(void* self, void*, int reason, MissionResults* r) {
+  ShellEvent("\"ev\":\"activate_shell\",\"reason\":%d,\"at\":\"%p\",\"results\":%d,\"mission\":%d,\"resultReason\":%d", reason,
+             __builtin_return_address(0), r ? 1 : 0, r ? int(r->missionType) : 0, r ? int(r->gameTermReason) : 0);
+  return g_activateShell(self, reason, r);
+}
+
+using OpenStreamFn  = void*(__thiscall*)(void*, const char*);
+using GetFilePathFn = int(__thiscall*)(void*, const char*, char*);
+OpenStreamFn  g_openStream = nullptr;
+GetFilePathFn g_getFilePath = nullptr;
+void* __fastcall OpenStreamHook(void* self, void*, const char* name) {
+  void* s = g_openStream(self, name);
+  ShellEvent("\"ev\":\"file\",\"fn\":\"OpenStream\",\"name\":%s,\"found\":%d", JsonStr(name).c_str(), s ? 1 : 0);
+  return s;
+}
+int __fastcall GetFilePathHook(void* self, void*, const char* name, char* path) {
+  const int r = g_getFilePath(self, name, path);
+  ShellEvent("\"ev\":\"file\",\"fn\":\"GetFilePath\",\"name\":%s,\"found\":%d,\"path\":%s", JsonStr(name).c_str(), r,
+             JsonStr(r ? path : "").c_str());
+  return r;
+}
+
+using LoadLibraryFn = HMODULE(WINAPI*)(const char*);
+LoadLibraryFn g_loadLibrary = nullptr;
+HMODULE WINAPI LoadLibraryHook(const char* name) {
+  HMODULE h = g_loadLibrary(name);
+  ShellEvent("\"ev\":\"lib\",\"name\":%s,\"ok\":%d", JsonStr(name).c_str(), h ? 1 : 0);
+  return h;
+}
+
+using StartSingleGameFn = int(__thiscall*)(void*, GameStartInfo*);
+StartSingleGameFn g_startSingleGame = nullptr;
+int __fastcall StartSingleGameHook(void* self, void*, GameStartInfo* gsi) {
+  const auto& f = gsi->startupFlags;
+  const bool campaign = f.isCampaign;
+  ShellEvent("\"ev\":\"start\",\"script\":%s,\"missionType\":%d,\"isCampaign\":%d,\"speed\":%d,\"seed\":%d,"
+             "\"difficulty\":%d,\"eden\":%d,\"cheats\":%d,\"daynight\":%d,\"disasters\":%d,\"mission\":%d",
+             JsonStr(gsi->scriptName).c_str(), int(f.missionType), campaign ? 1 : 0, gsi->gameSpeed, int(gsi->randomNumberSeed),
+             int(gsi->playerFlags[0].resources), int(gsi->playerFlags[0].isEden), int(f.cheatsEnabled), int(f.dayNightEnabled),
+             int(f.disastersEnabled), campaign ? int(static_cast<MissionResults*>(gsi)->missionType) : -1);
+  return g_startSingleGame(self, gsi);
+}
+
+void PatchShellImports() {
+  HMODULE shell = GetModuleHandleA("OP2Shell.dll");
+  if (!shell) { Log("shell: OP2Shell.dll not loaded");  return; }
+  ShellEvent("\"ev\":\"shell_loaded\",\"base\":\"%p\"", (void*)shell);
+  auto patch = [&](auto& orig, const char* dll, const char* fn, void* hook) {
+    if (void* prev = PatchImport(shell, dll, fn, hook)) orig = reinterpret_cast<std::remove_reference_t<decltype(orig)>>(prev);
+  };
+  patch(g_mciSendCommand, "WINMM.dll", "mciSendCommandA", reinterpret_cast<void*>(&MciHook));
+  patch(g_postMessage, "USER32.dll", "PostMessageA", reinterpret_cast<void*>(&PostMessageHook));
+  patch(g_sendMessage, "USER32.dll", "SendMessageA", reinterpret_cast<void*>(&SendMessageHook));
+  patch(g_loadLibrary, "KERNEL32.dll", "LoadLibraryA", reinterpret_cast<void*>(&LoadLibraryHook));
+  patch(g_openStream, "Outpost2.exe", "?OpenStream@ResManager@@QAEPAVStreamIO@@PBD@Z", reinterpret_cast<void*>(&OpenStreamHook));
+  patch(g_getFilePath, "Outpost2.exe", "?GetFilePath@ResManager@@QAEHPBDPAD@Z", reinterpret_cast<void*>(&GetFilePathHook));
+  patch(g_startSingleGame, "Outpost2.exe", "?StartSingleGame@TApp@@QAEHPAUGameStartInfo@@@Z",
+        reinterpret_cast<void*>(&StartSingleGameHook));
+}
+
+// ---- In game: the cycle hook only logs (and runs a tick script, e.g. a mission's winning orders); no turbo, no quit.
+
+int g_shellGameTick = -1, g_shellEnd = 0;
+void __fastcall ShellCycleHook(GameImpl* self, void*) {
+  g_origGameCycle(self);
+  const int tick = self->tick_;
+  if (tick == g_shellGameTick) return;
+  if (tick < g_shellGameTick || g_shellGameTick < 0) {
+    // A new game: reset the per-game state.
+    g_scriptPos = 0;
+    g_shellEnd = 0;
+    g_nextTelem = 0;
+    RECT r = {};
+    GetWindowRect(g_gameFrame.hWnd_, &r);
+    ShellEvent("\"ev\":\"game\",\"what\":\"first_cycle\",\"tick\":%d,\"map\":[%d,%d],\"frame\":[%ld,%ld,%ld,%ld]", tick,
+               GameMap::GetWidth(), GameMap::GetHeight(), r.left, r.top, r.right - r.left, r.bottom - r.top);
+    LogMusic("start");
+  }
+  g_shellGameTick = tick;
+  while (g_scriptPos < g_script.size() && g_script[g_scriptPos].tick <= tick) RunScriptCmd(g_script[g_scriptPos++], tick);
+  AudioTick(tick);
+  if (cfg.telemEvery > 0 && tick >= g_nextTelem) { WriteTelemetry(tick);  g_nextTelem = (tick / cfg.telemEvery + 1) * cfg.telemEvery; }
+  if (tick % 500 == 0) ShellEvent("\"ev\":\"game\",\"what\":\"tick\",\"tick\":%d", tick);
+  const int end = int(self->gameTermReasons_);
+  if (end != g_shellEnd) {
+    ShellEvent("\"ev\":\"game\",\"what\":\"end\",\"tick\":%d,\"reason\":%d", tick, end);
+    g_shellEnd = end;
+  }
+}
+
+// ---- Control file thread.
+
+std::string g_shellCtl;
+BOOL CALLBACK AddWindowJson(HWND h, LPARAM p) {
+  DWORD pid = 0;
+  GetWindowThreadProcessId(h, &pid);
+  if (pid != GetCurrentProcessId()) return TRUE;
+  auto& s = *reinterpret_cast<std::string*>(p);
+  s += (s.empty() ? "{" : ",{") + WindowJson(h) + ",\"children\":" + ChildrenJson(h) + "}";
+  return TRUE;
+}
+
+void DumpWindows(const std::string& tag) {
+  std::string out;
+  EnumWindows(&AddWindowJson, reinterpret_cast<LPARAM>(&out));
+  ShellEvent("\"ev\":\"dump\",\"tag\":%s,\"windows\":[%s]", JsonStr(tag.c_str()).c_str(), out.c_str());
+}
+
+DWORD WINAPI ShellControlThread(void*) {
+  for (;;) {
+    Sleep(25);
+    FILE* f = fopen(g_shellCtl.c_str(), "r");
+    if (!f) continue;
+    char line[256];
+    std::vector<std::string> cmds;
+    while (fgets(line, sizeof(line), f)) cmds.emplace_back(line);
+    fclose(f);
+    DeleteFileA(g_shellCtl.c_str());
+    for (auto c : cmds) {
+      while (!c.empty() && (c.back() == '\n' || c.back() == '\r')) c.pop_back();
+      if (c.rfind("dump", 0) == 0) DumpWindows(c.size() > 5 ? c.substr(5) : "");
+      else if (c == "quit") {
+        ShellEvent("\"ev\":\"quit\"");
+        if (g_telem) fclose(g_telem);
+        if (g_audio) fclose(g_audio);
+        if (g_log) fclose(g_log);
+        TerminateProcess(GetCurrentProcess(), 0);
+      }
+    }
+  }
+}
+
+void ShellInit() {
+  InitializeCriticalSection(&g_shellLock);
+  g_shellT0 = Now();
+  g_mainThread = GetCurrentThreadId();
+  cfg.out        = Env("OP2H_OUT", ".");
+  cfg.script     = Env("OP2H_SCRIPT");
+  cfg.telemEvery = EnvInt("OP2H_TELEM_EVERY", 0);
+  g_log   = fopen((cfg.out + "\\harness.log").c_str(), "w");
+  g_shell = fopen((cfg.out + "\\shell.jsonl").c_str(), "w");
+  g_telem = cfg.telemEvery > 0 ? fopen((cfg.out + "\\telemetry.jsonl").c_str(), "w") : nullptr;
+  g_audio = EnvInt("OP2H_AUDIO", 0) ? fopen((cfg.out + "\\audio.jsonl").c_str(), "w") : nullptr;
+  g_shellCtl = cfg.out + "\\ctl.txt";
+  Log("harness: shell mode");
+
+  // A private copy of the settings, as in mission runs; here sound and the movies stay as configured (OP2H_INI_<key>
+  // overrides a [Game] key, e.g. OP2H_INI_IntroAVI=1).
+  const std::string ini = cfg.out + "\\outpost2.ini";
+  if (CopyFileA(g_configFile.iniPath_, ini.c_str(), FALSE) && ini.size() < sizeof(g_configFile.iniPath_)) {
+    strcpy(g_configFile.iniPath_, ini.c_str());
+    for (const char* key : { "IntroAVI", "ShowMovies", "Music", "Sound", "GameSpeed", "Demo", "MusicVol", "SoundVol" }) {
+      const std::string v = Env((std::string("OP2H_INI_") + key).c_str());
+      if (!v.empty()) WritePrivateProfileStringA("Game", key, v.c_str(), ini.c_str());
+    }
+    Log("config: using %s", ini.c_str());
+  }
+  JumpTo(FnOP2MessageBox, reinterpret_cast<void*>(&MessageBoxHook));
+  if (g_audio) InstallAudioHooks();
+  g_origGameCycle = reinterpret_cast<GameCycleFn>(RelinkCall(CallProcessGameCycle, reinterpret_cast<void*>(&ShellCycleHook)));
+  // Every dialog of the shell and the game goes through IDlgWnd::DoModal/DoModeless in Outpost2.exe.
+  static const uint8_t doModal[]    = { 0x83, 0xEC, 0x04, 0xA1, 0xAC, 0xE8, 0x56, 0x00 };  // sub esp,4; mov eax,[56E8ACh]
+  static const uint8_t doModeless[] = { 0x83, 0xEC, 0x10, 0xA1, 0xAC, 0xE8, 0x56, 0x00 };  // sub esp,10h; mov eax,[56E8ACh]
+  static const uint8_t activate[]   = { 0x83, 0xEC, 0x2C, 0x53, 0x56 };  // sub esp,2Ch; push ebx; push esi
+  g_doModal       = reinterpret_cast<DoModalFn>(HookEntry(0x431A80, doModal, 8, reinterpret_cast<void*>(&DoModalHook)));
+  g_doModeless    = reinterpret_cast<DoModelessFn>(HookEntry(0x431BF0, doModeless, 8, reinterpret_cast<void*>(&DoModelessHook)));
+  g_activateShell = reinterpret_cast<ActivateShellFn>(HookEntry(0x486DB0, activate, 5, reinterpret_cast<void*>(&ActivateShellHook)));
+  SetWindowsHookExA(WH_CALLWNDPROCRET, &ShellCallWndRet, nullptr, g_mainThread);
+  SetWindowsHookExA(WH_GETMESSAGE, &ShellGetMsg, nullptr, g_mainThread);
+  if (!cfg.script.empty()) LoadScript(cfg.script);
+  CreateThread(nullptr, 0, &ShellControlThread, nullptr, 0, nullptr);
+  ShellEvent("\"ev\":\"init\",\"screen\":[%d,%d]", GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+}
+
 } // namespace
 
 extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
+  if (EnvInt("OP2H_SHELL", 0)) { g_shellMode = true;  ShellInit();  return; }  // Normal boot, watched (shell.py).
   cfg.mission = Env("OP2H_MISSION");
   if (cfg.mission.empty()) return;  // Not a harness run: stay completely inert.
 
@@ -1881,9 +2313,11 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   }
 }
 
-// op2ext calls this when OP2Shell.dll gets loaded. In a harness run that only happens if the game fell back to the
-// shell (e.g. the mission ended through the normal end-of-game path), so treat it as the end of the run.
+// op2ext calls this when OP2Shell.dll gets loaded. In a mission run that only happens if the game fell back to the
+// shell (e.g. the mission ended through the normal end-of-game path), so treat it as the end of the run. In shell mode
+// it is when the shell's imports get hooked.
 extern "C" __declspec(dllexport) void RunMod() {
+  if (g_shellMode) { PatchShellImports();  return; }
   if (!cfg.mission.empty() && g_started) Quit("returned to shell");
 }
 
