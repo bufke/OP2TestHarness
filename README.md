@@ -10,6 +10,13 @@ harness/run.sh --scenario harness/oracle/scenarios/line_fast.json --out /tmp/op2
 make -C harness check                         # end-to-end self-test
 ```
 
+**Requirements (development only).** The harness needs the GOG release with the **OPU 1.4.1** update installed in the
+Wine prefix: op2ext (part of OPU) loads `harness.dll` as an ini module, and every recorded oracle run is a recording
+of GOG 1.2 + OPU 1.4.1, so "the original" that op2-rs is checked against is that patched game (where OPU changed
+behaviour, docs/deviations.md says which we follow). A different OPU version can change recordings; re-record with
+`make accuracy-full` and review the differences before switching. Players don't need OPU: op2-rs reads the GOG or CD
+data with or without it, and honours OPU's loose files and extra missions when present (docs/game-data.md).
+
 When run from Claude Code, `run.sh` and `make check` need `dangerouslyDisableSandbox` (Wine uses `/run/user/1000/wine`).
 
 ## Options (`run.sh --help`)
