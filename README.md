@@ -110,7 +110,7 @@ or `@N` for the unit made by the Nth `spawn` command. Coordinates are internal t
 0    spawn     LIGHT_TANK 0 20 30 LASER 64   # type, owner, x, y, weapon (or -), rotation 0-255
 0    setcell   10 20 50 24 7                 # x1 y1 x2 y2 cellType: repaint terrain (inclusive)
 10   move      @0 40 30     # the first spawned unit
-0    view      60 64        # centre the view on a tile (for screenshots)
+0    view      60 64        # centre the view on a tile (for screenshots; not applied with --draw-every 1)
      stop <id> | selfdestruct <id> | research <labId> <techId> <scientists> | shot | telemetry | trace | quit
      guard <id> <id> | attackground <id> x y | lights <id> 0|1
      movewp <id> x,y[,r] ... | standground <id> x,y[,r] ... | patrol <id> <loop> x,y[,r] ...   # waypoints, range r
