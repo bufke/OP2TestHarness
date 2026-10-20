@@ -234,6 +234,20 @@ capacities, morale inputs) and `pi`, every dword of PlayerImpl 0x00..0x1EF; and 
   outputs are the same as without `--audio`. `harness.log` notes the time from MusicManager::Init to the mission's
   InitProc.
 
+## Disasters
+
+Script verbs that schedule a disaster the way a mission does (the TethysGame::Set* exports; oracle/FINDINGS.md
+"Disasters"). A trailing `now` skips the two 500-tick warnings, as the API's immediate flag does.
+
+```
+5  meteor    30 30 2                # x y size (0 small .. 2 large, -1 random)
+5  quake     20 20 1                # x y magnitude
+5  eruption  40 40 5                # x y lava speed
+5  lightning 20 20 10 60 30         # x1 y1 duration x2 y2
+5  tornado   20 20 16 60 30 now     # x1 y1 duration x2 y2
+5  blight    40 40 [speed]          # GameMap::SetVirusUL; lavaspeed n; lavapossible x1 y1 x2 y2 0|1
+```
+
 ## Group verbs
 
 `group <name> <op> [args]` calls the mission API's AI group exports on a group the script names (op2-sim's script

@@ -1170,6 +1170,29 @@ bool RunEcoCmd(const ScriptCmd& c, int tick) {
     p->recalculateValues_ = 1;
     return true;
   }
+  // Disasters, as a mission DLL schedules them (the TethysGame::Set* exports 0x4782E0..0x4783E0, which create the
+  // disaster object at the tile's centre); a trailing `now` skips the two warning waits (Disaster::StartDisaster).
+  //   meteor x y size | quake x y magnitude | eruption x y speed | lightning x1 y1 duration x2 y2
+  //   tornado x1 y1 duration x2 y2 | blight x y [speed] | lavaspeed n | lavapossible x1 y1 x2 y2 0|1
+  if (v == "meteor" || v == "quake" || v == "eruption" || v == "lightning" || v == "tornado") {
+    const bool now = arg(c.args.size() - 1) == "now";
+    Unit d;
+    if (v == "meteor")    d = Game::CreateMeteor(loc(0), MeteorSize(num(2)), now);
+    if (v == "quake")     d = Game::CreateEarthquake(loc(0), num(2), now);
+    if (v == "eruption")  d = Game::CreateEruption(loc(0), num(2), now);
+    if (v == "lightning") d = Game::CreateLightning(loc(0), loc(3), num(2), now);
+    if (v == "tornado")   d = Game::CreateTornado(loc(0), loc(3), num(2), now);
+    Log("%s at (%s,%s): unit %d", v.c_str(), arg(0).c_str(), arg(1).c_str(), d.GetID());
+    return true;
+  }
+  if (v == "blight")    { Game::CreateBlight(loc(0), c.args.size() > 2 ? num(2) : -1);  return true; }
+  if (v == "lavaspeed") { Game::SetLavaSpeed(num(0));  return true; }
+  if (v == "lavapossible") {
+    const Location a = loc(0), b = loc(2);
+    for (int y = a.y; y <= b.y; ++y)
+      for (int x = a.x; x <= b.x; ++x) GameMap::SetLavaPossible(Location(x, y), num(4) != 0);
+    return true;
+  }
   Unit u = ScriptUnit(arg(0));
   if (v == "poke") {
     if (!u.IsLive()) return true;
