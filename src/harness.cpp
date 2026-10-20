@@ -415,8 +415,16 @@ void WriteTraceFx(FILE* f) {
       if (const int t = int(mo->GetTypeID()); t >= int(MapID::AcidCloud) && t <= int(MapID::BFG))
         if (std::find(g_spawned.begin(), g_spawned.end(), ce->parentIndex_) != g_spawned.end()) continue;
     }
-    fprintf(f, "%s[%d,\"%s\",\"%s\",%d,%d,%d]", first ? "" : ",", int(i), TypeName(mo->GetTypeID()),
+    fprintf(f, "%s[%d,\"%s\",\"%s\",%d,%d,%d", first ? "" : ",", int(i), TypeName(mo->GetTypeID()),
             ActionName(int(mo->action_)), mo->actionTimer_, mo->pixelX_ - PadTiles() * 32, mo->pixelY_);
+    // --trace-raw: also the animation and frame drawn (set when the object is drawn: use --draw-every 1) and the raw
+    // MapObject bytes, e.g. of the structure a ConVec builds as it develops.
+    if (g_traceRaw) {
+      fprintf(f, ",%d,%d,\"", mo->animationIndex_, mo->frameIndex_);
+      Hex(f, mo, 0x80);
+      fputc('"', f);
+    }
+    fputc(']', f);
     first = false;
   }
   fputc(']', f);
