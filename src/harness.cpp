@@ -279,6 +279,7 @@ FILE* g_trace     = nullptr;
 bool  g_traceRaw  = false;    // Also dump raw MapObject/PathContext bytes (for reverse engineering).
 std::vector<int> g_spawned;   // Spawn index -> unit ID.
 // Spawns that have died. The game recycles object indices, so a dead spawn's ID may later belong to something else.
+// A spawn that failed (no free object index) is gone from the start.
 std::vector<bool> g_spawnGone;
 std::vector<MapID> g_spawnType;
 
@@ -333,11 +334,12 @@ void WriteTraceUnit(FILE* f, bool& first, Unit u, int spawnIndex) {
       if (g_traceRaw) { fputs(",\"rawPath\":\"", f);  Hex(f, pc, 0xD4);  fputc('"', f); }
     }
   }
-  // Turret state of armed units (tanks, guard posts). Offsets learned from Outpost2.exe: the turret rotation is the
+  // Turret state of armed units (vehicles, guard posts; other structures use weapon_ for other things, e.g. a lab's
+  // research countdown, chaos_same_topic). Offsets learned from Outpost2.exe: the turret rotation is the
   // byte at +0x2D (TankVehicle::Draw 0x484E5A passes it to SelectTurretGraphic; the aim steps at 0x43E6C5 slew it),
   // +0x2E is reloadTimer_, and +0x4C is the weapon target (low word = unit index when the high word is 0xFFFF,
   // high word 0x7FFF = none; else a ground tile), used by the fire handlers at 0x4A7650..0x4A7BC0.
-  if (const int w = mo->weapon_; w >= int(MapID::AcidCloud) && w <= int(MapID::BFG) && (u.IsVehicle() || u.IsBuilding())) {
+  if (const int w = mo->weapon_; w >= int(MapID::AcidCloud) && w <= int(MapID::BFG) && (u.IsVehicle() || u.GetType() == MapID::GuardPost)) {
     const uint8_t* b = reinterpret_cast<const uint8_t*>(mo);
     const uint16_t tlo = *reinterpret_cast<const uint16_t*>(b + 0x4C), thi = *reinterpret_cast<const uint16_t*>(b + 0x4E);
     fprintf(f, ",\"weapon\":\"%s\",\"tur\":%d,\"reload\":%d,\"tgt\":", TypeName(MapID(w)), b[0x2D], mo->reloadTimer_);
@@ -440,8 +442,14 @@ void WriteTrace(int tick) {
   bool first = true;
   for (size_t i = 0; i < g_spawned.size(); ++i) {
     const Unit u(g_spawned[i]);
-    if (!g_spawnGone[i] && (!u.IsLive() || u.GetType() != g_spawnType[i])) g_spawnGone[i] = true;
-    if (!g_spawnGone[i]) WriteTraceUnit(f, first, u, int(i));
+    // Gone for good once dead (the flag stays set after the object is freed, until its index is reused) or replaced. A
+    // vehicle in a Garage bay is marked dead too, with pNext_ -2 (0x44D000): it isn't listed while it's in there, and
+    // is again once it comes out (chaos_garage_full).
+    if (g_spawnGone[i]) continue;  // (a spawn that failed has no object at all)
+    const MapObject* mo = u.GetMapObject();
+    const bool inBay = reinterpret_cast<uintptr_t>(mo->pNext_) == 0xFFFFFFFEu;
+    if (((mo->flags_ & MoFlagDead) && !inBay) || u.GetType() != g_spawnType[i]) g_spawnGone[i] = true;
+    else if (u.IsLive()) WriteTraceUnit(f, first, u, int(i));
   }
   if (g_spawned.empty()) {  // No scenario spawns: trace every vehicle.
     for (int p = 0; p < g_gameImpl.numPlayers_; ++p)
@@ -1399,6 +1407,13 @@ void RunScriptCmd(const ScriptCmd& c, int tick) {
   std::string all;
   for (auto& a : c.args) all += " " + a;
   Log("script: tick %d: %s%s", tick, c.verb.c_str(), all.c_str());
+  // A spawn that has died (or failed) gets no more orders: its object index may since belong to a shot or an
+  // explosion, and an order to that crashes the game (Vehicle::SetDestinationWaypoints 0x42324F; fuzz seed 5, a Move to
+  // a Scout 180 ticks after it died). The UI can't give such an order.
+  if (const std::string a0 = arg(0); !a0.empty() && a0[0] == '@') {
+    const size_t n = atoi(a0.c_str() + 1);
+    if (n < g_spawnGone.size() && g_spawnGone[n]) { Log("script: spawn %u is gone: skipped", unsigned(n));  return; }
+  }
 
   if      (c.verb == "move")         IssueMove(unit(0), loc(1));
   else if (c.verb == "dock")         IssueMove(unit(0), loc(1), CommandType::Dock);  // ctMoDock, to a dock tile
