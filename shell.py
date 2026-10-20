@@ -30,6 +30,7 @@ import ctypes
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -281,6 +282,25 @@ def summarize(out: Path, events: list[dict], driver: list[dict]) -> dict:
             "shots": [d for d in driver if d.get("step") in ("shot", "shots")]}
 
 
+class SavesAside:
+    """Moves the game's saved games out of the way for a run and back afterwards (the SAVE and LOAD dialogs list
+    them, so a run that saves needs the same empty folder every time). The run's own saves are kept in
+    <out>/saves."""
+
+    def __init__(self, saves: Path, out: Path):
+        self.saves, self.out = saves, out
+        self.aside = saves.parent / f"saves.harness-aside-{os.getpid()}"
+        saves.mkdir(parents=True, exist_ok=True)
+        saves.rename(self.aside)
+        saves.mkdir()
+
+    def restore(self):
+        kept = self.out / "saves"
+        shutil.rmtree(kept, ignore_errors=True)
+        shutil.move(self.saves, kept)
+        self.aside.rename(self.saves)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--drive", type=Path, required=True, help="driver script (see above)")
@@ -293,6 +313,8 @@ def main() -> int:
                     help="[Game] setting in the run's private outpost2.ini, e.g. IntroAVI=1 (repeatable)")
     ap.add_argument("--timeout", type=float, default=600, help="wall-clock seconds before the game is killed")
     ap.add_argument("--display", help="use this X display instead of a private Xvfb (e.g. to watch)")
+    ap.add_argument("--clean-saves", action="store_true",
+                    help="run with an empty OPU/saves (the saved games SGAME*.OP2), putting the old ones back after")
     args = ap.parse_args()
 
     run.sync_missions_from_play_prefix()
@@ -326,6 +348,7 @@ def main() -> int:
     # The program needs its full Windows path: `explorer /desktop=... Outpost2.exe` silently starts nothing.
     exe = "C:\\" + str((run.GAME_DIR / "Outpost2.exe").relative_to(run.PREFIX / "drive_c")).replace("/", "\\")
 
+    saves = SavesAside(run.GAME_DIR / "OPU" / "saves", out) if args.clean_saves else None
     events = Events(out / "shell.jsonl")
     driver: list[dict] = []
     log = open(out / "wine.log", "w")
@@ -434,6 +457,8 @@ def main() -> int:
     if xvfb:
         xvfb.terminate()
         xvfb.wait()
+    if saves:
+        saves.restore()
     events.poll()
     (out / "ctl.txt").unlink(missing_ok=True)
     with open(out / "driver.jsonl", "w") as f:

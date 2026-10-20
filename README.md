@@ -309,6 +309,7 @@ harness/shell.sh --drive harness/oracle/shell/eden1.txt --script harness/oracle/
 | `--script FILE` | in-game tick script (the order verbs of "Scripted input", e.g. a mission's winning orders); its ticks count from each game's start. Input verbs don't apply: the driver's real input does |
 | `--audio`, `--telemetry-every N` | in-game audio.jsonl and telemetry.jsonl, as in mission runs |
 | `--timeout S` | wall-clock limit (default 600) |
+| `--clean-saves` | run with an empty `OPU/saves` (the SAVE and LOAD dialogs list SGAME*.OP2 from there): the old saves are set aside and put back after the run, and the run's own go to `<out>/saves` (`shell_saveload`) |
 
 Driver steps, one per line (`#` comments; times in wall-clock seconds):
 
