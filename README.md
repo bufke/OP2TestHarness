@@ -86,8 +86,11 @@ The exit status is 0 when the run reached its tick limit or the mission ended.
   - `tiles`: the file tiles within 3 of the unit whose TileData::unitIndex is the unit (a building's footprint
     without its dock, a moving vehicle's next tile).
   - A spawn is listed until it dies (the dead flag), and never again: the game recycles object indices, so a dead
-    spawn's ID can later belong to a shot or an explosion.
-  - Armed units add `weapon`, `tur`, `reload`, `tgt` (ENGINE_PLAN.md). A unit under a weapon status effect adds
+    spawn's ID can later belong to a shot or an explosion. A vehicle in a Garage bay isn't listed while it's in there
+    (the game marks it dead too, with `pNext_` -2) and is listed again once it's out. A spawn that failed (the object
+    table full: 2047 objects) is never listed.
+  - Armed units (vehicles and Guard Posts; other structures use the weapon word for other things, e.g. a lab's research
+    countdown) add `weapon`, `tur`, `reload`, `tgt` (ENGINE_PLAN.md). A unit under a weapon status effect adds
     `status`: its [EMP, stickyfoam, ESG] timers (+0x56, +0x54, +0x58, in 8-tick phases; 0 for an effect that is off). Top level: `fx` (weapon fire of spawned
     units, with `timer`), `ents` (every other live object as `[index, type, action, timer, px, py]`: explosions,
     unspawned units), `alloc` (the object index allocator, 0x439A10: highest index so far and the ring of freed
@@ -129,6 +132,17 @@ to 8 waypoints; `r` is the waypoint's range in its top 3 bits, `loop` the waypoi
 
 Commands for a tick run after that game cycle. A move at tick T shows `cmd: Move` in tick T's trace line and the unit
 starts turning or moving in cycle T+1.
+
+The order verbs send the packets the UI sends, so the game's own checks apply (a ConVec that is building or an EMPed
+vehicle ignores them; chaos_sd_mid_dock), except `attack`, which goes through TethysAPI's `Unit::DoAttack`: it sends
+nothing when the target isn't live. A command whose first argument is a spawn (`@N`) the trace has seen die is skipped
+(logged): the dead unit's object index may belong to a shot by then, and an order to that crashes the game.
+
+**Differential fuzzing.** `op2-inspect fuzz --template harness/oracle/fuzz/colony.json --seeds 1-300 --out DIR`
+generates a random but legal script of these verbs per seed for a template (`oracle/fuzz/*.json`: a scenario plus
+what to generate), plays it here and in op2-sim, compares the traces, and shrinks each diverging script (and each
+crash of the original, by crash site) to a minimal one with ddmin (`DIR/seed-N/minimal.json`). It runs the harness,
+so outside the Claude Code sandbox; tools/crates/op2-inspect/src/fuzz_run.rs.
 
 ## Mouse and keyboard input
 
