@@ -1180,8 +1180,10 @@ bool RunEcoCmd(const ScriptCmd& c, int tick) {
     if (v == "meteor")    d = Game::CreateMeteor(loc(0), MeteorSize(num(2)), now);
     if (v == "quake")     d = Game::CreateEarthquake(loc(0), num(2), now);
     if (v == "eruption")  d = Game::CreateEruption(loc(0), num(2), now);
-    if (v == "lightning") d = Game::CreateLightning(loc(0), loc(3), num(2), now);
-    if (v == "tornado")   d = Game::CreateTornado(loc(0), loc(3), num(2), now);
+    // An end x or y of -1 is left for the game to pick when the disaster strikes.
+    const Location end(num(3) == -1 ? -1 : loc(3).x, num(4));
+    if (v == "lightning") d = Game::CreateLightning(loc(0), end, num(2), now);
+    if (v == "tornado")   d = Game::CreateTornado(loc(0), end, num(2), now);
     Log("%s at (%s,%s): unit %d", v.c_str(), arg(0).c_str(), arg(1).c_str(), d.GetID());
     return true;
   }
