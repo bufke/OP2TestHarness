@@ -1187,12 +1187,22 @@ bool RunEcoCmd(const ScriptCmd& c, int tick) {
     Log("%s at (%s,%s): unit %d", v.c_str(), arg(0).c_str(), arg(1).c_str(), d.GetID());
     return true;
   }
-  if (v == "blight")    { Game::CreateBlight(loc(0), c.args.size() > 2 ? num(2) : -1);  return true; }
+  if (v == "blight") {
+    // Game::CreateBlight: the speed (BlightManager::SetSpreadSpeed), then GameMap::SetVirusUL (0x476EA0), which takes
+    // its flag in ecx and the Location on the stack (MinGW's fastcall passes TethysAPI's (Location, ibool) otherwise).
+    if (c.args.size() > 2 && num(2) >= 0) Game::SetBlightSpeed(num(2));
+    using SetVirusFn = void(__fastcall*)(int flag, int unused, int x, int y);
+    reinterpret_cast<SetVirusFn>(0x476EA0)(1, 0, loc(0).x, loc(0).y);
+    return true;
+  }
   if (v == "lavaspeed") { Game::SetLavaSpeed(num(0));  return true; }
   if (v == "lavapossible") {
     const Location a = loc(0), b = loc(2);
+    // GameMap::SetLavaPossible (0x476F20) takes the flag in ecx and the Location on the stack; MinGW's fastcall
+    // passes TethysAPI's (Location, ibool) differently, so call it with that layout spelled out.
+    using SetLavaPossibleFn = void(__fastcall*)(int flag, int unused, int x, int y);
     for (int y = a.y; y <= b.y; ++y)
-      for (int x = a.x; x <= b.x; ++x) GameMap::SetLavaPossible(Location(x, y), num(4) != 0);
+      for (int x = a.x; x <= b.x; ++x) reinterpret_cast<SetLavaPossibleFn>(0x476F20)(num(4) != 0, 0, x, y);
     return true;
   }
   Unit u = ScriptUnit(arg(0));
