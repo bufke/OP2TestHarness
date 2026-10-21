@@ -2034,6 +2034,28 @@ void* PatchImport(HMODULE mod, const char* dll, const char* fn, void* hook) {
   return nullptr;
 }
 
+// ---- Mission DLLs' own modal dialogs. Some missions (Pursued, Rising From the Ashes) open a briefing box from InitProc
+// with user32's DialogBoxParamA, which would block an unattended run forever (they ignore its result). OPU loads mission
+// DLLs itself (its hook at 0x402B44), so instead of their imports the harness watches window creation on the game's
+// thread: a dialog whose instance is a mission DLL (it exports InitProc) isn't created, and DialogBoxParamA returns -1
+// at once, as if the player had closed it.
+
+LRESULT CALLBACK MissionDialogCbt(int code, WPARAM w, LPARAM l) {
+  if (code == HCBT_CREATEWND) {
+    const auto* cs = reinterpret_cast<const CBT_CREATEWNDA*>(l)->lpcs;
+    const bool dialog = cs && (reinterpret_cast<uintptr_t>(cs->lpszClass) == 0x8002 ||
+                               (HIWORD(reinterpret_cast<uintptr_t>(cs->lpszClass)) && strcmp(cs->lpszClass, "#32770") == 0));
+    HMODULE mod = cs ? reinterpret_cast<HMODULE>(cs->hInstance) : nullptr;
+    if (dialog && mod && mod != GetModuleHandleA(nullptr) && GetProcAddress(mod, "InitProc")) {
+      char path[MAX_PATH] = {};
+      GetModuleFileNameA(mod, path, sizeof(path) - 1);
+      Log("dialog: a mission dialog box (%s, \"%s\") not opened", path, cs->lpszName ? cs->lpszName : "");
+      return 1;
+    }
+  }
+  return CallNextHookEx(nullptr, code, w, l);
+}
+
 const char* MciName(UINT m) {
   switch (m) {
   case MCI_OPEN: return "open";      case MCI_CLOSE: return "close";    case MCI_PLAY: return "play";
@@ -2360,6 +2382,7 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   memcpy(g_drawPanesCode, reinterpret_cast<void*>(OnIdleDrawPanes), 2);
   JumpTo(FnOP2MessageBox, reinterpret_cast<void*>(&MessageBoxHook));
   if (g_audio) InstallAudioHooks();
+  SetWindowsHookExA(WH_CBT, &MissionDialogCbt, nullptr, GetCurrentThreadId());
   g_realGetCursorPos     = reinterpret_cast<GetCursorPosFn>(PatchIat(IatGetCursorPos, reinterpret_cast<void*>(&VirtualGetCursorPos)));
   g_realGetAsyncKeyState =
     reinterpret_cast<GetAsyncKeyStateFn>(PatchIat(IatGetAsyncKeyState, reinterpret_cast<void*>(&VirtualGetAsyncKeyState)));
