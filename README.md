@@ -248,10 +248,11 @@ capacities, morale inputs) and `pi`, every dword of PlayerImpl 0x00..0x1EF; and 
   `tick * 1000 / 36` ms (real time at speed 10), so runs are deterministic. Nothing else changes: an audio run's other
   outputs are the same as without `--audio`. `harness.log` notes the time from MusicManager::Init to the mission's
   InitProc.
-- Known gap: the message log's throttle slots are stamped before the harness loads (0x438FE0) with the real clock,
-  so they look recent to the virtual one once the machine has been up more than about 27.7 hours, and then no
-  throttled message passes all run. Record `--audio` runs on a machine up less than a day (notes/findings-missions.md
-  "Eden mission 5").
+- The message log's throttle slots are stamped before the harness loads (0x438FE0), from the real clock; at the
+  mission's InitProc the harness rebases them to what the log's reset (0x439510) writes at time 0, so the verdicts
+  don't depend on the machine's uptime (before that fix, past ~27.7 h of uptime no throttled message passed all run).
+- The `tables` line's `prio_ctor` isn't all priorities: the game reuses part of those bytes, including a real
+  timeGetTime stamp (0x56E89C), so it changes between recordings; accuracy/runs.py leaves it out of the manifest hash.
 
 ## Disasters
 

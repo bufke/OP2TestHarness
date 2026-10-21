@@ -1655,8 +1655,18 @@ int __fastcall MusicInitHook(void* self, void*) {
   g_musicInitAt = Now();
   return g_musicInit(self);
 }
+// The message log's six throttle stamps (MessageLog 0x54FCF0 +0x1310..+0x132C) are set by its static initializer
+// (0x438FE0) from the real timeGetTime, before the harness hooks the clock; once the machine has been up past the virtual
+// clock's base (~27.7 h) they all look recent and no throttled message passes all run. They are rebased here to what
+// the message log's reset (0x439510) would write at time 0, so a run's verdicts don't depend on the machine's uptime.
+void RebaseMessageThrottle() {
+  static const struct { uint32_t addr, offset; } stamps[] = {
+    { 0x55101C, 5000 }, { 0x551010, 15000 }, { 0x551000, 25000 }, { 0x551008, 35000 }, { 0x551014, 45000 }, { 0x551018, 55000 } };
+  for (const auto& s : stamps) *reinterpret_cast<uint32_t*>(s.addr) = s.offset;
+}
 int __fastcall InitProcHook(void* self, void*) {
   Log("audio: InitProc starts %.1f ms after MusicManager::Init", (Now() - g_musicInitAt) * 1000.0 / Frequency());
+  RebaseMessageThrottle();
   return g_initProc(self);
 }
 
