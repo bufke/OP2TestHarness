@@ -791,6 +791,35 @@ void LogUiControls() {
         c.rc.bottom, unsigned(c.e->flags_), c.help.c_str());
 }
 
+// The `hotkeys` verb: one line of hotkeys.jsonl with the buttons' hotkey table, the filter object at 0x546BB0 (vtable
+// 0x4CF890, its OnUIEvent 0x40A710) that sends a WM_KEYDOWN or WM_SYSKEYDOWN to the button registered for that virtual
+// key while its +0x404 counter is 0 (Pause and the chat line raise it, 0x40A6E0). A button takes its key from the
+// letter after its tooltip's '&' (UIGraphicalButton::SetDisplayInfo 0x40AD70, UIButton::SetHotKey 0x40A9F0, upper
+// case) and registers it when added to a pane, unless another button already holds that key (UIButton::OnAdd
+// 0x40A920). Each entry: [vk, flags (UIButton +4: 2 disabled), tooltip, vtable].
+void WriteHotkeys(int tick) {
+  static FILE* f = fopen((cfg.out + "\\hotkeys.jsonl").c_str(), "w");
+  if (!f) return;
+  auto* filter = reinterpret_cast<const uint8_t*>(0x546BB0);
+  auto* table = reinterpret_cast<UIElement* const*>(filter + 4);
+  fprintf(f, "{\"tick\":%d,\"off\":%d,\"keys\":[", tick, *reinterpret_cast<const int*>(filter + 0x404));
+  bool first = true;
+  for (int vk = 0; vk < 256; ++vk) {
+    UIElement* e = table[vk];
+    if (!e || IsBadReadPtr(e, 0x20)) continue;
+    std::string help;
+    for (char ch : ControlHelp(e)) {
+      if (ch == '"' || ch == '\\') help += '\\';
+      if (uint8_t(ch) >= 0x20) help += ch;
+    }
+    fprintf(f, "%s[%d,%u,\"%s\",%u]", first ? "" : ",", vk, unsigned(e->flags_), help.c_str(),
+            unsigned(*reinterpret_cast<uintptr_t*>(e)));
+    first = false;
+  }
+  fputs("]}\n", f);
+  fflush(f);
+}
+
 // `name`: "tabN" (command pane report tab N, 0 = top), "minimapN" (minimap button N), or a case-insensitive substring of
 // a control's tooltip with '_' for spaces (e.g. "Mission_Objectives").
 bool UiToClient(const std::string& name, POINT* out) {
@@ -1000,7 +1029,7 @@ Unit ScriptUnit(const std::string& s) {
 
 bool IsInputVerb(const std::string& v) {
   static const char* const verbs[] = { "mouse", "click", "rclick", "mclick", "dblclick", "down", "up", "drag", "key",
-                                       "keydown", "keyup", "type", "select", "uilist" };
+                                       "keydown", "keyup", "type", "select", "uilist", "hotkeys" };
   for (const char* n : verbs) if (v == n) return true;
   return false;
 }
@@ -1149,6 +1178,8 @@ void RunInputCmd(const ScriptCmd& c, int tick) {
     }
   } else if (v == "uilist") {
     LogUiControls();
+  } else if (v == "hotkeys") {
+    WriteHotkeys(tick);
   }
 }
 

@@ -162,6 +162,7 @@ Script verbs that drive the game's UI the way a player does (the orders above by
 100 type     hello world          # characters (chat: `key enter`, `type ...`, `key enter`)
     mouse <pos> | down <pos> [button] | up <pos> [button] | dblclick <pos> | mclick <pos> | keydown <key> | keyup <key>
     select <unit>                 # left click on the unit, centring the view first if it is off screen
+    hotkeys                       # the command pane's hotkey table now: a line of hotkeys.jsonl (key, flags, tooltip)
 ```
 
 - A `<pos>` is `<x> <y>` (client pixels), `tile <x> <y>` (centre of that tile in the detail pane's current view;
