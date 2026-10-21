@@ -277,6 +277,28 @@ int PadTiles() { return GameMap::GetPaddingWidth(); }
 
 FILE* g_trace     = nullptr;
 bool  g_traceRaw  = false;    // Also dump raw MapObject/PathContext bytes (for reverse engineering).
+bool  g_traceMap  = false;    // Also list the map tiles that changed since the previous trace line (`--trace-map`).
+std::vector<uint32_t> g_mapPrev;  // The map's cell, graphic and wall bits at the previous trace line.
+
+// `"map":[[x, y, cell, graphic, wall], ...]`: the tiles (file coordinates) whose cell type, tile graphic or
+// wall-or-building bit (TileData) changed since the previous trace line; the first line lists none.
+void WriteTraceMap(FILE* f) {
+  const int w = GameMap::GetWidth(), h = GameMap::GetHeight(), pad = PadTiles();
+  const bool fresh = g_mapPrev.size() != size_t(w) * h;
+  if (fresh) g_mapPrev.assign(size_t(w) * h, 0);
+  fputs(",\"map\":[", f);
+  bool first = true;
+  for (int y = 0; y < h; ++y)
+    for (int x = 0; x < w; ++x) {
+      const uint32_t t = GameMap::GetImpl()->Tile(x + pad, y).u32All & 0x8000FFFFu;
+      uint32_t& prev = g_mapPrev[size_t(y) * w + x];
+      if (!fresh && t != prev)
+        fprintf(f, "%s[%d,%d,%u,%u,%u]", first ? "" : ",", x, y, t & 0x1F, (t >> 5) & 0x7FF, t >> 31), first = false;
+      prev = t;
+    }
+  fputc(']', f);
+}
+
 std::vector<int> g_spawned;   // Spawn index -> unit ID.
 // Spawns that have died. The game recycles object indices, so a dead spawn's ID may later belong to something else.
 // A spawn that failed (no free object index) is gone from the start.
@@ -470,6 +492,7 @@ void WriteTrace(int tick) {
     }
     fputs("]]", f);
   }
+  if (g_traceMap) WriteTraceMap(f);
   // Main gameplay RNG state (two 32-bit LFSRs at 0x56BE20, stepped by Random::Rand 0x46F000/0x46F060).
   const uint64 seed = g_gameRNG.GetSeed();
   fprintf(f, ",\"rng\":[%u,%u]}\n", unsigned(seed & 0xFFFFFFFF), unsigned(seed >> 32));
@@ -1297,6 +1320,48 @@ bool RunEcoCmd(const ScriptCmd& c, int tick) {
     packet.data.build.unknown      = -1;
     const ibool ok = g_gameImpl.GetPlayer(u.GetOwner())->ProcessCommandPacket(packet);
     Log("build: %s at (%d,%d) -> %d", TypeName(kit), br.x, br.y, ok);
+    return true;
+  }
+  // The Robo-Dozer's and the Earthworker's orders, as their commands' clicks build the packets (0x4538A0, 0x452780,
+  // 0x452E30). Rectangles are inclusive here; ctMoBuildWall's bottom-right is exclusive in the packet (its handler
+  // 0x4235E0 takes one off), and ctMoRemoveWall carries one waypoint (the tile's centre here) besides its tile.
+  if (v == "doze" || v == "buildwall") {  // doze <dozer> x1 y1 x2 y2 | buildwall <earthworker> x1 y1 x2 y2 [TYPE]
+    if (!u.IsLive()) return true;
+    const Location a = loc(1), b = loc(3);
+    CommandPacket packet = {};
+    if (v == "doze") {
+      packet = { CommandType::Doze, sizeof(DozeCommand) };
+      packet.data.doze.numUnits  = 1;
+      packet.data.doze.unitID[0] = uint16(u.GetID());
+      packet.data.doze.rect      = MapRect(a.x, a.y, b.x, b.y).AsPacked();
+    } else {
+      packet = { CommandType::BuildWall, sizeof(BuildWallCommand) };
+      auto& w = packet.data.buildWall;
+      w.numUnits     = 1;
+      w.unitID[0]    = uint16(u.GetID());
+      w.rect.x1      = uint16(a.x);
+      w.rect.y1      = uint16(a.y);
+      w.rect.x2      = uint16(b.x + 1);
+      w.rect.y2      = uint16(b.y + 1);
+      w.tubeWallType = uint16(c.args.size() > 5 ? TypeByName(arg(5)) : MapID::Tube);
+      w.unknown      = 0;
+    }
+    const ibool ok = g_gameImpl.GetPlayer(u.GetOwner())->ProcessCommandPacket(packet);
+    Log("%s: (%d,%d)-(%d,%d) -> %d", v.c_str(), a.x, a.y, b.x, b.y, ok);
+    return true;
+  }
+  if (v == "removewall") {  // removewall <earthworker> x y
+    if (!u.IsLive()) return true;
+    const Location at = loc(1);
+    CommandPacket packet = { CommandType::RemoveWall, sizeof(RemoveWallCommand) };
+    auto& r = packet.data.removeWall;
+    r.numUnits     = 1;
+    r.unitID[0]    = uint16(u.GetID());
+    r.numWaypoints = 1;
+    r.waypoint[0]  = at.AsWaypoint();
+    r.rect         = MapRect(at.x, at.y, at.x, at.y).AsPacked();
+    const ibool ok = g_gameImpl.GetPlayer(u.GetOwner())->ProcessCommandPacket(packet);
+    Log("removewall: (%d,%d) -> %d", at.x, at.y, ok);
     return true;
   }
   (void)tick;
@@ -2363,6 +2428,7 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   cfg.drawEvery  = EnvInt("OP2H_DRAW_EVERY", 0);
   cfg.traceEvery = EnvInt("OP2H_TRACE_EVERY", 0);
   g_traceRaw     = EnvInt("OP2H_TRACE_RAW", 0) != 0;
+  g_traceMap     = EnvInt("OP2H_TRACE_MAP", 0) != 0;
   g_eco          = EnvInt("OP2H_ECO", 0) != 0;
   cfg.width      = EnvInt("OP2H_WIDTH", 1024);
   cfg.height     = EnvInt("OP2H_HEIGHT", 768);

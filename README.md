@@ -28,6 +28,7 @@ When run from Claude Code, `run.sh` and `make check` need `dangerouslyDisableSan
 | `--out DIR` | required | output directory; previous outputs in it are replaced |
 | `--ticks N` | 3000 | quit after game tick N (100 ticks = 1 mark). 0 = run until the mission ends. Default: the scenario's `ticks` |
 | `--trace-every N` | 0, or 1 with `--scenario` | `trace.jsonl` line every N ticks (sub-pixel unit positions, see below) |
+| `--trace-map` | | add `map` to each trace line: the tiles whose cell type, graphic or wall-or-building bit changed since the previous line, `[[x, y, cell, graphic, wall], ...]` in file coordinates, row by row (the first line lists none). Default: the scenario's `traceMap` |
 | `--trace-raw` | | add raw MapObject (0x80) and PathContext (0xD4) bytes as hex to each trace unit, and to each `ents` entry its animation, frame and raw MapObject bytes (`[..., px, py, anim, frame, "raw"]`; with `--draw-every 1` the animation and frame are what was drawn, e.g. a structure a ConVec builds) |
 | `--screenshot-every N` | 0 (off) | PNG at tick 5, then every multiple of N, plus one at the end |
 | `--telemetry-every N` | 100 | JSONL record at tick 1, then every multiple of N, plus one at the end. 0 = off |
@@ -213,6 +214,10 @@ Script verbs for colony experiments (oracle scenarios `eco_*`, spec in `oracle/E
 5    cargo    @3 2 1000             # set a truck's cargo (CargoType, amount); `load`/`unload <truck>`
 5    poke     @2 0x1e 2 1200        # write a MapObject field (offset, size 1/2/4, value), e.g. damage
 10   tech     0 5317                # _Player::MarkResearchComplete(techID) for player 0, as a mission grants a topic
+10   doze     @0 38 36 41 38        # Robo-Dozer: bulldoze an inclusive rectangle (ctMoDoze, as its click sends it)
+10   buildwall @1 38 40 44 40 TUBE  # Earthworker: TUBE, WALL, WALL_LAVA or WALL_MICROBE over an inclusive rectangle
+                                    # (ctMoBuildWall; the packet's bottom-right corner is exclusive, as the UI's)
+10   removewall @2 40 70            # Earthworker: remove the tube or wall on a tile (ctMoRemoveWall, one waypoint)
 ```
 
 `--eco` (or `"eco": true` in a scenario) adds to each telemetry player an `eco` object (storage limits, available and

@@ -204,6 +204,8 @@ def main() -> int:
     ap.add_argument("--trace-every", type=int, metavar="N",
                     help="trace.jsonl (sub-tile positions) every N ticks; default 1 with --scenario, else 0 (off)")
     ap.add_argument("--trace-raw", action="store_true", help="add raw MapObject/PathContext bytes to trace lines")
+    ap.add_argument("--trace-map", action="store_true",
+                    help="add the map tiles changed since the previous trace line (default: the scenario's traceMap)")
     ap.add_argument("--campaign", type=Path, metavar="FILE",
                     help="start as a campaign mission with this carry-over (key value lines, see harness.cpp)")
     ap.add_argument("--audio", action="store_true",
@@ -240,6 +242,7 @@ def main() -> int:
     if args.difficulty is None:
         args.difficulty = scn.get("difficulty", 1) if scn else 1
     args.eco = args.eco or bool(scn and scn.get("eco"))
+    args.trace_map = args.trace_map or bool(scn and scn.get("traceMap"))
     args.audio = args.audio or bool(scn and scn.get("audio"))
 
     sync_missions_from_play_prefix()
@@ -271,6 +274,7 @@ def main() -> int:
                OP2H_MISSION=mission,
                OP2H_TRACE_EVERY=str(args.trace_every),
                OP2H_TRACE_RAW="1" if args.trace_raw else "0",
+               OP2H_TRACE_MAP="1" if args.trace_map else "0",
                OP2H_ECO="1" if args.eco else "0",
                OP2H_AUDIO="1" if args.audio else "0",
                OP2H_OUT=win_path(out),
