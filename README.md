@@ -208,7 +208,8 @@ Script verbs for colony experiments (oracle scenarios `eco_*`, spec in `oracle/E
 5    route    @3 @1 @2              # cargo truck @3 on a mine (@1) <-> smelter (@2) route, as the UI sends it
 5    produce  @4 CARGO_TRUCK        # factory order (TYPE [weapon]); `idle`/`unidle <bldg>`, `train <university> <n>`
 5    kit      @5 TOKAMAK            # put a structure kit in a ConVec; `build <convec> <x> <y>` (footprint bottom-right)
-5    bay      @4 0 TOKAMAK          # fill a factory bay; `transfercargo <factory> <bay>`
+5    bay      @4 0 TOKAMAK          # fill a factory bay; `transfercargo <factory> <bay> [1]` (1: a Spaceport's bay
+                                    # into the rocket on its pad); `launch <spaceport> [x y]` launches that rocket
 5    cargo    @3 2 1000             # set a truck's cargo (CargoType, amount); `load`/`unload <truck>`
 5    poke     @2 0x1e 2 1200        # write a MapObject field (offset, size 1/2/4, value), e.g. damage
 10   tech     0 5317                # _Player::MarkResearchComplete(techID) for player 0, as a mission grants a topic
@@ -247,6 +248,10 @@ capacities, morale inputs) and `pi`, every dword of PlayerImpl 0x00..0x1EF; and 
   `tick * 1000 / 36` ms (real time at speed 10), so runs are deterministic. Nothing else changes: an audio run's other
   outputs are the same as without `--audio`. `harness.log` notes the time from MusicManager::Init to the mission's
   InitProc.
+- Known gap: the message log's throttle slots are stamped before the harness loads (0x438FE0) with the real clock,
+  so they look recent to the virtual one once the machine has been up more than about 27.7 hours, and then no
+  throttled message passes all run. Record `--audio` runs on a machine up less than a day (notes/findings-missions.md
+  "Eden mission 5").
 
 ## Disasters
 

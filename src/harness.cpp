@@ -1265,7 +1265,18 @@ bool RunEcoCmd(const ScriptCmd& c, int tick) {
     CommandPacket packet = { CommandType::TransferCargo, sizeof(TransferCargoCommand) };
     packet.data.transferCargo.unitID  = uint16(u.GetID());
     packet.data.transferCargo.bay     = uint16(num(1));
-    packet.data.transferCargo.unknown = 0;
+    // The third argument is the packet's second word: a Spaceport's "load bay into the rocket" sends 1
+    // (Spaceport::ActivateDock 0x47F420 swaps the bay with the rocket's cargo); 0 is a transfer to the dock.
+    packet.data.transferCargo.unknown = uint16(c.args.size() > 2 ? num(2) : 0);
+    g_gameImpl.GetPlayer(u.GetOwner())->ProcessCommandPacket(packet);
+    return true;
+  }
+  if (v == "launch") {  // a ctMoLaunch packet: launch the rocket on a Spaceport's pad (optional target pixel x y)
+    if (!u.IsLive()) return true;
+    CommandPacket packet = { CommandType::Launch, sizeof(LaunchCommand) };
+    packet.data.launch.unitID       = uint16(u.GetID());
+    packet.data.launch.targetPixelX = uint16(c.args.size() > 2 ? num(1) : 0);
+    packet.data.launch.targetPixelY = uint16(c.args.size() > 2 ? num(2) : 0);
     g_gameImpl.GetPlayer(u.GetOwner())->ProcessCommandPacket(packet);
     return true;
   }
