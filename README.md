@@ -487,3 +487,21 @@ installing, check that no other agent's runs depend on the installed version.
   verbs send their own packets.
 - The game's code addresses are hard-coded for Outpost2.exe 1.2 as patched by OPU 1.4.x. They are the same addresses
   TethysAPI and OPUPatch use.
+
+## Gotchas and shared Wine setup (moved from CLAUDE.md)
+
+- Coordinates: internal tile x = file x + 32 on non-wrapping maps, no offset on 512-wide maps (Coordinates, above;
+  harness/oracle/FINDINGS.md).
+- In OPU 1.4.1, TethysAPI `Unit::DoMove` on human units crashes; send command packets instead. `ScGroup::RemoveUnit` on
+  a non-member crashes, and so does `FindEMPMissileTarget`. Triggers naming an AI player fire immediately. Mission
+  callback names are `OnLoad/OnUnload/OnEnd`, not the TethysAPI docs' `OnLoadMission`.
+- A building whose 1-tile margin touches a cliff gets silently relocated by the game.
+- The harness and every oracle run assume GOG 1.2 + **OPU 1.4.1** (op2ext loads the harness). Players need OPU too:
+  op2-rs installs it from OPU's own installer into its data folder (`op2_formats::opu`, docs/game-data.md). Try setup
+  flows with `--config-dir`/`--data-dir` (the worktree checker refuses `XDG_*` overrides).
+- The harness uses its own Wine prefix, `prefix-harness/` (a copy of `prefix/`), so harness runs don't disturb David's
+  game in `prefix/`. Never run harness installs or `wineserver -k` against `prefix/` itself.
+- The Wine prefix is wow64: `WINEARCH=win32` isn't supported. All checkouts share one prefix and wineserver: check
+  `ps` (with the sandbox disabled; inside it you only see the sandbox's own processes, not David playing under
+  gamescope) before `make -C missions stop` or `wineserver -k`, and coordinate `make -C harness install` (it replaces
+  the installed harness DLLs for everyone).
