@@ -123,7 +123,7 @@ or `@N` for the unit made by the Nth `spawn` command. Coordinates are internal t
 10   move      @0 40 30     # the first spawned unit
 0    view      60 64        # centre the view on a tile (for screenshots; not applied with --draw-every 1)
      stop <id> | selfdestruct <id> | research <labId> <techId> <scientists> | shot | telemetry | trace | quit
-     guard <id> <id> | attackground <id> x y | lights <id> 0|1
+     guard <id> <id> | attackground <id> x y | lights <id> 0|1 | scatter <id> <id>...   # scatter: one ctMoScatter
      movewp <id> x,y[,r] ... | standground <id> x,y[,r] ... | patrol <id> <loop> x,y[,r] ...   # waypoints, range r
 ```
 

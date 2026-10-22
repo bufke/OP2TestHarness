@@ -1543,6 +1543,26 @@ void RunScriptCmd(const ScriptCmd& c, int tick) {
                            : c.verb == "standground" ? CommandType::StandGround : CommandType::Move;
     IssueWaypoints(unit(0), type, wps, ranges, patrol ? num(1) : -1);
   }
+  else if (c.verb == "scatter") {
+    // scatter <unit> <unit> ...: one ctMoScatter packet for the units, as the pane's SCATTER sends it (0x4242F0 moves
+    // each unit away from their centre). Dead spawns are left out.
+    CommandPacket packet = { CommandType::Scatter, 0 };
+    auto& s = packet.data.move;
+    uint8 n = 0;
+    int owner = -1;
+    for (size_t i = 0; i < c.args.size() && n < 32; ++i) {
+      const std::string a = arg(i);
+      if (!a.empty() && a[0] == '@' && size_t(atoi(a.c_str() + 1)) < g_spawnGone.size() && g_spawnGone[atoi(a.c_str() + 1)])
+        continue;
+      Unit u = unit(i);
+      if (!u.IsLive()) continue;
+      s.unitID[n++] = uint16(u.GetID());
+      owner = u.GetOwner();
+    }
+    s.numUnits = n;
+    packet.dataLength = uint16(1 + 2 * n);
+    if (n) g_gameImpl.GetPlayer(owner)->ProcessCommandPacket(packet);
+  }
   else if (c.verb == "stop")         unit(0).DoStop();
   else if (c.verb == "selfdestruct") unit(0).DoSelfDestruct();
   else if (c.verb == "research")     unit(0).DoResearch(num(1), num(2));
