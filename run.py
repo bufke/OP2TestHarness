@@ -211,6 +211,12 @@ def main() -> int:
     ap.add_argument("--audio", action="store_true",
                     help="audio log: every sound, Savant line, message and music playlist the game asks for (also "
                          "scenario \"audio\"), see README \"Audio log\"")
+    ap.add_argument("--state", action="store_true",
+                    help="session state: events.jsonl through the run and state.json at the end (README \"Session state\")")
+    ap.add_argument("--stop", metavar="KINDS",
+                    help="end the run at the first event of these kinds (comma separated: new, enemy, gone, hit, idle, "
+                         "tech, objective, msg, disaster, end, any; `kind:<unit id>`) after --stop-from; implies --state")
+    ap.add_argument("--stop-from", type=int, default=0, metavar="TICK", help="--stop only counts events after this tick")
     ap.add_argument("--eco", action="store_true",
                     help="economy telemetry: colony state per player, building/vehicle internals (also scenario \"eco\")")
     ap.add_argument("--speed", type=int, default=10, help="in-game speed setting 1-10 (only matters with --no-turbo)")
@@ -244,6 +250,7 @@ def main() -> int:
     args.eco = args.eco or bool(scn and scn.get("eco"))
     args.trace_map = args.trace_map or bool(scn and scn.get("traceMap"))
     args.audio = args.audio or bool(scn and scn.get("audio"))
+    args.state = args.state or bool(args.stop)
 
     sync_missions_from_play_prefix()
     check_installed()
@@ -252,7 +259,7 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     for old in [*out.glob("shot_*.bmp"), *out.glob("shot_*.png"), out / "telemetry.jsonl", out / "harness.log",
                 out / "timeout_screen.png", out / "summary.json", out / "trace.jsonl", out / "gamedata.json", out / "audio.jsonl",
-                out / "scenario_script.txt"]:
+                out / "scenario_script.txt", out / "state.json", out / "events.jsonl"]:
         old.unlink(missing_ok=True)
     mission = args.mission
     if scn:
@@ -277,6 +284,9 @@ def main() -> int:
                OP2H_TRACE_MAP="1" if args.trace_map else "0",
                OP2H_ECO="1" if args.eco else "0",
                OP2H_AUDIO="1" if args.audio else "0",
+               OP2H_STATE="1" if args.state else "0",
+               OP2H_STOP=args.stop or "",
+               OP2H_STOP_FROM=str(args.stop_from),
                OP2H_OUT=win_path(out),
                OP2H_TICKS=str(args.ticks),
                OP2H_SHOT_EVERY=str(args.screenshot_every),

@@ -1735,6 +1735,7 @@ int __fastcall ThrottleHook(void* self, void*, int id, int x, int y) {
   return g_throttled = g_throttle(self, id, x, y);
 }
 
+void MessageEvent(int x, int y, const char* text);
 int __fastcall AddMessageHook(void* self, void*, int x, int y, const char* text, int sound) {
   g_throttled = -1;
   void* caller = __builtin_return_address(0);
@@ -1743,6 +1744,7 @@ int __fastcall AddMessageHook(void* self, void*, int x, int y, const char* text,
   char extra[32];
   snprintf(extra, sizeof(extra), ",\"pass\":%d", g_throttled);
   AudioEvent("msg", sound, x, y, caller, extra);
+  MessageEvent(x, y, text);
   return r;
 }
 
@@ -1819,6 +1821,13 @@ int __fastcall InitProcHook(void* self, void*) {
   return g_initProc(self);
 }
 
+// Session state without the audio log: only the status message hook, for `msg` events (nothing else changes).
+void InstallMessageHook() {
+  static const uint8_t message[] = { 0x53, 0x56, 0x57, 0x8B, 0xD9 };  // push ebx; push esi; push edi; mov ebx,ecx
+  g_addMessage = reinterpret_cast<AddMessageFn>(HookEntry(0x439070, message, 5, reinterpret_cast<void*>(&AddMessageHook)));
+  Log("state: message hook %s", g_addMessage ? "installed" : "FAILED");
+}
+
 void InstallAudioHooks() {
   g_musicInit = reinterpret_cast<ThisFn>(RelinkCall(0x489530, reinterpret_cast<void*>(&MusicInitHook)));
   g_initProc  = reinterpret_cast<ThisFn>(RelinkCall(0x48987A, reinterpret_cast<void*>(&InitProcHook)));
@@ -1849,6 +1858,372 @@ using BotTickFn = void(__cdecl*)(int);
 BotTickFn g_botTick = nullptr;
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Session state (OP2H_STATE, `run.sh --state`; README "Session state"): for tools that play a mission by replaying a
+// growing script (op2-inspect's game_* tools). Throughout the run `events.jsonl` gets what a player would notice:
+//   new / gone   a unit (structure or vehicle of any player) appeared / disappeared (object index, type, owner, tile)
+//   hit          a unit lost hit points (the amount and what is left)
+//   idle         a unit of player 0 finished its command (`was`: the command it had, e.g. Develop for a new structure)
+//   tech         player 0 got a topic; objective: a victory condition's "met" changed; msg: a status message;
+//   disaster     a disaster object appeared (scheduled: it warns, then strikes); end: the mission's end reason
+// and at the end `state.json` holds the whole state (colony, labs, every unit and Gaia object, the tech tree, the
+// objectives, the cell grid). Coordinates are file tiles. Reading state changes nothing in the game: a run with
+// --state plays exactly like one without. OP2H_STOP (`--stop`) ends the run at the first event of the listed kinds
+// after tick OP2H_STOP_FROM (`kind` or `kind:<unit id>`, comma separated; `any` = every kind but msg and hit).
+
+FILE* g_events = nullptr;
+bool  g_stateOn = false;
+std::string g_stopSpec;
+int   g_stopFrom = 0;
+std::string g_stopReason;  // Set when an event matched OP2H_STOP: the cycle hook quits after this tick.
+
+void JsonStr(FILE* f, const char* s) {
+  fputc('"', f);
+  for (; s && *s; ++s) {
+    const unsigned char c = static_cast<unsigned char>(*s);
+    if (c == '"' || c == '\\') { fputc('\\', f);  fputc(c, f); }
+    else if (c < 0x20 || c >= 0x80) fprintf(f, "\\u%04x", c);  // Control characters; Latin-1 as its code point.
+    else fputc(c, f);
+  }
+  fputc('"', f);
+}
+
+// Whether an event of `kind` (about unit `id`, -1 for none) is one OP2H_STOP asks to stop at.
+bool StopMatches(const char* kind, int id) {
+  if (g_stopSpec.empty() || g_gameImpl.tick_ <= g_stopFrom) return false;
+  const std::string k = kind;
+  size_t pos = 0;
+  while (pos <= g_stopSpec.size()) {
+    const size_t end = std::min(g_stopSpec.find(',', pos), g_stopSpec.size());
+    const std::string tok = g_stopSpec.substr(pos, end - pos);
+    pos = end + 1;
+    const size_t colon = tok.find(':');
+    const std::string tk = tok.substr(0, colon);
+    if (tk == "any" && k != "msg" && k != "hit") return true;
+    if (tk != k) continue;
+    if (colon == std::string::npos || atoi(tok.c_str() + colon + 1) == id) return true;
+  }
+  return false;
+}
+
+// Starts an event line; the caller adds fields (",\"x\":1") and calls EventEnd.
+bool EventBegin(const char* kind) {
+  if (!g_events) return false;
+  fprintf(g_events, "{\"tick\":%d,\"ev\":\"%s\"", g_gameImpl.tick_, kind);
+  return true;
+}
+void EventEnd(const char* kind, int id) {
+  fputs("}\n", g_events);
+  if (g_stopReason.empty() && StopMatches(kind, id)) g_stopReason = std::string(kind) + (id >= 0 ? " " + std::to_string(id) : "");
+}
+
+void EventUnit(const char* kind, int id, int type, int owner, int x, int y, const char* extra = "") {
+  if (!EventBegin(kind)) return;
+  fprintf(g_events, ",\"id\":%d,\"type\":\"%s\",\"owner\":%d,\"x\":%d,\"y\":%d%s", id, TypeName(MapID(type)), owner, x, y, extra);
+  EventEnd(owner == 0 || std::string(kind) != "new" ? kind : "enemy", id);
+}
+
+void MessageEvent(int x, int y, const char* text) {
+  if (!EventBegin("msg")) return;
+  fputs(",\"text\":", g_events);
+  JsonStr(g_events, text);
+  // x/y are internal pixels, -1 for a message without a place.
+  fprintf(g_events, ",\"x\":%d,\"y\":%d", x < 0 ? -1 : x / 32 - PadTiles(), y < 0 ? -1 : y / 32);
+  EventEnd("msg", -1);
+}
+
+// What the last session tick saw of each object index.
+struct SeenUnit { int type = -1, owner = -1, cmd = 0, damage = 0, x = 0, y = 0;  bool live = false;  int destX = -1, destY = -1; };
+std::vector<SeenUnit> g_seen;
+std::vector<uint8_t> g_seenTech;      // Per tech number: player 0 has it.
+std::vector<int>     g_seenObjective;  // Per ScStub index: -1 not a victory condition, else met (0/1).
+std::vector<int>     g_seenDisaster;   // Per object index: the disaster type seen there (-1 none).
+bool g_sessionStarted = false;
+
+constexpr uintptr_t VictoryConditionVtbl = 0x4D68C0;  // VictoryConditionImpl (TethysAPI ScBase.h).
+
+// The victory conditions' trigger has fired for player 0: the objective is met now.
+int ObjectiveMet(const VictoryConditionImpl* v) {
+  const TriggerImpl* t = TriggerImpl::GetInstance(v->victoryTriggerIndex_);
+  if (!t) return 0;
+  uint32_t mask;
+  memcpy(&mask, &t->hasFired_, sizeof(mask));
+  return int(mask & 1);
+}
+
+template <typename F> void ForEachObjective(F f) {
+  ScStubList* list = ScStubList::GetInstance();
+  for (size_t i = 0; i < ScStubList::MaxNumScStubs; ++i) {
+    ScBase* s = list->At(i);
+    if (!s || IsBadReadPtr(s, sizeof(VictoryConditionImpl)) || *reinterpret_cast<uintptr_t*>(s) != VictoryConditionVtbl) continue;
+    f(int(i), static_cast<const VictoryConditionImpl*>(static_cast<TriggerImpl*>(s)));
+  }
+}
+
+int HighestObjectIndex() { return std::min(*reinterpret_cast<const int*>(0x54F838), int(MapImpl::GetInstance()->MaxNumUnits()) - 1); }
+
+bool IsDisaster(MapID t) { return t >= MapID::Lightning && t <= MapID::Meteor; }
+
+// After each cycle (and its script commands): compare with what the previous tick saw and log the differences.
+void SessionTick(int tick) {
+  if (!g_events) return;
+  const bool baseline = !g_sessionStarted;
+  g_sessionStarted = true;
+  const int pad = PadTiles();
+  // Units of every player.
+  if (g_seen.size() < MapImpl::GetInstance()->MaxNumUnits()) g_seen.resize(MapImpl::GetInstance()->MaxNumUnits());
+  std::vector<uint8_t> now(g_seen.size(), 0);
+  for (int p = 0; p < g_gameImpl.numPlayers_; ++p) {
+    auto visit = [&](Unit u) {
+      if (!u.IsLive()) return;
+      const MapObject* mo = u.GetMapObject();
+      const int id = u.GetID();
+      if (id <= 0 || size_t(id) >= g_seen.size()) return;
+      now[id] = 1;
+      SeenUnit& s = g_seen[id];
+      const Location at = u.GetLocation();
+      const int type = int(u.GetType()), owner = u.GetOwner(), x = at.x - pad, y = at.y;
+      if (!s.live || s.type != type || s.owner != owner) {
+        if (s.live && !baseline) EventUnit("gone", id, s.type, s.owner, s.x, s.y);
+        if (!baseline) EventUnit("new", id, type, owner, x, y);
+        s = SeenUnit{ type, owner, mo->command_, mo->damage_, x, y, true };
+        return;
+      }
+      if (mo->damage_ > s.damage && !baseline) {
+        char extra[64];
+        snprintf(extra, sizeof(extra), ",\"dmg\":%d,\"hp\":%d", mo->damage_ - s.damage, u.GetMaxHitpoints() - mo->damage_);
+        EventUnit("hit", id, type, owner, x, y, extra);
+      }
+      const int cmd = mo->command_;
+      if (owner == 0 && cmd == int(CommandType::Nop) && s.cmd != cmd && s.cmd != int(CommandType::Idle) && !baseline) {
+        // Where it was going (a vehicle stopped short, e.g. by an EMP, isn't "arrived"), and whether it is EMPed.
+        char extra[96];
+        snprintf(extra, sizeof(extra), ",\"was\":\"%s\",\"dest\":[%d,%d],\"emp\":%d", CommandName(s.cmd), s.destX, s.destY,
+                 (mo->flags_ & MoFlagEMPed) ? 1 : 0);
+        EventUnit("idle", id, type, owner, x, y, extra);
+      }
+      if (u.IsVehicle() && cmd != int(CommandType::Nop)) {
+        const PathContext* pc = mo->pPathContext_;
+        if (pc && !IsBadReadPtr(pc, sizeof(PathContext))) s.destX = pc->dstTileX - pad, s.destY = pc->dstTileY;
+      } else if (cmd == int(CommandType::Nop)) {
+        s.destX = s.destY = -1;
+      }
+      s.cmd = cmd, s.damage = mo->damage_, s.x = x, s.y = y;
+    };
+    for (Unit u : PlayerBuildingEnum(p)) visit(u);
+    for (Unit u : PlayerVehicleEnum(p))  visit(u);
+  }
+  for (size_t id = 1; id < g_seen.size(); ++id)
+    if (g_seen[id].live && !now[id]) {
+      if (!baseline) EventUnit("gone", int(id), g_seen[id].type, g_seen[id].owner, g_seen[id].x, g_seen[id].y);
+      g_seen[id].live = false;
+    }
+  // Player 0's research.
+  if (g_seenTech.size() != size_t(g_research.numTechs_)) g_seenTech.assign(g_research.numTechs_, 0);
+  for (int t = 0; t < g_research.numTechs_; ++t) {
+    const uint8_t has = g_research.HasTech(0, t) ? 1 : 0;
+    if (has && !g_seenTech[t] && !baseline && EventBegin("tech")) {
+      fprintf(g_events, ",\"id\":%d,\"name\":", g_research.ppTechInfos_[t]->techID);
+      JsonStr(g_events, g_research.ppTechInfos_[t]->pTechName);
+      EventEnd("tech", g_research.ppTechInfos_[t]->techID);
+    }
+    g_seenTech[t] = has;
+  }
+  // Objectives.
+  if (g_seenObjective.empty()) g_seenObjective.assign(ScStubList::MaxNumScStubs, -1);
+  ForEachObjective([&](int i, const VictoryConditionImpl* v) {
+    const int met = ObjectiveMet(v);
+    if (g_seenObjective[i] != met && (g_seenObjective[i] >= 0 || met) && EventBegin("objective")) {
+      fprintf(g_events, ",\"met\":%d,\"text\":", met);
+      JsonStr(g_events, v->pObjectiveText_);
+      EventEnd("objective", -1);
+    }
+    g_seenObjective[i] = met;
+  });
+  // Disasters (scheduled ones exist from their first warning on).
+  if (g_seenDisaster.size() != g_seen.size()) g_seenDisaster.assign(g_seen.size(), -1);
+  const int last = HighestObjectIndex();
+  for (int i = 1; i <= last && size_t(i) < g_seenDisaster.size(); ++i) {
+    const MapObject* mo = MapObject::GetInstance(i);
+    const int t = (mo && mo->IsLive() && IsDisaster(mo->GetTypeID())) ? int(mo->GetTypeID()) : -1;
+    if (t >= 0 && g_seenDisaster[i] != t && EventBegin("disaster")) {
+      fprintf(g_events, ",\"type\":\"%s\",\"x\":%d,\"y\":%d,\"timer\":%d", TypeName(MapID(t)), mo->pixelX_ / 32 - pad,
+              mo->pixelY_ / 32, mo->actionTimer_);
+      EventEnd("disaster", -1);
+    }
+    g_seenDisaster[i] = t;
+  }
+  if (g_gameImpl.gameTermReasons_ != GameTermReasons::Running && EventBegin("end")) {
+    fprintf(g_events, ",\"reason\":%d", int(g_gameImpl.gameTermReasons_));
+    EventEnd("end", -1);
+  }
+  (void)tick;
+  fflush(g_events);
+}
+
+// One unit of state.json: the telemetry fields plus what a player reads off its panel.
+void WriteStateUnit(FILE* f, bool& first, Unit u) {
+  if (!u.IsLive()) return;
+  const MapObject* mo = u.GetMapObject();
+  const auto* b = reinterpret_cast<const uint8_t*>(mo);
+  const Location at = u.GetLocation();
+  fprintf(f, "%s{\"id\":%d,\"type\":\"%s\",\"owner\":%d,\"x\":%d,\"y\":%d,\"hp\":%d,\"maxHp\":%d,\"cmd\":\"%s\",\"act\":\"%s\"",
+          first ? "" : ",\n", u.GetID(), TypeName(u.GetType()), u.GetOwner(), at.x - PadTiles(), at.y,
+          u.GetMaxHitpoints() - u.GetDamage(), u.GetMaxHitpoints(), CommandName(mo->command_), ActionName(int(mo->action_)));
+  first = false;
+  if (u.IsVehicle()) {
+    const auto* v = static_cast<const Vehicle*>(mo);
+    if (u.GetType() == MapID::CargoTruck)
+      fprintf(f, ",\"truck\":[%d,%d]", int(mo->truckCargoType_), int(mo->truckCargoAmount_));
+    else if (u.GetType() == MapID::ConVec) {
+      if (mo->cargo_ > 0 && mo->cargo_ < 0x80) fprintf(f, ",\"kit\":\"%s\"", TypeName(MapID(mo->cargo_)));
+      if (v->weaponOfCargo_ > 0) fprintf(f, ",\"kitWeapon\":\"%s\"", TypeName(MapID(v->weaponOfCargo_)));
+    } else if (const int w = mo->weapon_; w >= int(MapID::AcidCloud) && w <= int(MapID::BFG))
+      fprintf(f, ",\"weapon\":\"%s\"", TypeName(MapID(w)));
+    const PathContext* pc = mo->pPathContext_;
+    if (pc && !IsBadReadPtr(pc, sizeof(PathContext)) && mo->command_ != int(CommandType::Nop))
+      fprintf(f, ",\"dest\":[%d,%d]", pc->dstTileX - PadTiles(), pc->dstTileY);
+    if (mo->flags_ & MoFlagEMPed) fputs(",\"emp\":1", f);
+    fputc('}', f);
+    return;
+  }
+  // Structures: status flags, the dock, labs' research, factories' bays and production.
+  const uint32_t fl = mo->flags_;
+  fprintf(f, ",\"flags\":%u", unsigned(fl));
+  if (const Location d = u.GetDockLocation(); d) fprintf(f, ",\"dock\":[%d,%d]", d.x - PadTiles(), d.y);
+  if (const int w = mo->weapon_; u.GetType() == MapID::GuardPost && w >= int(MapID::AcidCloud) && w <= int(MapID::BFG))
+    fprintf(f, ",\"weapon\":\"%s\"", TypeName(MapID(w)));
+  if (mo->command_ == int(CommandType::Research)) {
+    // ECONOMY.md section 7: tech number +0x60, team +0x64, work left in actionTimer (cost << 8 at the start).
+    const int num = *reinterpret_cast<const int*>(b + 0x60), team = *reinterpret_cast<const int*>(b + 0x64);
+    if (num >= 0 && num < g_research.numTechs_) {
+      const TechInfo* t = g_research.ppTechInfos_[num];
+      const int cost = (fl & 0x1000) ? t->edenCost : t->plymouthCost;
+      fprintf(f, ",\"research\":{\"tech\":%d,\"team\":%d,\"left\":%d,\"cost\":%d}", t->techID, team, mo->actionTimer_, cost << 8);
+    }
+  }
+  if (fl & MoFlagBldFactory) {
+    const auto* fb = static_cast<const FactoryBuilding*>(mo);
+    fputs(",\"bays\":[", f);
+    for (int i = 0; i < 6; ++i) {
+      const int c = fb->cargoBayContents_[i], w = static_cast<const Building*>(mo)->cargoBayCargoOrWeapon_[i];
+      if (i) fputc(',', f);
+      if (c > 0) {
+        fprintf(f, "\"%s", TypeName(MapID(c)));
+        if (w > 0) fprintf(f, " %s", TypeName(MapID(w)));
+        fputc('"', f);
+      } else fputs("null", f);
+    }
+    fputc(']', f);
+    if (mo->command_ == int(CommandType::Produce) && fb->itemToProduce_ > 0)
+      fprintf(f, ",\"producing\":\"%s\",\"timer\":%d", TypeName(MapID(fb->itemToProduce_)), mo->actionTimer_);
+  }
+  fputc('}', f);
+}
+
+void WriteSessionState(int tick) {
+  if (!g_stateOn) return;
+  FILE* f = fopen((cfg.out + "\\state.json").c_str(), "w");
+  if (!f) return;
+  auto& game = g_gameImpl;
+  const int w = GameMap::GetWidth(), h = GameMap::GetHeight(), pad = PadTiles();
+  fprintf(f, "{\"tick\":%d,\"end\":%d,\"stop\":", tick, int(game.gameTermReasons_));
+  JsonStr(f, g_stopReason.c_str());
+  fprintf(f, ",\"map\":{\"width\":%d,\"height\":%d,\"pad\":%d},\n\"players\":[", w, h, pad);
+  for (int i = 0; i < game.numPlayers_; ++i) {
+    PlayerImpl* p = game.GetPlayer(i);
+    const auto& m = p->moraleState_;
+    fprintf(f, "%s{\"id\":%d,\"human\":%d,\"eden\":%d,\"food\":%d,\"commonOre\":%d,\"rareOre\":%d,\"workers\":%d,"
+               "\"scientists\":%d,\"kids\":%d,\"morale\":%d,\"moraleLevel\":%d,\"powerGen\":%d,\"powerUsed\":%d,"
+               "\"foodNet\":%d,\"foodProd\":%d,\"foodCons\":%d,\"maxCommon\":%d,\"maxRare\":%d,\"maxFood\":%d,"
+               "\"workersReq\":%d,\"scientistsReq\":%d,\"availWorkers\":%d,\"availScientists\":%d,\"sciResearching\":%d,"
+               "\"sciAsWorkers\":%d,\"buildings\":%d,\"idleBuildings\":%d,\"unpowered\":%d}",
+            i ? ",\n" : "", i, p->isHuman_ != 0, p->isEden_ != 0, p->foodStored_, p->commonOre_, p->rareOre_,
+            p->numWorkers_, p->numScientists_, p->numKids_, m.morale, int(m.moraleLevel), p->amountPowerGenerated_,
+            p->amountPowerConsumed_, p->netFoodProduction_, p->totalFoodProduction_, p->totalFoodConsumption_,
+            p->maxCommonOre_, p->maxRareOre_, p->maxFood_, p->numWorkersRequired_, p->numScientistsRequired_,
+            p->numAvailableWorkers_, p->numAvailableScientists_, p->numScientistsResearching_, p->numScientistsAsWorkers_,
+            p->numBuildings_, p->numIdleBuildings_, p->numUnpoweredStructures_);
+  }
+  // The tech tree: id, name, lab (1 basic, 2 standard, 3 advanced), Eden and Plymouth cost, max scientists, the
+  // topics it requires (ids) and which players have it (bitmask).
+  fputs("],\n\"techs\":[", f);
+  for (int t = 0; t < g_research.numTechs_; ++t) {
+    const TechInfo* ti = g_research.ppTechInfos_[t];
+    fprintf(f, "%s{\"id\":%d,\"name\":", t ? ",\n" : "", ti->techID);
+    JsonStr(f, ti->pTechName);
+    uint32_t has;
+    memcpy(&has, &ti->playerHasTechMask, sizeof(has));
+    fprintf(f, ",\"lab\":%d,\"eden\":%d,\"ply\":%d,\"max\":%d,\"has\":%u,\"req\":[", int(ti->lab), ti->edenCost,
+            ti->plymouthCost, ti->maxScientists, has & 0x3F);
+    for (int r = 0; r < ti->numRequiredTechs && ti->pRequiredTechNum; ++r) {
+      const int n = ti->pRequiredTechNum[r];
+      fprintf(f, "%s%d", r ? "," : "", n >= 0 && n < g_research.numTechs_ ? g_research.ppTechInfos_[n]->techID : -1);
+    }
+    fputs("]}", f);
+  }
+  // Per vehicle, structure and weapon type, the id of the research topic that makes it available (MapObjectType +0x1E4, as
+  // the eco run's typeExtra; 0 for none): what the factory and build panes offer.
+  fputs("],\n\"typeTopics\":{", f);
+  for (int i = 1; i <= int(MapID::BFG); ++i) {
+    const uint8_t* t = reinterpret_cast<const uint8_t*>(MapObjectType::GetInstance(i));
+    if (!t) continue;
+    const int num = *reinterpret_cast<const int*>(t + 0x1E4);  // A tech number: the index in the loaded tree.
+    fprintf(f, "%s\"%s\":%d", i > 1 ? "," : "", TypeName(MapID(i)),
+            num > 0 && num < g_research.numTechs_ ? g_research.ppTechInfos_[num]->techID : 0);
+  }
+  fputs("},\n\"objectives\":[", f);
+  bool first = true;
+  ForEachObjective([&](int, const VictoryConditionImpl* v) {
+    fprintf(f, "%s{\"met\":%d,\"text\":", first ? "" : ",", ObjectiveMet(v));
+    JsonStr(f, v->pObjectiveText_);
+    fputc('}', f);
+    first = false;
+  });
+  fputs("],\n\"units\":[\n", f);
+  first = true;
+  for (int i = 0; i < game.numPlayers_; ++i) {
+    for (Unit u : PlayerBuildingEnum(i)) WriteStateUnit(f, first, u);
+    for (Unit u : PlayerVehicleEnum(i))  WriteStateUnit(f, first, u);
+  }
+  // Gaia: beacons (ore 0 common / 1 rare; bar 0 = 3-bar, 1 = 2-bar, 2 = 1-bar; surveyed by player 0), vents,
+  // fumaroles, wreckage (its tech) and disasters.
+  fputs("],\n\"gaia\":[", f);
+  first = true;
+  const int last = HighestObjectIndex();
+  for (int i = 1; i <= last; ++i) {
+    const MapObject* mo = MapObject::GetInstance(i);
+    if (!mo || !mo->IsLive()) continue;
+    const MapID t = mo->GetTypeID();
+    if (!(t == MapID::MiningBeacon || t == MapID::MagmaVent || t == MapID::Fumarole || t == MapID::Wreckage || IsDisaster(t))) continue;
+    fprintf(f, "%s{\"id\":%d,\"type\":\"%s\",\"x\":%d,\"y\":%d", first ? "" : ",\n", i, TypeName(t), mo->pixelX_ / 32 - pad,
+            mo->pixelY_ / 32);
+    first = false;
+    if (t == MapID::MiningBeacon) {
+      const auto* mb = static_cast<const MapObj::MiningBeacon*>(mo);
+      fprintf(f, ",\"ore\":%d,\"bar\":%d,\"variant\":%d,\"surveyed\":%d", int(mb->mineType_), int(mb->mineYield_),
+              mb->mineVariant_, int(mb->playerSurveyedMask_.Get(0)));
+    } else if (t == MapID::Wreckage) {
+      const auto* wr = static_cast<const MapObj::Wreckage*>(mo);
+      uint32_t found;
+      memcpy(&found, &wr->playerDiscoveredMask_, sizeof(found));
+      fprintf(f, ",\"tech\":%d,\"discovered\":%d", wr->techID_, int(found & 1));
+    } else if (IsDisaster(t)) {
+      fprintf(f, ",\"timer\":%d,\"act\":\"%s\"", mo->actionTimer_, ActionName(int(mo->action_)));
+    }
+    fputc('}', f);
+  }
+  // Cells, file coordinates row by row: cell type | lava << 5 | microbe << 6 | wall or building << 7 | lava possible << 8.
+  fputs("],\n\"cells\":[", f);
+  for (int y = 0; y < h; ++y)
+    for (int x = 0; x < w; ++x) {
+      const TileData t = GameMap::GetImpl()->Tile(x + pad, y);
+      fprintf(f, "%s%u", (x | y) ? "," : "", t.cellType | (t.lava << 5) | (t.microbe << 6) | (t.wallOrBuilding << 7) | (t.lavaPossible << 8));
+    }
+  fputs("]}\n", f);
+  fclose(f);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 
 GameStartInfo g_gsi;
 constexpr int DrawLead = 4;  // Ticks rendered ahead of a capture (and at startup) so all panes are current.
@@ -1870,6 +2245,8 @@ void Quit(const char* why) {
   WriteTelemetry(g_gameImpl.tick_);
   WriteTrace(g_gameImpl.tick_);
   if (cfg.shotEvery > 0) TakeShot(g_gameImpl.tick_);
+  WriteSessionState(g_gameImpl.tick_);
+  if (g_events) fclose(g_events);
   if (g_telem) fclose(g_telem);
   if (g_trace) fclose(g_trace);
   if (g_audio) fclose(g_audio);
@@ -1965,6 +2342,8 @@ void __fastcall GameCycleHook(GameImpl* self, void*) {
   if (cfg.telemEvery > 0 && tick >= g_nextTelem) { WriteTelemetry(tick);  g_nextTelem = (tick / cfg.telemEvery + 1) * cfg.telemEvery; }
   if (cfg.traceEvery > 0 && tick >= g_nextTrace) { WriteTrace(tick);      g_nextTrace = (tick / cfg.traceEvery + 1) * cfg.traceEvery; }
   if (cfg.shotEvery  > 0 && tick >= g_nextShot)  { TakeShot(tick);        g_nextShot  = (tick / cfg.shotEvery  + 1) * cfg.shotEvery;  }
+  SessionTick(tick);
+  if (!g_stopReason.empty()) Quit(("stop: " + g_stopReason).c_str());
   if (self->gameTermReasons_ != GameTermReasons::Running) Quit("mission ended");
   if (cfg.ticks > 0 && tick >= cfg.ticks) Quit("tick limit");
 }
@@ -2521,6 +2900,10 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   g_telem = cfg.telemEvery > 0 ? fopen((cfg.out + "\\telemetry.jsonl").c_str(), "w") : nullptr;
   g_trace = cfg.traceEvery > 0 ? fopen((cfg.out + "\\trace.jsonl").c_str(), "w") : nullptr;
   g_audio = EnvInt("OP2H_AUDIO", 0) ? fopen((cfg.out + "\\audio.jsonl").c_str(), "w") : nullptr;
+  g_stateOn = EnvInt("OP2H_STATE", 0) != 0;
+  g_events  = g_stateOn ? fopen((cfg.out + "\\events.jsonl").c_str(), "w") : nullptr;
+  g_stopSpec = Env("OP2H_STOP");
+  g_stopFrom = EnvInt("OP2H_STOP_FROM", 0);
   Log("harness: mission=%s ticks=%d shot=%d telem=%d speed=%d turbo=%d seed=%d", cfg.mission.c_str(), cfg.ticks,
       cfg.shotEvery, cfg.telemEvery, cfg.speed, cfg.turbo, cfg.seed);
 
@@ -2553,6 +2936,7 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   memcpy(g_drawPanesCode, reinterpret_cast<void*>(OnIdleDrawPanes), 2);
   JumpTo(FnOP2MessageBox, reinterpret_cast<void*>(&MessageBoxHook));
   if (g_audio) InstallAudioHooks();
+  else if (g_events) InstallMessageHook();
   SetWindowsHookExA(WH_CBT, &MissionDialogCbt, nullptr, GetCurrentThreadId());
   g_realGetCursorPos     = reinterpret_cast<GetCursorPosFn>(PatchIat(IatGetCursorPos, reinterpret_cast<void*>(&VirtualGetCursorPos)));
   g_realGetAsyncKeyState =

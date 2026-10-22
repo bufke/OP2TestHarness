@@ -37,6 +37,9 @@ When run from Claude Code, `run.sh` and `make check` need `dangerouslyDisableSan
 | `--seed N` | 1 | random seed (default: the scenario's). Identical seed and inputs give byte-identical telemetry |
 | `--difficulty 0/1/2` | 1 | easy / normal / hard |
 | `--audio` | | `audio.jsonl`: every sound, status message, Savant line and the music playlist the game asks for (see "Audio log") |
+| `--state` | | session state: `events.jsonl` through the run and `state.json` at the end (see "Session state") |
+| `--stop KINDS` | | end the run at the first event of these kinds after `--stop-from` (implies `--state`) |
+| `--stop-from T` | 0 | `--stop` only counts events after tick T |
 | `--campaign FILE` | | start as a campaign mission with this carry-over (MissionResults): `key value` lines `food`, `common`, `rare`, `workers`, `scientists`, `kids`, `satellites`, `moraleLevel`, `morale`, `event`, `techLevel`, `mission` (the finished mission's number; default the DLL's minus one, as the game starts the next one) |
 | `--no-turbo` | | keep the game's frame limiter and render every frame (real time at `--speed`) |
 | `--speed 1-10` | 10 | in-game speed setting. Only matters with `--no-turbo` |
@@ -263,6 +266,49 @@ capacities, morale inputs) and `pi`, every dword of PlayerImpl 0x00..0x1EF; and 
   don't depend on the machine's uptime (before that fix, past ~27.7 h of uptime no throttled message passed all run).
 - The `tables` line's `prio_ctor` isn't all priorities: the game reuses part of those bytes, including a real
   timeGetTime stamp (0x56E89C), so it changes between recordings; accuracy/runs.py leaves it out of the manifest hash.
+
+## Session state (`--state`, `--stop`)
+
+For tools that play a mission by replaying a growing script (op2-inspect's `game_*` tools, tools/README.md): a
+replay costs about 1 s of wall time at any tick (Wine and Xvfb start in ~0.8 s; measured 2026-10-22: e05's whole
+23,448-tick win in 1.0-1.3 s, 40,000 ticks of e06 or e12 in 1.1 s, p12 to its end at 37,652 in 1.4 s; with
+`--telemetry-every 1` e05 takes 3.6 s, writing 125 MB), so a session replays from tick 0 at every step instead of
+keeping a paused game, and its history is exactly the script that reproduces it. Reading the state changes nothing:
+the telemetry of a run with `--state` is byte-identical to one without (measured on e05_win; `make -C harness check` compares them).
+
+- `events.jsonl`, one line per event, file tiles, written during the run:
+  ```json
+  {"tick":1783,"ev":"new","id":48,"type":"MINE","owner":0,"x":60,"y":42}
+  {"tick":1784,"ev":"gone","id":39,"type":"MINER","owner":0,"x":61,"y":43}
+  {"tick":3336,"ev":"idle","id":48,"type":"MINE","owner":0,"x":60,"y":42,"was":"Develop","dest":[-1,-1],"emp":0}
+  {"tick":2694,"ev":"tech","id":3405,"name":"Metallogeny"}
+  {"tick":5600,"ev":"hit","id":24,"type":"BIG_TRUCK","owner":0,"x":5,"y":0,"dmg":30,"hp":370}
+  {"tick":8532,"ev":"disaster","type":"EARTHQUAKE","x":10,"y":13,"timer":0}
+  {"tick":9543,"ev":"msg","text":"DANGER: Quake detected at 11,14","x":10,"y":13}
+  ```
+  `new`/`gone`: a structure or vehicle of any player appeared or disappeared (object index, which the game reuses);
+  `hit`: lost hit points; `idle`: a unit of player 0 went from a command to none (`was`; `dest` where a vehicle was
+  going, so a stop short of it shows, and whether it is EMPed); `tech`: player 0 got a topic; `objective`: a victory
+  condition's trigger changed (`met`, `text`); `disaster`: a disaster object appeared (the DLL creates it before its
+  warnings); `msg`: a status message (MessageLog::AddMessage 0x439070, hooked; `x`/`y` -1 for none); `end`.
+- `state.json` at the end of the run (any end: tick limit, `--stop`, the mission's end): `tick`, `end`, `stop` (the
+  event that stopped it), `map` (file width, height, padding), `players` (the telemetry fields plus storage, required
+  and available workers and scientists, food production and use), `techs` (the tech tree: id, name, lab 1-3, Eden and
+  Plymouth cost, max scientists, required ids, `has` = bitmask of players), `typeTopics` (per unit and weapon type,
+  the topic that makes it available), `objectives` (`met`, `text`: VictoryConditionImpl's text, read from the
+  ScStub list), `units` (every player's: id, type, file tile, hp, cmd, action; vehicles: `truck` [CargoType, amount],
+  a ConVec's `kit`, `weapon`, `dest`, `emp`; structures: `flags` (MoFlagBld*: 0x1 active, 0x2000 power, 0x4000
+  workers, 0x8000 scientists), `dock`, a lab's `research` {tech, team, left, cost} (ECONOMY.md section 7), a
+  factory's `bays` and `producing`), `gaia` (beacons: ore 0 common / 1 rare, bar 0 = 3-bar, variant, surveyed by
+  player 0; magma vents; fumaroles; wreckage: tech, discovered; disasters with their timer) and `cells` (file
+  coordinates row by row: cell type | lava << 5 | microbe << 6 | wall or building << 7 | lava possible << 8).
+- `--stop KINDS` ends the run (as a tick limit does, with all outputs) at the first event after `--stop-from` of
+  the listed kinds: `new` (player 0's), `enemy` (another player's unit appeared), `gone`, `hit`, `idle`, `tech`,
+  `objective`, `msg`, `disaster`, `end`, `any` (all but msg and hit); `kind:<unit id>` waits for that unit, e.g.
+  `idle:48`. The stop tick is part of the game, so it is deterministic too.
+
+Learned while building it: wreckage is scavenged by a Cargo Truck driving onto it only once it has been discovered,
+and a Scout discovers it by coming near (e06: tanks next to it for 3000 ticks didn't).
 
 ## Disasters
 
