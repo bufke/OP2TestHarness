@@ -48,15 +48,17 @@ uninstall:
 	python3 tools/ini.py uninstall "$(OPU_DIR)/outpost2.ini"
 	rm -rf "$(OPU_DIR)/Harness"
 
-# End-to-end self-test: run a mission that wins at tick 800 and check the harness saw it. The test mission is only
+# End-to-end self-test: run a mission that wins at tick 800 and check the harness saw it, then the session state and
+# op2-inspect's game_* tools on it (test/session_check.py). The test mission is only
 # present in OPU/maps while the check runs, so it never shows up in the in-game colony list.
 check: install
 	mkdir -p "$(OPU_DIR)/maps/HarnessTest"
 	cp build/zHarnessEnd.dll "$(OPU_DIR)/maps/HarnessTest/"
-	./run.sh --mission zHarnessEnd.dll --ticks 3000 --screenshot-every 400 --timeout 120 --out build/check; \
+	./run.sh --mission zHarnessEnd.dll --ticks 3000 --screenshot-every 400 --timeout 120 --out build/check && \
+	  python3 -c "import json; s = json.load(open('build/check/summary.json')); \
+	  assert s['game_term_reason'] == 'MissionAccomplished' and s['screenshots'] == 4, s; print('check: OK')" && \
+	  python3 test/session_check.py; \
 	  status=$$?; rm -rf "$(OPU_DIR)/maps/HarnessTest"; test $$status = 0
-	python3 -c "import json; s = json.load(open('build/check/summary.json')); \
-	  assert s['game_term_reason'] == 'MissionAccomplished' and s['screenshots'] == 4, s; print('check: OK')"
 
 clean:
 	rm -rf build
