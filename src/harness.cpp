@@ -1215,6 +1215,15 @@ bool RunEcoCmd(const ScriptCmd& c, int tick) {
     return true;
   }
   if (v == "tech") {  // tech <player> <techID>: _Player::MarkResearchComplete (0x477510), as a mission DLL grants one
+    // A topic the loaded tech tree doesn't have would end the mission, so it's logged with the valid ids instead.
+    bool known = false;
+    for (int t = 0; t < g_research.numTechs_ && !known; ++t) known = g_research.ppTechInfos_[t]->techID == num(1);
+    if (!known || num(0) < 0 || num(0) >= int(MaxPlayers)) {
+      std::string ids;
+      for (int t = 0; t < g_research.numTechs_; ++t) ids += (ids.empty() ? "" : " ") + std::to_string(g_research.ppTechInfos_[t]->techID);
+      Log("script: tech %s %s: no such player or topic in this tech tree (topics: %s)", arg(0).c_str(), arg(1).c_str(), ids.c_str());
+      return true;
+    }
     Player[num(0)].MarkResearchComplete(num(1));
     return true;
   }

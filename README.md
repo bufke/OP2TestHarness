@@ -215,6 +215,7 @@ Script verbs for colony experiments (oracle scenarios `eco_*`, spec in `oracle/E
 5    cargo    @3 2 1000             # set a truck's cargo (CargoType, amount); `load`/`unload <truck>`
 5    poke     @2 0x1e 2 1200        # write a MapObject field (offset, size 1/2/4, value), e.g. damage
 10   tech     0 5317                # _Player::MarkResearchComplete(techID) for player 0, as a mission grants a topic
+                                    # (a topic not in the loaded tech tree is logged with the valid ids, not granted)
 10   doze     @0 38 36 41 38        # Robo-Dozer: bulldoze an inclusive rectangle (ctMoDoze, as its click sends it)
 10   buildwall @1 38 40 44 40 TUBE  # Earthworker: TUBE, WALL, WALL_LAVA or WALL_MICROBE over an inclusive rectangle
                                     # (ctMoBuildWall; the packet's bottom-right corner is exclusive, as the UI's)
