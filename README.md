@@ -219,6 +219,9 @@ Script verbs for colony experiments (oracle scenarios `eco_*`, spec in `oracle/E
 10   buildwall @1 38 40 44 40 TUBE  # Earthworker: TUBE, WALL, WALL_LAVA or WALL_MICROBE over an inclusive rectangle
                                     # (ctMoBuildWall; the packet's bottom-right corner is exclusive, as the UI's)
 10   removewall @2 40 70            # Earthworker: remove the tube or wall on a tile (ctMoRemoveWall, one waypoint)
+20   repairobj @4 @1                # repair @1 (ctMoRepairObj, as the Repair command's click sends it; `none` for
+                                    # its no-target click; more units after the target join the packet);
+                                    # `reprogram` and `dismantle` send ctMoReprogram / ctMoDismantle the same way
 ```
 
 `--eco` (or `"eco": true` in a scenario) adds to each telemetry player an `eco` object (storage limits, available and

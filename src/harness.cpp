@@ -1395,6 +1395,30 @@ bool RunEcoCmd(const ScriptCmd& c, int tick) {
     Log("removewall: (%d,%d) -> %d", at.x, at.y, ok);
     return true;
   }
+  // The targeted orders of the Repair, Reprogram and Dismantle commands, as CommandRepair::OnClick (0x4549F0) builds
+  // its packet: the unit, no waypoints and the target's index (the click sends 0 when no valid target is under it;
+  // `none` sends that). One packet per verb; more units after the target go into the same packet.
+  if (v == "repairobj" || v == "reprogram" || v == "dismantle") {  // repairobj <unit> <target|none> [unit...]
+    if (!u.IsLive()) return true;
+    const Unit target = arg(1) == "none" ? Unit() : ScriptUnit(arg(1));
+    CommandPacket packet = { v == "repairobj" ? CommandType::RepairObj : v == "reprogram" ? CommandType::Reprogram
+                                                                       : CommandType::Dismantle, 0 };
+    auto& r = packet.data.repair;
+    r.numUnits  = 1;
+    r.unitID[0] = uint16(u.GetID());
+    for (size_t i = 2; i < c.args.size() && r.numUnits < 32; ++i) {
+      const Unit more = ScriptUnit(arg(i));
+      if (more.IsLive()) r.unitID[r.numUnits++] = uint16(more.GetID());
+    }
+    // SimpleCommand's unit list is followed by the waypoint count (0) and the target.
+    uint8_t* after = reinterpret_cast<uint8_t*>(&r.unitID[r.numUnits]);
+    *reinterpret_cast<uint16_t*>(after) = 0;
+    *reinterpret_cast<uint32_t*>(after + 2) = uint32_t(arg(1) == "none" ? 0 : target.GetID()) | 0xFFFF0000u;
+    packet.dataLength = uint16(after + 6 - reinterpret_cast<uint8_t*>(&packet.data));
+    const ibool ok = g_gameImpl.GetPlayer(u.GetOwner())->ProcessCommandPacket(packet);
+    Log("%s: %d -> %s (%d units) -> %d", v.c_str(), u.GetID(), arg(1).c_str(), int(r.numUnits), ok);
+    return true;
+  }
   (void)tick;
   return false;
 }
