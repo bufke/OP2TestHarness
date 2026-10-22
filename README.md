@@ -286,7 +286,8 @@ the telemetry of a run with `--state` is byte-identical to one without (measured
   {"tick":8532,"ev":"disaster","type":"EARTHQUAKE","x":10,"y":13,"timer":0}
   {"tick":9543,"ev":"msg","text":"DANGER: Quake detected at 11,14","x":10,"y":13}
   ```
-  `new`/`gone`: a structure or vehicle of any player appeared or disappeared (object index, which the game reuses);
+  `new`: a structure or vehicle of player 0 appeared, `enemy`: one of another player's; `gone`: one of any player
+  disappeared (`id` is the object index, which the game reuses);
   `hit`: lost hit points; `idle`: a unit of player 0 went from a command to none (`was`; `dest` where a vehicle was
   going, so a stop short of it shows, and whether it is EMPed); `tech`: player 0 got a topic; `objective`: a victory
   condition's trigger changed (`met`, `text`); `disaster`: a disaster object appeared (the DLL creates it before its

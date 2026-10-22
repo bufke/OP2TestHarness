@@ -1871,6 +1871,7 @@ BotTickFn g_botTick = nullptr;
 // after tick OP2H_STOP_FROM (`kind` or `kind:<unit id>`, comma separated; `any` = every kind but msg and hit).
 
 FILE* g_events = nullptr;
+bool  g_eventsWritten = false;  // Something to flush at the end of the session tick.
 bool  g_stateOn = false;
 std::string g_stopSpec;
 int   g_stopFrom = 0;
@@ -1908,6 +1909,7 @@ bool StopMatches(const char* kind, int id) {
 // Starts an event line; the caller adds fields (",\"x\":1") and calls EventEnd.
 bool EventBegin(const char* kind) {
   if (!g_events) return false;
+  g_eventsWritten = true;
   fprintf(g_events, "{\"tick\":%d,\"ev\":\"%s\"", g_gameImpl.tick_, kind);
   return true;
 }
@@ -1916,10 +1918,12 @@ void EventEnd(const char* kind, int id) {
   if (g_stopReason.empty() && StopMatches(kind, id)) g_stopReason = std::string(kind) + (id >= 0 ? " " + std::to_string(id) : "");
 }
 
+// A unit event. A unit of another player appearing is an `enemy` event (`new` is player 0's).
 void EventUnit(const char* kind, int id, int type, int owner, int x, int y, const char* extra = "") {
+  if (owner != 0 && strcmp(kind, "new") == 0) kind = "enemy";
   if (!EventBegin(kind)) return;
   fprintf(g_events, ",\"id\":%d,\"type\":\"%s\",\"owner\":%d,\"x\":%d,\"y\":%d%s", id, TypeName(MapID(type)), owner, x, y, extra);
-  EventEnd(owner == 0 || std::string(kind) != "new" ? kind : "enemy", id);
+  EventEnd(kind, id);
 }
 
 void MessageEvent(int x, int y, const char* text) {
@@ -1932,8 +1936,13 @@ void MessageEvent(int x, int y, const char* text) {
 }
 
 // What the last session tick saw of each object index.
-struct SeenUnit { int type = -1, owner = -1, cmd = 0, damage = 0, x = 0, y = 0;  bool live = false;  int destX = -1, destY = -1; };
+// `path` is the PathContext last checked readable (IsBadReadPtr is a slow call: only when the pointer changes).
+struct SeenUnit {
+  int type = -1, owner = -1, cmd = 0, damage = 0, x = 0, y = 0;  bool live = false;  int destX = -1, destY = -1;
+  const PathContext* path = nullptr;
+};
 std::vector<SeenUnit> g_seen;
+std::vector<uint8_t> g_seenNow;        // Reused each tick: the object indices seen live this tick.
 std::vector<uint8_t> g_seenTech;      // Per tech number: player 0 has it.
 std::vector<int>     g_seenObjective;  // Per ScStub index: -1 not a victory condition, else met (0/1).
 std::vector<int>     g_seenDisaster;   // Per object index: the disaster type seen there (-1 none).
@@ -1950,12 +1959,28 @@ int ObjectiveMet(const VictoryConditionImpl* v) {
   return int(mask & 1);
 }
 
+// The ScStub indices holding victory conditions, found by a scan of the list (IsBadReadPtr on every slot, slow), redone
+// when the list's last created index changes (a mission creating stubs) and every 512 ticks.
+std::vector<int> g_objectiveStubs;
+int g_objectiveScanTick = -1000000, g_objectiveScanLast = -2;
+
 template <typename F> void ForEachObjective(F f) {
   ScStubList* list = ScStubList::GetInstance();
-  for (size_t i = 0; i < ScStubList::MaxNumScStubs; ++i) {
+  const int tick = g_gameImpl.tick_, lastCreated = int(list->lastCreatedIndex_);
+  if (lastCreated != g_objectiveScanLast || tick - g_objectiveScanTick >= 512 || tick < g_objectiveScanTick) {
+    g_objectiveStubs.clear();
+    for (size_t i = 0; i < ScStubList::MaxNumScStubs; ++i) {
+      ScBase* s = list->At(i);
+      if (s && !IsBadReadPtr(s, sizeof(VictoryConditionImpl)) && *reinterpret_cast<uintptr_t*>(s) == VictoryConditionVtbl)
+        g_objectiveStubs.push_back(int(i));
+    }
+    g_objectiveScanTick = tick, g_objectiveScanLast = lastCreated;
+  }
+  for (int i : g_objectiveStubs) {
     ScBase* s = list->At(i);
-    if (!s || IsBadReadPtr(s, sizeof(VictoryConditionImpl)) || *reinterpret_cast<uintptr_t*>(s) != VictoryConditionVtbl) continue;
-    f(int(i), static_cast<const VictoryConditionImpl*>(static_cast<TriggerImpl*>(s)));
+    // A stub destroyed since the scan: its slot is empty or holds something else.
+    if (!s || *reinterpret_cast<uintptr_t*>(s) != VictoryConditionVtbl) continue;
+    f(i, static_cast<const VictoryConditionImpl*>(static_cast<TriggerImpl*>(s)));
   }
 }
 
@@ -1971,7 +1996,8 @@ void SessionTick(int tick) {
   const int pad = PadTiles();
   // Units of every player.
   if (g_seen.size() < MapImpl::GetInstance()->MaxNumUnits()) g_seen.resize(MapImpl::GetInstance()->MaxNumUnits());
-  std::vector<uint8_t> now(g_seen.size(), 0);
+  std::vector<uint8_t>& now = g_seenNow;
+  now.assign(g_seen.size(), 0);
   for (int p = 0; p < g_gameImpl.numPlayers_; ++p) {
     auto visit = [&](Unit u) {
       if (!u.IsLive()) return;
@@ -2003,7 +2029,8 @@ void SessionTick(int tick) {
       }
       if (u.IsVehicle() && cmd != int(CommandType::Nop)) {
         const PathContext* pc = mo->pPathContext_;
-        if (pc && !IsBadReadPtr(pc, sizeof(PathContext))) s.destX = pc->dstTileX - pad, s.destY = pc->dstTileY;
+        if (pc != s.path) s.path = (pc && !IsBadReadPtr(pc, sizeof(PathContext))) ? pc : nullptr;
+        if (s.path) s.destX = pc->dstTileX - pad, s.destY = pc->dstTileY;
       } else if (cmd == int(CommandType::Nop)) {
         s.destX = s.destY = -1;
       }
@@ -2020,7 +2047,7 @@ void SessionTick(int tick) {
   // Player 0's research.
   if (g_seenTech.size() != size_t(g_research.numTechs_)) g_seenTech.assign(g_research.numTechs_, 0);
   for (int t = 0; t < g_research.numTechs_; ++t) {
-    const uint8_t has = g_research.HasTech(0, t) ? 1 : 0;
+    const uint8_t has = g_research.ppTechInfos_[t]->playerHasTechMask.Get(0) ? 1 : 0;  // What HasTech reads, without the call.
     if (has && !g_seenTech[t] && !baseline && EventBegin("tech")) {
       fprintf(g_events, ",\"id\":%d,\"name\":", g_research.ppTechInfos_[t]->techID);
       JsonStr(g_events, g_research.ppTechInfos_[t]->pTechName);
@@ -2057,7 +2084,8 @@ void SessionTick(int tick) {
     EventEnd("end", -1);
   }
   (void)tick;
-  fflush(g_events);
+  if (g_eventsWritten) fflush(g_events);
+  g_eventsWritten = false;
 }
 
 // One unit of state.json: the telemetry fields plus what a player reads off its panel.
@@ -2162,14 +2190,16 @@ void WriteSessionState(int tick) {
     fputs("]}", f);
   }
   // Per vehicle, structure and weapon type, the id of the research topic that makes it available (MapObjectType +0x1E4, as
-  // the eco run's typeExtra; 0 for none): what the factory and build panes offer.
+  // the eco run's typeExtra, a tech number; 0 when it isn't one): what the factory and build panes offer.
   fputs("],\n\"typeTopics\":{", f);
+  bool firstType = true;
   for (int i = 1; i <= int(MapID::BFG); ++i) {
     const uint8_t* t = reinterpret_cast<const uint8_t*>(MapObjectType::GetInstance(i));
     if (!t) continue;
     const int num = *reinterpret_cast<const int*>(t + 0x1E4);  // A tech number: the index in the loaded tree.
-    fprintf(f, "%s\"%s\":%d", i > 1 ? "," : "", TypeName(MapID(i)),
-            num > 0 && num < g_research.numTechs_ ? g_research.ppTechInfos_[num]->techID : 0);
+    fprintf(f, "%s\"%s\":%d", firstType ? "" : ",", TypeName(MapID(i)),
+            num >= 0 && num < g_research.numTechs_ ? g_research.ppTechInfos_[num]->techID : 0);
+    firstType = false;
   }
   fputs("},\n\"objectives\":[", f);
   bool first = true;
