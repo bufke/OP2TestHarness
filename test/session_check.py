@@ -54,6 +54,22 @@ def main() -> int:
     moved = next(u for u in stop["units"] if u["id"] == lynx)
     assert (moved["x"], moved["y"]) == (50, 60), moved
 
+    # Another player's unit appearing is an `enemy` event (in the file and for --stop), never `new`.
+    scn = BUILD / "check_enemy.json"
+    scn.write_text(json.dumps({"map": "cm01.map", "seed": 1, "ticks": 200,
+                               "spawn": [{"type": "LIGHT_TANK", "owner": 0, "tile": [20, 22], "weapon": "LASER"}]}))
+    extra = BUILD / "check_enemy_script.txt"
+    extra.write_text("20 spawn LIGHT_TANK 1 30 22 LASER\n")
+    out = subprocess.run([str(HERE / "run.sh"), "--scenario", str(scn), "--script", str(extra), "--trace-every", "0",
+                          "--stop", "enemy", "--timeout", "120", "--out", str(BUILD / "check_enemy")], capture_output=True, text=True)
+    assert json.loads(out.stdout.strip().splitlines()[-1])["ok"], out.stdout + out.stderr
+    events = jsonl(BUILD / "check_enemy" / "events.jsonl")
+    enemy = [e for e in events if e["ev"] == "enemy"]
+    assert len(enemy) == 1 and enemy[0]["owner"] == 1 and enemy[0]["tick"] == 20, events
+    assert not any(e["ev"] == "new" and e["owner"] != 0 for e in events), events
+    stopped = json.loads((BUILD / "check_enemy" / "state.json").read_text())
+    assert stopped["stop"] == f"enemy {enemy[0]['id']}" and stopped["tick"] == 20, (stopped["stop"], stopped["tick"])
+
     if not INSPECT.is_file():
         print("session check: op2-inspect isn't built (cd tools && cargo build -p op2-inspect): game_* tools not checked")
         print("session check: OK")
@@ -61,10 +77,14 @@ def main() -> int:
     env = dict(os.environ, TMPDIR=str(BUILD / "tmp"))
     (BUILD / "tmp").mkdir(exist_ok=True)
 
-    def tool(*args: str) -> str:
-        out = subprocess.run([str(INSPECT), *args], capture_output=True, text=True, env=env, cwd=HERE.parent)
-        assert out.returncode == 0, (args, out.stdout, out.stderr)
-        return out.stdout
+    def tool(*args: str, fail: bool = False, harness: str = "") -> str:
+        e = dict(env, OP2_HARNESS=harness) if harness else env
+        out = subprocess.run([str(INSPECT), *args], capture_output=True, text=True, env=e, cwd=HERE.parent)
+        assert (out.returncode != 0) == fail, (args, out.stdout, out.stderr)
+        return out.stdout + out.stderr
+
+    def script() -> list:
+        return [line.split("#")[0].split() for line in tool("game_observe", "what=script").splitlines()[1:]]
 
     text = tool("game_start", "mission=zHarnessEnd", "campaign=none", "tick=10", "name=check")
     assert "started zharnessend" in text and "Survive until tick 800" in text, text
@@ -78,6 +98,22 @@ def main() -> int:
     assert "dropped the 1 orders" in text, text
     tool("game_step", "orders=move 2 45 64", "ticks=100")
     assert "identical" in tool("game_verify"), "game_verify"
+    # An order given at 110 for later (+300) survives a rewind to after 110, and goes with one to 110.
+    tool("game_step", "orders=+300 move 3 40 60  # later; really", "ticks=50")
+    assert script() == [["10", "move", "2", "45", "64"], ["410", "move", "3", "40", "60"]], script()
+    assert "dropped the 0 orders" in tool("game_rewind", "tick=130")
+    assert script()[-1] == ["410", "move", "3", "40", "60"], script()
+    # A step that can't run (to in the past) adds none of its orders.
+    tool("game_step", "orders=move 3 41 61", "to=5", fail=True)
+    assert ["130", "move", "3", "41", "61"] not in script(), script()
+    # A rewind whose replay fails keeps the orders and the tick.
+    tool("game_rewind", "tick=50", fail=True, harness=str(BUILD / "no-harness-here"))
+    assert len(script()) == 2 and tool("game_observe", "what=colony").startswith("tick 130"), script()
+    # An order given now hasn't run yet: game_verify replays what the last step ran.
+    tool("game_order", "orders=move 3 42 62")
+    text = tool("game_verify")
+    assert "identical" in text and "1 orders given since the last step" in text, text
+    assert "dropped the 2 orders" in tool("game_rewind", "tick=110")
     out = BUILD / "check_session.txt"
     tool("game_save", f"out={out}")
     lines = [line for line in out.read_text().splitlines() if not line.startswith("#")]
