@@ -70,15 +70,35 @@ def main() -> int:
     stopped = json.loads((BUILD / "check_enemy" / "state.json").read_text())
     assert stopped["stop"] == f"enemy {enemy[0]['id']}" and stopped["tick"] == 20, (stopped["stop"], stopped["tick"])
 
+    # The controlled canonical chain completes and preserves every applicable topic through the e06 unit mission.
+    canonical = HERE / "oracle" / "missions" / "canonical"
+    expected = {3301, 3303, 3401, 3501, 3502, 3601, 3602, 3604, 3605, 3606, 3607, 3608, 3609, 3610, 3801, 3851}
+    for mission in ("e05", "e06"):
+        out = subprocess.run([str(HERE / "run.sh"), "--mission", f"{mission}.dll", "--campaign",
+                              str(canonical / f"{mission}_campaign.txt"), "--script", str(canonical / f"{mission}.txt"),
+                              "--ticks", "0", "--telemetry-every", "100", "--timeout", "120",
+                              "--out", str(BUILD / f"check_canonical_{mission}")], capture_output=True, text=True)
+        summary = json.loads(out.stdout.strip().splitlines()[-1])
+        assert summary["game_term_reason"] == "MissionAccomplished", (mission, summary, out.stderr)
+        player = jsonl(BUILD / f"check_canonical_{mission}" / "telemetry.jsonl")[-1]["players"][0]
+        assert expected <= set(player["techs"]), (mission, sorted(expected - set(player["techs"])))
+        if mission == "e05":
+            assert {3402, 5102, 5110, 5111, 5115, 5201, 5405, 5506} <= set(player["techs"])
+        else:
+            assert 6000 in player["techs"]
+
     # A campaign file's completed topics become MissionResults research once PrepareGame has loaded the new tree.
-    campaign = HERE / "oracle" / "missions" / "e07_campaign.txt"
+    campaign = BUILD / "check_campaign.txt"
+    campaign.write_text((HERE / "oracle" / "missions" / "e07_campaign.txt").read_text() +
+                        "techs 3405 5110\ntechs 5115 5401\ntechs -1 999999 invalid 6000\n")
     out = subprocess.run([str(HERE / "run.sh"), "--mission", "e07.dll", "--campaign", str(campaign), "--ticks", "1",
                           "--telemetry-every", "1", "--timeout", "120", "--out", str(BUILD / "check_campaign")],
                          capture_output=True, text=True)
     assert json.loads(out.stdout.strip().splitlines()[-1])["ok"], out.stdout + out.stderr
     player = jsonl(BUILD / "check_campaign" / "telemetry.jsonl")[-1]["players"][0]
     assert {3405, 5102, 5110, 5115, 5401, 6000} <= set(player["techs"]), player["techs"]
-    assert player["event"] == -72 and player["satellites"] == 512, player
+    assert -1 not in player["techs"] and 999999 not in player["techs"]
+    assert player["event"] == -12 and player["satellites"] == 512, player
 
     if not INSPECT.is_file():
         print("session check: op2-inspect isn't built (cd tools && cargo build -p op2-inspect): game_* tools not checked")

@@ -2383,10 +2383,12 @@ void __fastcall GameCycleHook(GameImpl* self, void*) {
 }
 
 std::vector<int> g_campaignTechs;
+bool g_campaignHasTechs = false;
 using LoadCampaignStateFn = ibool(__thiscall*)(void*, GameStartInfo*);
 LoadCampaignStateFn g_loadCampaignState = nullptr;
 
 ibool __fastcall LoadCampaignStateHook(void* self, void*, GameStartInfo* start) {
+  if (!g_campaignHasTechs) return g_loadCampaignState(self, start);
   // PrepareGame has loaded the new tree by now, unlike StartMissionHook. GetMissionResults saved the previous tree's
   // size and every index's player mask; the original restores it only into a tree exactly one topic larger (0x473830).
   auto& research = static_cast<MissionResults*>(start)->researchState;
@@ -2431,6 +2433,9 @@ ibool __fastcall StartMissionHook(GameImpl* self, void*) {
   if (!cfg.campaign.empty()) {
     mr = {};
     memcpy(static_cast<GameStartInfo*>(&mr), &g_gsi, sizeof(GameStartInfo));
+    g_campaignTechs.clear();
+    g_campaignHasTechs = false;
+    g_loadCampaignState = reinterpret_cast<LoadCampaignStateFn>(RelinkCall(0x48982F, reinterpret_cast<void*>(&LoadCampaignStateHook)));
     // MissionResults.missionType is the campaign mission just finished: the game starts the next one, picking the
     // colony's DLL by the local player's isEden flag (measured: number 2 with isEden 0 started p03).
     int number = atoi(cfg.mission.c_str() + 1) - 1;
@@ -2444,9 +2449,9 @@ ibool __fastcall StartMissionHook(GameImpl* self, void*) {
         auto& ps = mr.playerStartInfo;
         auto& ms = mr.moraleState;
         if (k == "techs") {
+          g_campaignHasTechs = true;
           int id;
           while (in >> id) g_campaignTechs.push_back(id);
-          g_loadCampaignState = reinterpret_cast<LoadCampaignStateFn>(RelinkCall(0x48982F, reinterpret_cast<void*>(&LoadCampaignStateHook)));
           continue;
         }
         int v;
