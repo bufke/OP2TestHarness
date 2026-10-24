@@ -40,7 +40,7 @@ When run from Claude Code, `run.sh` and `make check` need `dangerouslyDisableSan
 | `--state` | | session state: `events.jsonl` through the run and `state.json` at the end (see "Session state") |
 | `--stop KINDS` | | end the run at the first event of these kinds after `--stop-from` (implies `--state`) |
 | `--stop-from T` | 0 | `--stop` only counts events after tick T |
-| `--campaign FILE` | | start as a campaign mission with this carry-over (MissionResults): `key value` lines `food`, `common`, `rare`, `workers`, `scientists`, `kids`, `satellites`, `moraleLevel`, `morale`, `event`, `techLevel`, `mission` (the finished mission's number; default the DLL's minus one, as the game starts the next one) |
+| `--campaign FILE` | | start as a campaign mission with this carry-over (MissionResults): `key value` lines `food`, `common`, `rare`, `workers`, `scientists`, `kids`, `satellites`, `moraleLevel`, `morale`, `event`, `techLevel`, `mission` (the finished mission's number; default the DLL's minus one, as the game starts the next one), and `techs` followed by the completed topic ids. Older files without `techs` still start with no carried research |
 | `--no-turbo` | | keep the game's frame limiter and render every frame (real time at `--speed`) |
 | `--speed 1-10` | 10 | in-game speed setting. Only matters with `--no-turbo` |
 | `--draw-every N` | 0 | in turbo mode, also render every N ticks. Default: render only just before screenshots |

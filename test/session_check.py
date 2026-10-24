@@ -70,6 +70,16 @@ def main() -> int:
     stopped = json.loads((BUILD / "check_enemy" / "state.json").read_text())
     assert stopped["stop"] == f"enemy {enemy[0]['id']}" and stopped["tick"] == 20, (stopped["stop"], stopped["tick"])
 
+    # A campaign file's completed topics become MissionResults research once PrepareGame has loaded the new tree.
+    campaign = HERE / "oracle" / "missions" / "e07_campaign.txt"
+    out = subprocess.run([str(HERE / "run.sh"), "--mission", "e07.dll", "--campaign", str(campaign), "--ticks", "1",
+                          "--telemetry-every", "1", "--timeout", "120", "--out", str(BUILD / "check_campaign")],
+                         capture_output=True, text=True)
+    assert json.loads(out.stdout.strip().splitlines()[-1])["ok"], out.stdout + out.stderr
+    player = jsonl(BUILD / "check_campaign" / "telemetry.jsonl")[-1]["players"][0]
+    assert {3405, 5102, 5110, 5115, 5401, 6000} <= set(player["techs"]), player["techs"]
+    assert player["event"] == -72 and player["satellites"] == 512, player
+
     if not INSPECT.is_file():
         print("session check: op2-inspect isn't built (cd tools && cargo build -p op2-inspect): game_* tools not checked")
         print("session check: OK")

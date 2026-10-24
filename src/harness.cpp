@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -239,12 +241,14 @@ void WriteTelemetry(int tick) {
   for (int i = 0; i < game.numPlayers_; ++i) {
     PlayerImpl* p = game.GetPlayer(i);
     const auto& m = p->moraleState_;
+    uint32_t satellites;
+    memcpy(&satellites, &p->satellites_, sizeof(satellites));
     fprintf(f, "%s{\"id\":%d,\"human\":%d,\"eden\":%d,\"food\":%d,\"commonOre\":%d,\"rareOre\":%d,\"workers\":%d,"
-               "\"scientists\":%d,\"kids\":%d,\"morale\":%d,\"moraleLevel\":%d,\"powerGen\":%d,\"powerUsed\":%d,"
-               "\"foodNet\":%d,\"buildings\":%d,\"idleBuildings\":%d,\"techs\":[",
+               "\"scientists\":%d,\"kids\":%d,\"morale\":%d,\"moraleLevel\":%d,\"event\":%d,\"satellites\":%u,"
+               "\"powerGen\":%d,\"powerUsed\":%d,\"foodNet\":%d,\"buildings\":%d,\"idleBuildings\":%d,\"techs\":[",
             i ? "," : "", i, p->isHuman_ != 0, p->isEden_ != 0, p->foodStored_, p->commonOre_, p->rareOre_,
-            p->numWorkers_, p->numScientists_, p->numKids_, m.morale, int(m.moraleLevel), p->amountPowerGenerated_,
-            p->amountPowerConsumed_, p->netFoodProduction_, p->numBuildings_, p->numIdleBuildings_);
+            p->numWorkers_, p->numScientists_, p->numKids_, m.morale, int(m.moraleLevel), m.eventMoraleModifier, satellites,
+            p->amountPowerGenerated_, p->amountPowerConsumed_, p->netFoodProduction_, p->numBuildings_, p->numIdleBuildings_);
     bool first = true;
     for (int t = 0; t < g_research.numTechs_; ++t) {
       if (g_research.HasTech(i, t)) { fprintf(f, "%s%d", first ? "" : ",", g_research.ppTechInfos_[t]->techID);  first = false; }
@@ -2378,6 +2382,29 @@ void __fastcall GameCycleHook(GameImpl* self, void*) {
   if (cfg.ticks > 0 && tick >= cfg.ticks) Quit("tick limit");
 }
 
+std::vector<int> g_campaignTechs;
+using LoadCampaignStateFn = ibool(__thiscall*)(void*, GameStartInfo*);
+LoadCampaignStateFn g_loadCampaignState = nullptr;
+
+ibool __fastcall LoadCampaignStateHook(void* self, void*, GameStartInfo* start) {
+  // PrepareGame has loaded the new tree by now, unlike StartMissionHook. GetMissionResults saved the previous tree's
+  // size and every index's player mask; the original restores it only into a tree exactly one topic larger (0x473830).
+  auto& research = static_cast<MissionResults*>(start)->researchState;
+  research.numTechs = std::max(0, g_research.numTechs_ - 1);
+  for (int t = 0; t < research.numTechs; ++t) research.techNum[t] = uint8_t(t);
+  for (int id : g_campaignTechs) {
+    bool known = false;
+    for (int t = 0; t < research.numTechs && !known; ++t) {
+      if (g_research.ppTechInfos_[t]->techID == id) {
+        research.playerBitVector[t].Set(0, true);
+        known = true;
+      }
+    }
+    if (!known) Log("campaign: topic %d is not in the previous mission's tech tree", id);
+  }
+  return g_loadCampaignState(self, start);
+}
+
 // Replaces GameImpl::LoadDebugMap() on the no-shell startup path with starting the requested mission.
 ibool __fastcall StartMissionHook(GameImpl* self, void*) {
   g_gsi = {};
@@ -2397,7 +2424,8 @@ ibool __fastcall StartMissionHook(GameImpl* self, void*) {
   // Campaign start: PrepareGame takes a MissionResults (GameStartInfo plus the carry-over) when isCampaign is set
   // and applies it with LoadCampaignState (0x4899C0) before the mission runs. OP2H_CAMPAIGN names a text file of
   // `key value` lines: mission (the finished campaign mission's number; default the DLL's minus one), food, common, rare, workers, scientists, kids, satellites (raw
-  // SatelliteCounts word), moraleLevel, morale, event, techLevel. The research list stays empty (numTechs 0).
+  // SatelliteCounts word), moraleLevel, morale, event, techLevel, and `techs` followed by completed topic ids. No
+  // `techs` line leaves numTechs 0, preserving older probe files.
   static MissionResults mr;
   GameStartInfo* start = &g_gsi;
   if (!cfg.campaign.empty()) {
@@ -2407,13 +2435,22 @@ ibool __fastcall StartMissionHook(GameImpl* self, void*) {
     // colony's DLL by the local player's isEden flag (measured: number 2 with isEden 0 started p03).
     int number = atoi(cfg.mission.c_str() + 1) - 1;
     for (auto& f : mr.playerFlags) f.isEden = (cfg.mission[0] == 'e' || cfg.mission[0] == 'E');
-    if (FILE* f = fopen(cfg.campaign.c_str(), "r")) {
-      char key[64];
-      int v;
-      while (fscanf(f, "%63s %d", key, &v) == 2) {
-        const std::string k = key;
+    if (std::ifstream f{cfg.campaign}) {
+      std::string line;
+      while (std::getline(f, line)) {
+        std::istringstream in{line};
+        std::string k;
+        if (!(in >> k)) continue;
         auto& ps = mr.playerStartInfo;
         auto& ms = mr.moraleState;
+        if (k == "techs") {
+          int id;
+          while (in >> id) g_campaignTechs.push_back(id);
+          g_loadCampaignState = reinterpret_cast<LoadCampaignStateFn>(RelinkCall(0x48982F, reinterpret_cast<void*>(&LoadCampaignStateHook)));
+          continue;
+        }
+        int v;
+        if (!(in >> v)) continue;
         if      (k == "mission")     number = v;
         else if (k == "food")        ps.food = v;
         else if (k == "common")      ps.commonOre = v;
@@ -2426,9 +2463,8 @@ ibool __fastcall StartMissionHook(GameImpl* self, void*) {
         else if (k == "morale")      ms.morale = v;
         else if (k == "event")       ms.eventMoraleModifier = v;
         else if (k == "techLevel")   mr.researchState.techLevel = uint16(v);
-        else Log("campaign: unknown key %s", key);
+        else Log("campaign: unknown key %s", k.c_str());
       }
-      fclose(f);
     } else {
       Log("campaign: cannot open %s", cfg.campaign.c_str());
     }
