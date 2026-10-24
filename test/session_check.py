@@ -119,6 +119,21 @@ def main() -> int:
     lines = [line for line in out.read_text().splitlines() if not line.startswith("#")]
     assert lines == ["0 coords file", "10     move 2 45 64"], lines
     assert "tool calls" in tool("game_stop")
+
+    # Shell mode: first_cycle is logged before tick-0 commands; the script-done gate and any shot behind it come after.
+    done_out = BUILD / "check_script_done"
+    done = subprocess.run([str(HERE / "shell.sh"), "--drive", str(HERE / "test" / "script_done_drive.txt"),
+                           "--script", str(HERE / "test" / "script_done_script.txt"), "--ini", "Music=0",
+                           "--ini", "GameSpeed=10", "--timeout", "90", "--out", str(done_out)],
+                          capture_output=True, text=True)
+    assert done.returncode == 0, done.stdout + done.stderr
+    events = jsonl(done_out / "shell.jsonl")
+    first = next(e for e in events if e.get("what") == "first_cycle")
+    complete = next(e for e in events if e.get("ev") == "script" and e.get("what") == "done")
+    assert events.index(first) < events.index(complete) and complete["tick"] == first["tick"] == 1, events
+    steps = jsonl(done_out / "driver.jsonl")
+    shot = next(d for d in steps if d.get("step") == "shot" and d.get("name") == "script_done")
+    assert shot["ms"] >= complete["ms"] and (done_out / "shot_script_done.png").is_file(), (complete, shot)
     print("session check: OK")
     return 0
 

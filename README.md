@@ -432,7 +432,8 @@ another, probably a race between OPU loading its private fonts and the first dia
 - `file`: ResManager::OpenStream/GetFilePath asked by the shell; `lib`: its LoadLibraryA; `input`: key and button
   messages as the game receives them; `start`: TApp::StartSingleGame's GameStartInfo; `activate_shell`:
   TApp::ActivateShell (0x486DB0), the game handing back to the shell with its end reason; `game`: first cycle, every
-  500 ticks, the end reason changing; `dump`: windows and controls on request.
+  500 ticks, the end reason changing; `script`: `done` after every tick-script command has run (the first-cycle event
+  precedes these commands, so wait for `script` when the setup matters); `dump`: windows and controls on request.
 
 Notes: the program must be started by its full Windows path (`wine explorer /desktop=NAME,WxH Outpost2.exe` with a
 relative name silently starts nothing). The harness Wine has no audio device, so MCI `waveaudio` fails at once and the

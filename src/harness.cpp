@@ -2805,7 +2805,9 @@ void __fastcall ShellCycleHook(GameImpl* self, void*) {
     LogMusic("start");
   }
   g_shellGameTick = tick;
+  const bool hadCommands = g_scriptPos < g_script.size();
   while (g_scriptPos < g_script.size() && g_script[g_scriptPos].tick <= tick) RunScriptCmd(g_script[g_scriptPos++], tick);
+  if (hadCommands && g_scriptPos == g_script.size()) ShellEvent("\"ev\":\"script\",\"what\":\"done\",\"tick\":%d", tick);
   AudioTick(tick);
   if (cfg.telemEvery > 0 && tick >= g_nextTelem) { WriteTelemetry(tick);  g_nextTelem = (tick / cfg.telemEvery + 1) * cfg.telemEvery; }
   if (tick % 500 == 0) ShellEvent("\"ev\":\"game\",\"what\":\"tick\",\"tick\":%d", tick);
