@@ -115,7 +115,7 @@ def scenario_script(scn: dict) -> str:
         wps = " ".join(",".join(str(v) for v in w) for w in points)
         if cmd == "move" and "waypoints" in o:
             lines.append(f"{tick} movewp {unit} {wps}")
-        elif cmd in ("move", "dock"):
+        elif cmd in ("move", "dock", "dockeg"):
             lines.append(f"{tick} {cmd} {unit} {o['tile'][0]} {o['tile'][1]}")
         elif cmd == "standground":
             lines.append(f"{tick} standground {unit} {wps}")
