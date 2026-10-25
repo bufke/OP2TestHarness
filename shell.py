@@ -22,6 +22,9 @@ Driver script, one step per line ('#' starts a comment). Times are wall-clock se
     move <x> <y>                                              move the pointer
     key <keysym> [keysym ...]                                 key presses (X keysym names: Escape Return space a F1 ...)
     dump [tag]                                                log every window and control (shell.jsonl `dump`)
+    state [tag]                                               log the game's tick, pause flag, selection (with the units'
+                                                              commands) and view (shell.jsonl `state`, flow.json `probe`
+                                                              without the tick); works while paused, unlike telemetry
     mark <text>                                               a marker in driver.jsonl
     quit                                                      end the run (also the end of the script)
 """
@@ -232,6 +235,8 @@ def flow(events: list[dict], window: list | None) -> list[dict]:
             movie["skipped"] = e.get("msg")
         elif ev == "start":
             out.append({"start": {k: v for k, v in e.items() if k not in ("ms", "ev", "seed")}})
+        elif ev == "state":  # Without the tick, which depends on real time.
+            out.append({"probe": e.get("tag"), **{k: e.get(k) for k in ("paused", "selected", "cmds", "view")}})
         elif ev == "game" and e.get("what") == "end":
             out.append({"game_end": e.get("reason"), "tick": e.get("tick")})
         elif ev == "activate_shell":
@@ -374,6 +379,12 @@ def main() -> int:
         tmp.rename(out / "ctl.txt")
         return events.wait("dump", [("tag", tag)], 10, alive)
 
+    def state(tag: str) -> dict | None:
+        tmp = out / "ctl.tmp"
+        tmp.write_text(f"state {tag}\n")
+        tmp.rename(out / "ctl.txt")
+        return events.wait("state", [("tag", tag)], 10, alive)
+
     def steps() -> tuple[bool, str | None]:
         n_dump = 0
         for lineno, raw in enumerate(args.drive.read_text().splitlines(), 1):
@@ -432,6 +443,10 @@ def main() -> int:
             elif verb == "dump":
                 dump(a[0] if a else "dump")
                 record("dump", tag=a[0] if a else "dump")
+            elif verb == "state":
+                e = state(a[0] if a else "state")
+                record("state", tag=a[0] if a else "state",
+                       **({k: e[k] for k in ("tick", "paused", "pauseCount", "selected", "cmds", "view")} if e else {"found": None}))
             elif verb == "mark":
                 record("mark", text=" ".join(a))
             elif verb == "quit":

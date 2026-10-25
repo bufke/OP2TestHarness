@@ -198,7 +198,8 @@ How it works, and what is deterministic:
 - Input runs keep the game window active (parallel runs share a wineserver and take the foreground from each other;
   an inactive game ignores keys and scrolling).
 - Don't pause the game (`ctrl+p`, `pause`): no cycles run while paused, so the script can't unpause it and the run
-  ends at `--timeout`.
+  ends at `--timeout`. To measure input while paused use shell mode, whose driver's real input doesn't wait for
+  cycles, and its `state` step (below; runs `shell_pause_input`).
 
 ## Economy verbs and telemetry (`--eco`)
 
@@ -412,12 +413,14 @@ click <x> <y> [right] | move <x> <y>                     desktop pixels
 ctl <text | id=N> [in=<window regex>] [right]             click a control's centre ('_' = space, '&' ignored)
 key <keysym> ...                                          X keysyms: Escape Return space n alt+n Down F1 ...
 dump [tag] | mark <text> | quit
+state [tag]                                               the game's tick, pause flag, selection with the units'
+                                                          commands, and view (works while paused, unlike telemetry)
 ```
 
 Outputs: `shell.jsonl` (below), `driver.jsonl` (every step with its time on shell.jsonl's clock), `shot_<name>.png`
 (640x480, the game's window), `flow.json` (the deterministic part of shell.jsonl: dialogs and their controls,
 layouts from the `dump`s in window coordinates, state messages, files, movies and how they ended, game start and
-end; byte-identical between runs), `summary.json` (movies with timings, the window rectangle), the private
+end, the `state` probes without their ticks; byte-identical between runs), `summary.json` (movies with timings, the window rectangle), the private
 `outpost2.ini`, `harness.log`, `wine.log`. Shots of static screens (named `ref_*` by convention) double as reference
 images: they reproduce too, except that dialog text (OPU's fonts) occasionally lands 2 px lower in one run than
 another, probably a race between OPU loading its private fonts and the first dialog, so compare with a tolerance.
@@ -433,7 +436,9 @@ another, probably a race between OPU loading its private fonts and the first dia
   messages as the game receives them; `start`: TApp::StartSingleGame's GameStartInfo; `activate_shell`:
   TApp::ActivateShell (0x486DB0), the game handing back to the shell with its end reason; `game`: first cycle, every
   500 ticks, the end reason changing; `script`: `done` after every tick-script command has run (the first-cycle event
-  precedes these commands, so wait for `script` when the setup matters); `dump`: windows and controls on request.
+  precedes these commands, so wait for `script` when the setup matters); `dump`: windows and controls on request;
+  `state`: the tick, the pause flag (0x56E9E0) and count, the selection (0x547210) with each unit's command, and
+  the detail view's top-left corner in file pixels, on request (read by the control thread, so also while paused).
 
 Notes: the program must be started by its full Windows path (`wine explorer /desktop=NAME,WxH Outpost2.exe` with a
 relative name silently starts nothing). The harness Wine has no audio device, so MCI `waveaudio` fails at once and the

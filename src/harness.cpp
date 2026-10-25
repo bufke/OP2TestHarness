@@ -2511,8 +2511,11 @@ ibool __fastcall StartMissionHook(GameImpl* self, void*) {
 //   start   TApp::StartSingleGame: the GameStartInfo the shell built
 //   game    in-game milestones: the first cycle, every 500 ticks, the end reason changing
 //   dump    windows and controls, on request (shell.py `dump`)
+//   state   the game's tick, pause flag (TApp +0x178, 0x56E9E0) and count (GameFrame +0x1E0), the selection
+//           (0x547210) with each selected unit's command, and the detail view's top-left corner (file pixels), on
+//           request (shell.py `state`): readable while paused, when no cycle runs to write telemetry
 // shell.py's control file (ctl.txt in the output directory) is polled by a thread: `dump <tag>` logs every window of
-// the game, `quit` ends the process.
+// the game, `state <tag>` the game state above, `quit` ends the process.
 
 bool    g_shellMode = false;
 FILE*   g_shell = nullptr;
@@ -2877,6 +2880,23 @@ void DumpWindows(const std::string& tag) {
   ShellEvent("\"ev\":\"dump\",\"tag\":%s,\"windows\":[%s]", JsonStr(tag.c_str()).c_str(), out.c_str());
 }
 
+// Read from the control thread while the game thread may be running: a snapshot of a few words, good enough for a
+// paused game (the point of it) and for the selection between cycles.
+void DumpState(const std::string& tag) {
+  const int n = std::min(int(*reinterpret_cast<const volatile int*>(SelectedCount)), 32);
+  std::string sel, cmds;
+  for (int k = 0; k < n; ++k) {
+    const int id = reinterpret_cast<const volatile int*>(SelectedUnits)[k];
+    sel += (k ? "," : "") + std::to_string(id);
+    cmds += std::string(k ? ",\"" : "\"") + CommandName(int(Unit(id).GetCommand())) + "\"";
+  }
+  POINT o = {};
+  if (g_shellGameTick >= 0) PaneToMap(&g_gameFrame.detailPane_, 0, 0, &o);
+  ShellEvent("\"ev\":\"state\",\"tag\":%s,\"tick\":%d,\"paused\":%d,\"pauseCount\":%d,\"selected\":[%s],"
+             "\"cmds\":[%s],\"view\":[%ld,%ld]", JsonStr(tag.c_str()).c_str(), g_shellGameTick, int(g_tApp.AppPaused()),
+             g_gameFrame.gamePausedCount_, sel.c_str(), cmds.c_str(), g_shellGameTick >= 0 ? o.x - PadTiles() * 32 : 0, o.y);
+}
+
 DWORD WINAPI ShellControlThread(void*) {
   for (;;) {
     Sleep(25);
@@ -2890,6 +2910,7 @@ DWORD WINAPI ShellControlThread(void*) {
     for (auto c : cmds) {
       while (!c.empty() && (c.back() == '\n' || c.back() == '\r')) c.pop_back();
       if (c.rfind("dump", 0) == 0) DumpWindows(c.size() > 5 ? c.substr(5) : "");
+      else if (c.rfind("state", 0) == 0) DumpState(c.size() > 6 ? c.substr(6) : "");
       else if (c == "quit") {
         ShellEvent("\"ev\":\"quit\"");
         if (g_telem) fclose(g_telem);
