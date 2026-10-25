@@ -1570,6 +1570,7 @@ void RunScriptCmd(const ScriptCmd& c, int tick) {
 
   if      (c.verb == "move")         IssueMove(unit(0), loc(1));
   else if (c.verb == "dock")         IssueMove(unit(0), loc(1), CommandType::Dock);  // ctMoDock, to a dock tile
+  else if (c.verb == "dockeg")       IssueMove(unit(0), loc(1), CommandType::DockEG);  // ctMoDockEG, an Eden Garage's dock
   else if (c.verb == "attack")       unit(0).DoAttack(unit(1));
   else if (c.verb == "guard")        IssueTargeted(unit(0), CommandType::Guard, unit(1).GetID(), 0, false);
   else if (c.verb == "attackground") IssueTargeted(unit(0), CommandType::Attack, loc(1).x, loc(1).y, true);

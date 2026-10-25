@@ -119,6 +119,7 @@ or `@N` for the unit made by the Nth `spawn` command. Coordinates are internal t
 ```
 100  move      7 90 60      # unit 7 to tile (90,60)
 100  dock      7 41 41      # Dock order (ctMoDock) to a tile, e.g. a structure's dock
+100  dockeg    7 32 42      # ctMoDockEG, the Dock the UI gives at an Eden Garage (ends facing north)
 3200 attack    8 11         # unit 8 attacks unit 11
 0    coords    file         # later x/y are file tiles (internal x = file x + map padding)
 0    spawn     LIGHT_TANK 0 20 30 LASER 64   # type, owner, x, y, weapon (or -), rotation 0-255
