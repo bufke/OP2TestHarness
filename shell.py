@@ -22,9 +22,12 @@ Driver script, one step per line ('#' starts a comment). Times are wall-clock se
     move <x> <y>                                              move the pointer
     key <keysym> [keysym ...]                                 key presses (X keysym names: Escape Return space a F1 ...)
     dump [tag]                                                log every window and control (shell.jsonl `dump`)
-    state [tag]                                               log the game's tick, pause flag, selection (with the units'
-                                                              commands) and view (shell.jsonl `state`, flow.json `probe`
-                                                              without the tick); works while paused, unlike telemetry
+    state [tag] [after=N]                                     log the game's tick, pause flag, cursor handle, selection
+                                                              (with the units' commands) and view (shell.jsonl `state`;
+                                                              flow.json `probe` without the tick and cursor). Running:
+                                                              read by the game thread at the end of the cycle N ticks
+                                                              after the request, so it counts ticks, not wall time;
+                                                              paused: at once (no cycle runs, nothing moves)
     mark <text>                                               a marker in driver.jsonl
     quit                                                      end the run (also the end of the script)
 """
@@ -379,11 +382,11 @@ def main() -> int:
         tmp.rename(out / "ctl.txt")
         return events.wait("dump", [("tag", tag)], 10, alive)
 
-    def state(tag: str) -> dict | None:
+    def state(tag: str, after: int) -> dict | None:
         tmp = out / "ctl.tmp"
-        tmp.write_text(f"state {tag}\n")
+        tmp.write_text(f"state {tag} {after}\n")
         tmp.rename(out / "ctl.txt")
-        return events.wait("state", [("tag", tag)], 10, alive)
+        return events.wait("state", [("tag", tag)], 10 + after / 10, alive)
 
     def steps() -> tuple[bool, str | None]:
         n_dump = 0
@@ -444,9 +447,13 @@ def main() -> int:
                 dump(a[0] if a else "dump")
                 record("dump", tag=a[0] if a else "dump")
             elif verb == "state":
-                e = state(a[0] if a else "state")
-                record("state", tag=a[0] if a else "state",
-                       **({k: e[k] for k in ("tick", "paused", "pauseCount", "selected", "cmds", "view")} if e else {"found": None}))
+                tag = next((v for v in a if not v.startswith("after=")), "state")
+                after = int(next((v[6:] for v in a if v.startswith("after=")), "0"))
+                e = state(tag, after)
+                if e is None:
+                    record("state", tag=tag, found=None)
+                    return False, f"line {lineno}: no answer: {line}"
+                record("state", tag=tag, **{k: e.get(k) for k in ("tick", "paused", "pauseCount", "cursor", "selected", "cmds", "view")})
             elif verb == "mark":
                 record("mark", text=" ".join(a))
             elif verb == "quit":

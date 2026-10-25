@@ -850,14 +850,23 @@ bool UiToClient(const std::string& name, POINT* out) {
 }
 
 // Telemetry extension for input runs: the selected unit IDs and the detail pane's top-left corner in file pixels.
-void WriteInputState(FILE* f) {
+// `,"selected":[ids],"view":[x,y]`: the selection (0x547210) and the detail view's top-left corner in file pixels; with
+// `cmds`, also `,"cmds":[...]`, each selected unit's command. Telemetry and the shell's `state` probe share it.
+std::string InputStateJson(bool cmds) {
   const int n = std::min(*reinterpret_cast<const int*>(SelectedCount), 32);
-  fputs(",\"selected\":[", f);
-  for (int k = 0; k < n; ++k) fprintf(f, "%s%d", k ? "," : "", reinterpret_cast<const int*>(SelectedUnits)[k]);
+  std::string ids, names;
+  for (int k = 0; k < n; ++k) {
+    const int id = reinterpret_cast<const int*>(SelectedUnits)[k];
+    ids += (k ? "," : "") + std::to_string(id);
+    names += std::string(k ? ",\"" : "\"") + CommandName(int(Unit(id).GetCommand())) + "\"";
+  }
   POINT o = {};
   PaneToMap(&g_gameFrame.detailPane_, 0, 0, &o);
-  fprintf(f, "],\"view\":[%ld,%ld]", o.x - PadTiles() * 32, o.y);
+  return ",\"selected\":[" + ids + "]" + (cmds ? ",\"cmds\":[" + names + "]" : "") + ",\"view\":[" +
+         std::to_string(o.x - PadTiles() * 32) + "," + std::to_string(o.y) + "]";
 }
+
+void WriteInputState(FILE* f) { fputs(InputStateJson(false).c_str(), f); }
 
 WPARAM MouseKeyFlags() {
   return (g_in.keys[VK_LBUTTON] ? MK_LBUTTON : 0) | (g_in.keys[VK_RBUTTON] ? MK_RBUTTON : 0) |
@@ -2513,9 +2522,10 @@ ibool __fastcall StartMissionHook(GameImpl* self, void*) {
 //   dump    windows and controls, on request (shell.py `dump`)
 //   state   the game's tick, pause flag (TApp +0x178, 0x56E9E0) and count (GameFrame +0x1E0), the selection
 //           (0x547210) with each selected unit's command, and the detail view's top-left corner (file pixels), on
-//           request (shell.py `state`): readable while paused, when no cycle runs to write telemetry
+//           request (shell.py `state`): running, at the end of a cycle a given number of ticks on; paused, at once
+//           (when no cycle runs to write telemetry)
 // shell.py's control file (ctl.txt in the output directory) is polled by a thread: `dump <tag>` logs every window of
-// the game, `state <tag>` the game state above, `quit` ends the process.
+// the game, `state <tag> [after]` the game state above, `quit` ends the process.
 
 bool    g_shellMode = false;
 FILE*   g_shell = nullptr;
@@ -2770,7 +2780,10 @@ int __fastcall DoModelessHook(void* self, void*, const char* res, HINSTANCE inst
 // TApp::ActivateShell (0x486DB0): the game hands control back to the shell with the end reason and the results.
 using ActivateShellFn = int(__thiscall*)(void*, int, MissionResults*);
 ActivateShellFn g_activateShell = nullptr;
+int g_shellGameTick = -1, g_shellEnd = 0;  // The shell's current game's tick; -1 outside a game.
+
 int __fastcall ActivateShellHook(void* self, void*, int reason, MissionResults* r) {
+  g_shellGameTick = -1;  // The game's panes and units go now: `state` probes stop reading them.
   ShellEvent("\"ev\":\"activate_shell\",\"reason\":%d,\"at\":\"%p\",\"results\":%d,\"mission\":%d,\"resultReason\":%d", reason,
              __builtin_return_address(0), r ? 1 : 0, r ? int(r->missionType) : 0, r ? int(r->gameTermReason) : 0);
   return g_activateShell(self, reason, r);
@@ -2832,7 +2845,8 @@ void PatchShellImports() {
 
 // ---- In game: the cycle hook only logs (and runs a tick script, e.g. a mission's winning orders); no turbo, no quit.
 
-int g_shellGameTick = -1, g_shellEnd = 0;
+void ProbeTick(int tick);
+
 void __fastcall ShellCycleHook(GameImpl* self, void*) {
   g_origGameCycle(self);
   const int tick = self->tick_;
@@ -2854,6 +2868,7 @@ void __fastcall ShellCycleHook(GameImpl* self, void*) {
   if (hadCommands && g_scriptPos == g_script.size()) ShellEvent("\"ev\":\"script\",\"what\":\"done\",\"tick\":%d", tick);
   AudioTick(tick);
   if (cfg.telemEvery > 0 && tick >= g_nextTelem) { WriteTelemetry(tick);  g_nextTelem = (tick / cfg.telemEvery + 1) * cfg.telemEvery; }
+  ProbeTick(tick);
   if (tick % 500 == 0) ShellEvent("\"ev\":\"game\",\"what\":\"tick\",\"tick\":%d", tick);
   const int end = int(self->gameTermReasons_);
   if (end != g_shellEnd) {
@@ -2880,26 +2895,56 @@ void DumpWindows(const std::string& tag) {
   ShellEvent("\"ev\":\"dump\",\"tag\":%s,\"windows\":[%s]", JsonStr(tag.c_str()).c_str(), out.c_str());
 }
 
-// Read from the control thread while the game thread may be running: a snapshot of a few words, good enough for a
-// paused game (the point of it) and for the selection between cycles.
+// `state` probes. Running, the game thread answers one at the end of the cycle `after` ticks past the first cycle that
+// sees the request, so what it reads is one cycle's state and how far the game got is counted in ticks, not wall time.
+// Paused (no cycle runs) or outside a game, the control thread answers at once: nothing moves while paused, and input
+// doesn't reach the game then (IWnd::CallFilters 0x431740), so the read is consistent.
+struct Probe { std::string tag;  int after = 0, at = -1;  bool pending = false; };
+Probe g_probe;  // Guarded by g_shellLock.
+
 void DumpState(const std::string& tag) {
-  const int n = std::min(int(*reinterpret_cast<const volatile int*>(SelectedCount)), 32);
-  std::string sel, cmds;
-  for (int k = 0; k < n; ++k) {
-    const int id = reinterpret_cast<const volatile int*>(SelectedUnits)[k];
-    sel += (k ? "," : "") + std::to_string(id);
-    cmds += std::string(k ? ",\"" : "\"") + CommandName(int(Unit(id).GetCommand())) + "\"";
+  const bool inGame = g_shellGameTick >= 0;
+  // The cursor's handle (GetCursorInfo, the X pointer's shape as Wine shows it): only compared within a run.
+  CURSORINFO ci = { sizeof(ci) };
+  GetCursorInfo(&ci);
+  ShellEvent("\"ev\":\"state\",\"tag\":%s,\"tick\":%d,\"paused\":%d,\"pauseCount\":%d,\"cursor\":\"%p\"%s",
+             JsonStr(tag.c_str()).c_str(), g_shellGameTick, inGame ? int(g_tApp.AppPaused()) : 0,
+             inGame ? g_gameFrame.gamePausedCount_ : 0, (void*)ci.hCursor, inGame ? InputStateJson(true).c_str() : "");
+}
+
+// The control thread's side: answer now if no cycle will, else leave it to ProbeTick.
+void RequestProbe(const std::string& tag, int after) {
+  EnterCriticalSection(&g_shellLock);
+  g_probe = { tag, after, -1, true };
+  LeaveCriticalSection(&g_shellLock);
+}
+
+void ProbeNowIfIdle() {
+  EnterCriticalSection(&g_shellLock);
+  const bool idle = g_probe.pending && (g_shellGameTick < 0 || g_tApp.AppPaused());
+  const std::string tag = g_probe.tag;
+  if (idle) g_probe.pending = false;
+  LeaveCriticalSection(&g_shellLock);
+  if (idle) DumpState(tag);
+}
+
+void ProbeTick(int tick) {
+  EnterCriticalSection(&g_shellLock);
+  bool now = false;
+  if (g_probe.pending) {
+    if (g_probe.at < 0) g_probe.at = tick + g_probe.after;
+    now = tick >= g_probe.at;
+    if (now) g_probe.pending = false;
   }
-  POINT o = {};
-  if (g_shellGameTick >= 0) PaneToMap(&g_gameFrame.detailPane_, 0, 0, &o);
-  ShellEvent("\"ev\":\"state\",\"tag\":%s,\"tick\":%d,\"paused\":%d,\"pauseCount\":%d,\"selected\":[%s],"
-             "\"cmds\":[%s],\"view\":[%ld,%ld]", JsonStr(tag.c_str()).c_str(), g_shellGameTick, int(g_tApp.AppPaused()),
-             g_gameFrame.gamePausedCount_, sel.c_str(), cmds.c_str(), g_shellGameTick >= 0 ? o.x - PadTiles() * 32 : 0, o.y);
+  const std::string tag = g_probe.tag;
+  LeaveCriticalSection(&g_shellLock);
+  if (now) DumpState(tag);
 }
 
 DWORD WINAPI ShellControlThread(void*) {
   for (;;) {
     Sleep(25);
+    ProbeNowIfIdle();
     FILE* f = fopen(g_shellCtl.c_str(), "r");
     if (!f) continue;
     char line[256];
@@ -2910,7 +2955,12 @@ DWORD WINAPI ShellControlThread(void*) {
     for (auto c : cmds) {
       while (!c.empty() && (c.back() == '\n' || c.back() == '\r')) c.pop_back();
       if (c.rfind("dump", 0) == 0) DumpWindows(c.size() > 5 ? c.substr(5) : "");
-      else if (c.rfind("state", 0) == 0) DumpState(c.size() > 6 ? c.substr(6) : "");
+      else if (c.rfind("state", 0) == 0) {  // state <tag> [after]
+        char tag[200] = "";
+        int after = 0;
+        sscanf(c.c_str() + 5, " %199s %d", tag, &after);
+        RequestProbe(tag, after);
+      }
       else if (c == "quit") {
         ShellEvent("\"ev\":\"quit\"");
         if (g_telem) fclose(g_telem);

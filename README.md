@@ -413,8 +413,9 @@ click <x> <y> [right] | move <x> <y>                     desktop pixels
 ctl <text | id=N> [in=<window regex>] [right]             click a control's centre ('_' = space, '&' ignored)
 key <keysym> ...                                          X keysyms: Escape Return space n alt+n Down F1 ...
 dump [tag] | mark <text> | quit
-state [tag]                                               the game's tick, pause flag, selection with the units'
-                                                          commands, and view (works while paused, unlike telemetry)
+state [tag] [after=N]                                     the game's tick, pause flag, cursor handle, selection with
+                                                          the units' commands, and view: running, read on the game
+                                                          thread N ticks on; paused, at once (unlike telemetry)
 ```
 
 Outputs: `shell.jsonl` (below), `driver.jsonl` (every step with its time on shell.jsonl's clock), `shot_<name>.png`
@@ -437,8 +438,11 @@ another, probably a race between OPU loading its private fonts and the first dia
   TApp::ActivateShell (0x486DB0), the game handing back to the shell with its end reason; `game`: first cycle, every
   500 ticks, the end reason changing; `script`: `done` after every tick-script command has run (the first-cycle event
   precedes these commands, so wait for `script` when the setup matters); `dump`: windows and controls on request;
-  `state`: the tick, the pause flag (0x56E9E0) and count, the selection (0x547210) with each unit's command, and
-  the detail view's top-left corner in file pixels, on request (read by the control thread, so also while paused).
+  `state`: the tick, the pause flag (0x56E9E0) and count, the cursor's handle (to compare within a run), the
+  selection (0x547210) with each unit's command, and the detail view's top-left corner in file pixels, on request:
+  running, by the game thread at the end of a cycle `after` ticks on (one cycle's state, a tick count rather than
+  wall time); paused or outside a game, by the control thread at once. Probe what an order did after enough ticks
+  for it to be under way and not yet over, so flow.json stays the same from run to run.
 
 Notes: the program must be started by its full Windows path (`wine explorer /desktop=NAME,WxH Outpost2.exe` with a
 relative name silently starts nothing). The harness Wine has no audio device, so MCI `waveaudio` fails at once and the
