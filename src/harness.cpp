@@ -849,9 +849,9 @@ bool UiToClient(const std::string& name, POINT* out) {
   return false;
 }
 
-// Telemetry extension for input runs: the selected unit IDs and the detail pane's top-left corner in file pixels.
-// `,"selected":[ids],"view":[x,y]`: the selection (0x547210) and the detail view's top-left corner in file pixels; with
-// `cmds`, also `,"cmds":[...]`, each selected unit's command. Telemetry and the shell's `state` probe share it.
+// Telemetry extension for input runs, `,"selected":[ids],"view":[x,y]`: the selection (0x547210) and the detail
+// view's top-left corner in file pixels; with `cmds`, also `,"cmds":[...]`, each selected unit's command. Telemetry
+// and the shell's `state` probe share it.
 std::string InputStateJson(bool cmds) {
   const int n = std::min(*reinterpret_cast<const int*>(SelectedCount), 32);
   std::string ids, names;
