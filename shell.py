@@ -332,14 +332,21 @@ class WindowSize:
         window = {"MAXIMIZED": "1"} if spec == "max" else dict(
             zip(("MAXIMIZED", "H_POS", "V_POS", "H_SIZE", "V_SIZE"), ("0", "0", "0", *spec.lower().split("x"))))
         text = self.saved.decode("latin-1")
+        # Section and key names match as Windows' profile functions match them: ignoring case, spaces around keys.
         for section, keys in (("GAME_WINDOW", window), ("DESKTOP", {"H_SIZE": str(desktop[0]), "V_SIZE": str(desktop[1])})):
-            sec = re.search(rf"^\[{section}\]\r?\n((?:[^\[\r\n].*\r?\n)*)", text, re.M)
+            pattern = rf"^[ \t]*\[{section}\][^\r\n]*(?:\r?\n|\Z)((?:[ \t]*[^\[\s][^\r\n]*(?:\r?\n|\Z)|[ \t]*\r?\n)*)"
+            sec = re.search(pattern, text, re.M | re.I)
             if not sec:
+                if text and not text.endswith("\n"):
+                    text += "\r\n"
                 text += f"[{section}]\r\n"
-                sec = re.search(rf"^\[{section}\]\r?\n()", text, re.M)
+                sec = re.search(pattern, text, re.M | re.I)
+                assert sec, section
             body = sec.group(1)
+            if body and not body.endswith("\n"):
+                body += "\r\n"
             for k, v in keys.items():
-                body, n = re.subn(rf"^{k}=[^\r\n]*", f"{k}={v}", body, flags=re.M)
+                body, n = re.subn(rf"^[ \t]*{k}[ \t]*=[^\r\n]*", f"{k}={v}", body, flags=re.M | re.I)
                 if not n:
                     body += f"{k}={v}\r\n"
             text = text[:sec.start(1)] + body + text[sec.end(1):]
@@ -378,15 +385,46 @@ def main() -> int:
                                                               "audio.jsonl", "telemetry.jsonl", "ctl.txt"))]:
         old.unlink(missing_ok=True)
     w, h = (int(v) for v in args.desktop.lower().split("x"))
-    # Before Xvfb starts: these wait their turn, and one that fails leaves nothing running.
-    saves = SavesAside(run.GAME_DIR / "OPU" / "saves", out) if args.clean_saves else None
-    window_size = WindowSize(run.GAME_DIR / "OPU" / "outpost2.ini", args.window, (w, h)) if args.window else None
+    # The ini and the saves go back however the run ends: SIGTERM (`timeout`) raises like Ctrl+C, so the finally runs.
+    signal.signal(signal.SIGTERM, _terminate)
+    window_size = saves = None
+    procs: dict[str, subprocess.Popen] = {}
+    try:
+        # Before Xvfb starts: these wait their turn, and one that fails leaves nothing running.
+        window_size = WindowSize(run.GAME_DIR / "OPU" / "outpost2.ini", args.window, (w, h)) if args.window else None
+        saves = SavesAside(run.GAME_DIR / "OPU" / "saves", out) if args.clean_saves else None
+        return session(args, out, w, h, procs)
+    finally:
+        stop(procs)
+        if saves:
+            saves.restore()
+        if window_size:
+            window_size.restore()
+
+
+def _terminate(signum, _frame):
+    raise SystemExit(128 + signum)
+
+
+def stop(procs: dict[str, subprocess.Popen]):
+    """Ends the game's process group and Xvfb if they are still running (a run that stopped early)."""
+    game, xvfb = procs.get("game"), procs.get("xvfb")
+    if game and game.poll() is None:
+        os.killpg(game.pid, signal.SIGKILL)
+    if xvfb and xvfb.poll() is None:
+        xvfb.terminate()
+        xvfb.wait()
+
+
+def session(args, out: Path, w: int, h: int, procs: dict[str, subprocess.Popen]) -> int:
+    """The run itself: Xvfb, the game, the driver steps and the outputs. Its processes go in `procs` as they start."""
     if args.display:
         xvfb, display = None, args.display
     else:
         r, wfd = os.pipe()
         xvfb = subprocess.Popen(["Xvfb", "-displayfd", str(wfd), "-screen", "0", f"{w}x{h}x24", "-nolisten", "tcp"],
                                 pass_fds=(wfd,), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        procs["xvfb"] = xvfb
         os.close(wfd)
         with os.fdopen(r) as f:
             display = ":" + f.readline().strip()
@@ -411,6 +449,7 @@ def main() -> int:
     # One desktop per run: parallel runs on other X displays must not join this one.
     game = subprocess.Popen(["wine", "explorer", f"/desktop=op2h{os.getpid()},{w}x{h}", exe, "/OPU"], cwd=run.GAME_DIR, env=env,
                             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    procs["game"] = game
     alive = lambda: game.poll() is None and time.monotonic() - t0 < args.timeout  # noqa: E731
     x = X(display)
     x.move(w - 1, h - 1)
@@ -526,10 +565,6 @@ def main() -> int:
     if xvfb:
         xvfb.terminate()
         xvfb.wait()
-    if saves:
-        saves.restore()
-    if window_size:
-        window_size.restore()
     events.poll()
     (out / "ctl.txt").unlink(missing_ok=True)
     with open(out / "driver.jsonl", "w") as f:
