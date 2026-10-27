@@ -2465,15 +2465,14 @@ ibool __fastcall StartMissionHook(GameImpl* self, void*) {
     const int ai = ex ? ex->numMultiplayerAIs : 0;
     const int type = desc ? int(desc->descBlock.missionType) : 0;
     const int maxPlayers = desc ? int(desc->descBlock.numPlayers) : 0;
-    if (desc && !ex) {
-      Log("FATAL: multiplayer start: extended descriptor 0x402780 is null for %s; aborting instead of starting with no AIs",
-          filename);
-    }
+    // No DescBlockEx export means no AI slots: the game's own start (0x48958F) skips adding them on null.
+    if (desc && !ex) Log("multiplayer start: no DescBlockEx, so no AI slots");
+    // A harness-side sanity limit, not a rule taken from the game.
     if (desc && cfg.players > maxPlayers) {
       Log("FATAL: multiplayer start: %d human players requested but the descriptor allows at most %d; aborting", cfg.players,
           maxPlayers);
     }
-    if (!desc || !ex || type < -8 || type > -4 || cfg.players > maxPlayers || cfg.players + ai > 6) {
+    if (!desc || type < -8 || type > -4 || cfg.players > maxPlayers || cfg.players + ai > 6) {
       Log("multiplayer start: invalid descriptor or player count (desc %p, type %d, humans %d, AIs %d)", (void*)desc,
           type, cfg.players, ai);
       if (desc) MissionManager::FreeModuleDesc(desc);

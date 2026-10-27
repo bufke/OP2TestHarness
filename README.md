@@ -36,7 +36,7 @@ When run from Claude Code, `run.sh` and `make check` need `dangerouslyDisableSan
 | `--bot DLL` | | bot DLL called every tick, see below |
 | `--seed N` | 1 | random seed (default: the scenario's). Identical seed and inputs give byte-identical telemetry |
 | `--difficulty 0/1/2` | 1 | easy / normal / hard |
-| `--players N` | 1 | N human players in a multiplayer start (2-6), plus any `DescBlockEx` AI slots; 1 keeps the single-player setup. Aborts when N exceeds the descriptor's maximum or the extended descriptor is missing, rather than starting without its AIs |
+| `--players N` | 1 | N human players in a multiplayer start (2-6), plus any `DescBlockEx` AI slots; 1 keeps the single-player setup. Aborts when N exceeds the descriptor's maximum; a DLL without `DescBlockEx` has no AI slots, as in the game (0x48958F) |
 | `--audio` | | `audio.jsonl`: every sound, status message, Savant line and the music playlist the game asks for (see "Audio log") |
 | `--state` | | session state: `events.jsonl` through the run and `state.json` at the end (see "Session state") |
 | `--stop KINDS` | | end the run at the first event of these kinds after `--stop-from` (implies `--state`) |
