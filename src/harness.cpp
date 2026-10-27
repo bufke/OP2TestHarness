@@ -2464,7 +2464,16 @@ ibool __fastcall StartMissionHook(GameImpl* self, void*) {
     Log("multiplayer start: DescBlockEx %p", (void*)ex);
     const int ai = ex ? ex->numMultiplayerAIs : 0;
     const int type = desc ? int(desc->descBlock.missionType) : 0;
-    if (!desc || type < -8 || type > -4 || cfg.players + ai > 6) {
+    const int maxPlayers = desc ? int(desc->descBlock.numPlayers) : 0;
+    if (desc && !ex) {
+      Log("FATAL: multiplayer start: extended descriptor 0x402780 is null for %s; aborting instead of starting with no AIs",
+          filename);
+    }
+    if (desc && cfg.players > maxPlayers) {
+      Log("FATAL: multiplayer start: %d human players requested but the descriptor allows at most %d; aborting", cfg.players,
+          maxPlayers);
+    }
+    if (!desc || !ex || type < -8 || type > -4 || cfg.players > maxPlayers || cfg.players + ai > 6) {
       Log("multiplayer start: invalid descriptor or player count (desc %p, type %d, humans %d, AIs %d)", (void*)desc,
           type, cfg.players, ai);
       if (desc) MissionManager::FreeModuleDesc(desc);
