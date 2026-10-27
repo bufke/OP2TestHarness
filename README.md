@@ -402,7 +402,8 @@ harness/shell.sh --drive harness/oracle/shell/eden1.txt --script harness/oracle/
 | `--script FILE` | in-game tick script (the order verbs of "Scripted input", e.g. a mission's winning orders); its ticks count from each game's start. Input verbs don't apply: the driver's real input does |
 | `--audio`, `--telemetry-every N` | in-game audio.jsonl and telemetry.jsonl, as in mission runs |
 | `--timeout S` | wall-clock limit (default 600) |
-| `--clean-saves` | run with an empty `OPU/saves` (the SAVE and LOAD dialogs list SGAME*.OP2 from there): the old saves are set aside and put back after the run, and the run's own go to `<out>/saves` (`shell_saveload`) |
+| `--clean-saves` | run with an empty `OPU/saves` (the SAVE and LOAD dialogs list SGAME*.OP2 from there): the old saves are set aside and put back after the run, and the run's own go to `<out>/saves` (`shell_saveload`); such runs take turns (a lock file beside the folder) |
+| `--window WxH\|max` | the window's size: [GAME_WINDOW] of prefix-harness's OPU/outpost2.ini set for the run (at the desktop's top left, [DESKTOP] the run's desktop; `max`: MAXIMIZED=1) and put back after; such runs take turns. Make `--desktop` at least as large. Wine rounds the window up to a multiple of 32 px, so pick multiples of 32 (`shell_window_*`, notes/findings-shell.md "The shell window's size") |
 
 Driver steps, one per line (`#` comments; times in wall-clock seconds):
 
