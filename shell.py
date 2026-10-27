@@ -296,6 +296,10 @@ class SavesAside:
     <out>/saves."""
 
     def __init__(self, saves: Path, out: Path):
+        import fcntl
+        # Runs with --clean-saves take turns (two at once moved each other's folders: `record --jobs 2`).
+        self.lock = open(saves.parent / "saves.harness-lock", "w")
+        fcntl.flock(self.lock, fcntl.LOCK_EX)
         self.saves, self.out = saves, out
         self.aside = saves.parent / f"saves.harness-aside-{os.getpid()}"
         saves.mkdir(parents=True, exist_ok=True)
@@ -307,6 +311,50 @@ class SavesAside:
         shutil.rmtree(kept, ignore_errors=True)
         shutil.move(self.saves, kept)
         self.aside.rename(self.saves)
+        self.lock.close()
+
+
+class WindowSize:
+    """Sets the window's size for a run. The game frame (0x49B463) takes [GAME_WINDOW] H_SIZE x V_SIZE at H_POS, V_POS
+    from outpost2.ini when the saved [DESKTOP] size fits in the current desktop, the size is at least 640x480 and the
+    position is on the desktop, else 640x480 centred (maximized when that is the whole desktop); OP2Shell then makes
+    its window that size, or the whole desktop with MAXIMIZED=1 (0x13007DC0). The harness DLL copies prefix-harness's
+    OPU/outpost2.ini to the run's private one at start-up, so the keys go into that source for the run (the window
+    at the desktop's top left, [DESKTOP] the run's desktop) and the file is put back byte for byte afterwards. Runs
+    with --window take turns (a lock beside the ini, held until the file is back); a parallel run without it may still
+    start with this run's window."""
+
+    def __init__(self, ini: Path, spec: str, desktop: tuple[int, int]):
+        import fcntl
+        self.lock = open(ini.with_name(ini.name + ".harness-lock"), "w")
+        fcntl.flock(self.lock, fcntl.LOCK_EX)
+        self.ini, self.saved = ini, ini.read_bytes()
+        window = {"MAXIMIZED": "1"} if spec == "max" else dict(
+            zip(("MAXIMIZED", "H_POS", "V_POS", "H_SIZE", "V_SIZE"), ("0", "0", "0", *spec.lower().split("x"))))
+        text = self.saved.decode("latin-1")
+        # Section and key names match as Windows' profile functions match them: ignoring case, spaces around keys.
+        for section, keys in (("GAME_WINDOW", window), ("DESKTOP", {"H_SIZE": str(desktop[0]), "V_SIZE": str(desktop[1])})):
+            pattern = rf"^[ \t]*\[{section}\][^\r\n]*(?:\r?\n|\Z)((?:[ \t]*[^\[\s][^\r\n]*(?:\r?\n|\Z)|[ \t]*\r?\n)*)"
+            sec = re.search(pattern, text, re.M | re.I)
+            if not sec:
+                if text and not text.endswith("\n"):
+                    text += "\r\n"
+                text += f"[{section}]\r\n"
+                sec = re.search(pattern, text, re.M | re.I)
+                assert sec, section
+            body = sec.group(1)
+            if body and not body.endswith("\n"):
+                body += "\r\n"
+            for k, v in keys.items():
+                body, n = re.subn(rf"^[ \t]*{k}[ \t]*=[^\r\n]*", f"{k}={v}", body, flags=re.M | re.I)
+                if not n:
+                    body += f"{k}={v}\r\n"
+            text = text[:sec.start(1)] + body + text[sec.end(1):]
+        ini.write_bytes(text.encode("latin-1"))
+
+    def restore(self):
+        self.ini.write_bytes(self.saved)
+        self.lock.close()
 
 
 def main() -> int:
@@ -323,7 +371,11 @@ def main() -> int:
     ap.add_argument("--display", help="use this X display instead of a private Xvfb (e.g. to watch)")
     ap.add_argument("--clean-saves", action="store_true",
                     help="run with an empty OPU/saves (the saved games SGAME*.OP2), putting the old ones back after")
+    ap.add_argument("--window", metavar="WxH|max",
+                    help="the shell window's size ([GAME_WINDOW] H_SIZE/V_SIZE; max: MAXIMIZED=1, the desktop's size)")
     args = ap.parse_args()
+    if args.window and args.window != "max" and not re.fullmatch(r"\d+x\d+", args.window.lower()):
+        ap.error("--window takes WxH or max")
 
     run.sync_missions_from_play_prefix()
     run.check_installed()
@@ -333,12 +385,46 @@ def main() -> int:
                                                               "audio.jsonl", "telemetry.jsonl", "ctl.txt"))]:
         old.unlink(missing_ok=True)
     w, h = (int(v) for v in args.desktop.lower().split("x"))
+    # The ini and the saves go back however the run ends: SIGTERM (`timeout`) raises like Ctrl+C, so the finally runs.
+    signal.signal(signal.SIGTERM, _terminate)
+    window_size = saves = None
+    procs: dict[str, subprocess.Popen] = {}
+    try:
+        # Before Xvfb starts: these wait their turn, and one that fails leaves nothing running.
+        window_size = WindowSize(run.GAME_DIR / "OPU" / "outpost2.ini", args.window, (w, h)) if args.window else None
+        saves = SavesAside(run.GAME_DIR / "OPU" / "saves", out) if args.clean_saves else None
+        return session(args, out, w, h, procs)
+    finally:
+        stop(procs)
+        if saves:
+            saves.restore()
+        if window_size:
+            window_size.restore()
+
+
+def _terminate(signum, _frame):
+    raise SystemExit(128 + signum)
+
+
+def stop(procs: dict[str, subprocess.Popen]):
+    """Ends the game's process group and Xvfb if they are still running (a run that stopped early)."""
+    game, xvfb = procs.get("game"), procs.get("xvfb")
+    if game and game.poll() is None:
+        os.killpg(game.pid, signal.SIGKILL)
+    if xvfb and xvfb.poll() is None:
+        xvfb.terminate()
+        xvfb.wait()
+
+
+def session(args, out: Path, w: int, h: int, procs: dict[str, subprocess.Popen]) -> int:
+    """The run itself: Xvfb, the game, the driver steps and the outputs. Its processes go in `procs` as they start."""
     if args.display:
         xvfb, display = None, args.display
     else:
         r, wfd = os.pipe()
         xvfb = subprocess.Popen(["Xvfb", "-displayfd", str(wfd), "-screen", "0", f"{w}x{h}x24", "-nolisten", "tcp"],
                                 pass_fds=(wfd,), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        procs["xvfb"] = xvfb
         os.close(wfd)
         with os.fdopen(r) as f:
             display = ":" + f.readline().strip()
@@ -356,7 +442,6 @@ def main() -> int:
     # The program needs its full Windows path: `explorer /desktop=... Outpost2.exe` silently starts nothing.
     exe = "C:\\" + str((run.GAME_DIR / "Outpost2.exe").relative_to(run.PREFIX / "drive_c")).replace("/", "\\")
 
-    saves = SavesAside(run.GAME_DIR / "OPU" / "saves", out) if args.clean_saves else None
     events = Events(out / "shell.jsonl")
     driver: list[dict] = []
     log = open(out / "wine.log", "w")
@@ -364,6 +449,7 @@ def main() -> int:
     # One desktop per run: parallel runs on other X displays must not join this one.
     game = subprocess.Popen(["wine", "explorer", f"/desktop=op2h{os.getpid()},{w}x{h}", exe, "/OPU"], cwd=run.GAME_DIR, env=env,
                             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    procs["game"] = game
     alive = lambda: game.poll() is None and time.monotonic() - t0 < args.timeout  # noqa: E731
     x = X(display)
     x.move(w - 1, h - 1)
@@ -479,8 +565,6 @@ def main() -> int:
     if xvfb:
         xvfb.terminate()
         xvfb.wait()
-    if saves:
-        saves.restore()
     events.poll()
     (out / "ctl.txt").unlink(missing_ok=True)
     with open(out / "driver.jsonl", "w") as f:
