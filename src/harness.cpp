@@ -17,6 +17,7 @@
 #include "Tethys/Game/TApp.h"
 #include "Tethys/Game/GameImpl.h"
 #include "Tethys/Game/Research.h"
+#include "Tethys/Game/MissionManager.h"
 #include "Tethys/Game/MapObjectType.h"
 #include "Tethys/Game/MapImpl.h"
 #include "Tethys/Game/MapObjectManager.h"
@@ -24,6 +25,7 @@
 #include "Tethys/Game/Random.h"
 #include "Tethys/UI/GameFrame.h"
 #include "Tethys/Resource/CConfig.h"
+#include "Tethys/Resource/ResManager.h"
 
 using namespace Tethys;
 using namespace TethysAPI;
@@ -34,6 +36,7 @@ struct Config {
   std::string mission, out, script, bot;
   std::string campaign;  // OP2H_CAMPAIGN: campaign carry-over file (see StartMissionHook).
   int ticks = 0, shotEvery = 0, telemEvery = 100, speed = 10, seed = 1, difficulty = 1, width = 1024, height = 768;
+  int players = 1;  // OP2H_PLAYERS: >1 selects the original's multiplayer defaults.
   int drawEvery = 0;  // Turbo only: render every N ticks (0 = only just before screenshots).
   int traceEvery = 0;  // trace.jsonl sample interval (0 = off).
   bool turbo = true;
@@ -174,6 +177,7 @@ const char* TypeName(MapID id) {
 
 bool g_eco = false;  // OP2H_ECO: economy telemetry (player colony state, building/vehicle internals). See ECONOMY.md.
 const char* ActionName(int a);
+int HighestObjectIndex();
 void Hex(FILE* f, const void* p, size_t n);
 
 void WriteUnit(FILE* f, bool& first, Unit u) {
@@ -264,6 +268,20 @@ void WriteTelemetry(int tick) {
     for (Unit u : PlayerVehicleEnum(i))  WriteUnit(f, first, u);
   }
   fputc(']', f);
+  if (g_eco) {
+    fputs(",\"beacons\":[", f);
+    first = true;
+    const int last = HighestObjectIndex();
+    for (int i = 1; i <= last; ++i) {
+      const MapObject* mo = MapObject::GetInstance(i);
+      if (!mo || !mo->IsLive() || mo->GetTypeID() != MapID::MiningBeacon) continue;
+      const auto* mb = static_cast<const MapObj::MiningBeacon*>(mo);
+      fprintf(f, "%s{\"x\":%d,\"y\":%d,\"ore\":%d,\"bar\":%d,\"variant\":%d}", first ? "" : ",",
+              mo->pixelX_ / 32, mo->pixelY_ / 32, int(mb->mineType_), int(mb->mineYield_), mb->mineVariant_);
+      first = false;
+    }
+    fputc(']', f);
+  }
   if (g_inputUsed) WriteInputState(f);
   fputs("}\n", f);
   fflush(f);
@@ -2433,6 +2451,47 @@ ibool __fastcall StartMissionHook(GameImpl* self, void*) {
   g_gsi.gameSpeed        = cfg.speed * 4;
   g_gsi.randomNumberSeed = cfg.seed;
 
+  if (cfg.players > 1) {
+    char path[MAX_PATH] = {};
+    const char* filename = ResManager::GetInstance()->GetFilePath(cfg.mission.c_str(), path) ? path : cfg.mission.c_str();
+    Log("multiplayer start: reading descriptors for %s", filename);
+    AIModDesc* desc = MissionManager::GetModuleDesc(filename);
+    Log("multiplayer start: DescBlock %p", (void*)desc);
+    // 0x402780 takes its filename in ECX; MissionManager.h's declaration misses FASTCALL.
+    using GetDescEx = ModDescEx*(__fastcall*)(const char*);
+    const auto getDescEx = reinterpret_cast<GetDescEx>(0x402780);
+    ModDescEx* ex = desc ? getDescEx(filename) : nullptr;
+    Log("multiplayer start: DescBlockEx %p", (void*)ex);
+    const int ai = ex ? ex->numMultiplayerAIs : 0;
+    const int type = desc ? int(desc->descBlock.missionType) : 0;
+    if (!desc || type < -8 || type > -4 || cfg.players + ai > 6) {
+      Log("multiplayer start: invalid descriptor or player count (desc %p, type %d, humans %d, AIs %d)", (void*)desc,
+          type, cfg.players, ai);
+      if (desc) MissionManager::FreeModuleDesc(desc);
+      if (ex) MissionManager::FreeModuleDescEx(ex);
+      if (g_log) fclose(g_log);
+      TerminateProcess(GetCurrentProcess(), 2);
+    }
+    g_gsi.startupFlags.isMultiplayer = 1;
+    g_gsi.startupFlags.moraleSteady = 1;
+    g_gsi.startupFlags.disastersEnabled = type != -4 && type != -8;
+    g_gsi.startupFlags.maxPlayers = desc->descBlock.numPlayers;
+    g_gsi.startupFlags.missionType = uint32(type) & 0x1F;
+    g_gsi.gameFlags.numPlayers = cfg.players;
+    for (int i = 0; i < 6; ++i) {
+      g_gsi.playerFlags[i].isHost = i == 0;
+      g_gsi.playerFlags[i].isEden = i == 0 || (i & 1);
+      g_gsi.playerFlags[i].resources = 0;
+      g_gsi.playerFlags[i].color = (i + 1) % 6;
+    }
+    Log("multiplayer start: type %d max %d humans %d AIs %d, high resources, day/night on, morale steady on, "
+        "disasters %d, initial vehicles %d, cheats %d, network bit %d", type, int(g_gsi.startupFlags.maxPlayers),
+        cfg.players, ai, int(g_gsi.startupFlags.disastersEnabled), int(g_gsi.startupFlags.numInitialVehicles),
+        int(g_gsi.startupFlags.cheatsEnabled), int(g_gsi.startupFlags.isMultiplayer));
+    MissionManager::FreeModuleDesc(desc);
+    if (ex) MissionManager::FreeModuleDescEx(ex);
+  }
+
   // Campaign start: PrepareGame takes a MissionResults (GameStartInfo plus the carry-over) when isCampaign is set
   // and applies it with LoadCampaignState (0x4899C0) before the mission runs. OP2H_CAMPAIGN names a text file of
   // `key value` lines: mission (the finished campaign mission's number; default the DLL's minus one), food, common, rare, workers, scientists, kids, satellites (raw
@@ -2493,7 +2552,15 @@ ibool __fastcall StartMissionHook(GameImpl* self, void*) {
         int(mr.moraleState.moraleLevel));
     start = &mr;
   }
+  // No-shell startup has no NetTransportLayer. The original playback branch keeps the GSI's player flags without it;
+  // restore playback immediately (PrepareGame includes the mission's InitProc).
+  const ibool oldPlayback = g_tApp.playback_;
+  if (cfg.players > 1) g_tApp.playback_ = 1;
   const ibool ok = self->PrepareGame(start);
+  if (cfg.players > 1) {
+    g_tApp.playback_ = oldPlayback;
+    Log("multiplayer start: used the original's offline playback path through PrepareGame");
+  }
   Log("PrepareGame(%s) = %d, players %d", cfg.mission.c_str(), ok, self->numPlayers_);
   LogMusic("start");
   if (!ok) { Log("mission failed to start");  if (g_log) fclose(g_log);  TerminateProcess(GetCurrentProcess(), 2); }
@@ -3032,6 +3099,7 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   cfg.speed      = EnvInt("OP2H_SPEED", 10);
   cfg.seed       = EnvInt("OP2H_SEED", 1);
   cfg.difficulty = EnvInt("OP2H_DIFFICULTY", 1);
+  cfg.players    = EnvInt("OP2H_PLAYERS", 1);
   cfg.turbo      = EnvInt("OP2H_TURBO", 1) != 0;
   cfg.drawEvery  = EnvInt("OP2H_DRAW_EVERY", 0);
   cfg.traceEvery = EnvInt("OP2H_TRACE_EVERY", 0);

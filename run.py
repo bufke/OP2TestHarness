@@ -226,6 +226,8 @@ def main() -> int:
     ap.add_argument("--seed", type=int, help="random number seed (default 1, or the scenario's seed)")
     ap.add_argument("--difficulty", type=int, choices=(0, 1, 2),
                     help="0 easy, 1 normal, 2 hard (default 1, or the scenario's difficulty)")
+    ap.add_argument("--players", type=int, choices=range(1, 7), default=1, metavar="N",
+                    help="human players in a multiplayer mission start (2-6); default 1 = existing single-player setup")
     ap.add_argument("--script", type=Path,
                     help="scripted command file (see README); with --scenario, appended to the scenario's script")
     ap.add_argument("--bot", type=Path, help="bot DLL exporting HarnessBotTick(int tick)")
@@ -296,6 +298,7 @@ def main() -> int:
                OP2H_DRAW_EVERY=str(args.draw_every),
                OP2H_SEED=str(args.seed),
                OP2H_DIFFICULTY=str(args.difficulty),
+               OP2H_PLAYERS=str(args.players),
                OP2H_WIDTH=str(width),
                OP2H_HEIGHT=str(height))
     if args.script:

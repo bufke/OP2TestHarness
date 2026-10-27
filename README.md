@@ -36,6 +36,7 @@ When run from Claude Code, `run.sh` and `make check` need `dangerouslyDisableSan
 | `--bot DLL` | | bot DLL called every tick, see below |
 | `--seed N` | 1 | random seed (default: the scenario's). Identical seed and inputs give byte-identical telemetry |
 | `--difficulty 0/1/2` | 1 | easy / normal / hard |
+| `--players N` | 1 | N human players in a multiplayer start (2-6), plus any `DescBlockEx` AI slots; 1 keeps the single-player setup |
 | `--audio` | | `audio.jsonl`: every sound, status message, Savant line and the music playlist the game asks for (see "Audio log") |
 | `--state` | | session state: `events.jsonl` through the run and `state.json` at the end (see "Session state") |
 | `--stop KINDS` | | end the run at the first event of these kinds after `--stop-from` (implies `--state`) |
@@ -234,7 +235,9 @@ Script verbs for colony experiments (oracle scenarios `eco_*`, spec in `oracle/E
 required workers/scientists, scientists working as workers, food production/consumption, growth and death remainders,
 capacities, morale inputs) and `pi`, every dword of PlayerImpl 0x00..0x1EF; and to each unit `flags` (MapObject +0x44),
 `act`/`timer` (action and its timer), `busy`, `w24` (the cargo/researchTimer word) and `raw` (bytes 0x48..0x7F), plus
-`truck` [cargo type, amount] for Cargo Trucks. `gamedata.json` gets `morale` (levels and modifiers as loaded), `mines`
+`truck` [cargo type, amount] for Cargo Trucks. Each `--eco` telemetry line also has a top-level `beacons` array:
+`x`/`y` in the same internal tile coordinates as units, plus `ore`, `bar` (yield) and `variant` for every live mining
+beacon. `gamedata.json` gets `morale` (levels and modifiers as loaded), `mines`
 (the yield table) and `typeExtra` ([mapId, resource priority, research topic]). Scenarios may also set
 `telemetryEvery`, `traceEvery` and `difficulty`. Runs without `--eco` produce the same output as before.
 
@@ -505,9 +508,14 @@ command-processing tick. A multiplayer-safe bot would have to queue packets ther
 5. Replaces the game's modal message box (0x41E0E0) with a function that logs the message and returns OK. A bad mission
    name therefore ends the run with exit status 2 instead of hanging.
 
-Startup is set up for single-player missions. Missions whose names start with `t` get the Tutorial type, all others
+Startup defaults to single-player missions. Missions whose names start with `t` get the Tutorial type, all others
 Colony. With `--campaign` the start info is a MissionResults with `isCampaign` set (notes/findings-missions.md).
-Multiplayer types have not been tried.
+With `--players N` (2-6), startup instead reads the mission's real type and maximum from `DescBlock`, initializes N
+human players plus any `DescBlockEx` AI slots, and uses the original multiplayer defaults: high resources, day/night
+on, morale steady on, zero initial vehicles, cheats off, and disasters off for Land Rush / Last One Standing but on
+otherwise. The lobby's host is Eden; later slots use the original's alternating colony flags. The no-shell path has no
+NetTransportLayer, so `PrepareGame` uses the original's playback branch while preserving `isMultiplayer` and the player
+setup, then restores playback. This is an offline start, not a network session; `harness.log` records the whole profile.
 
 Measured speed with turbo depends on machine load and map size. Cases seen: a 16-unit map ran at about 500 to 50,000
 ticks/s with occasional screenshots, about 100 ticks/s when rendering every tick, and 36 ticks/s at real-time speed 10.
