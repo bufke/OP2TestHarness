@@ -378,6 +378,9 @@ def main() -> int:
                                                               "audio.jsonl", "telemetry.jsonl", "ctl.txt"))]:
         old.unlink(missing_ok=True)
     w, h = (int(v) for v in args.desktop.lower().split("x"))
+    # Before Xvfb starts: these wait their turn, and one that fails leaves nothing running.
+    saves = SavesAside(run.GAME_DIR / "OPU" / "saves", out) if args.clean_saves else None
+    window_size = WindowSize(run.GAME_DIR / "OPU" / "outpost2.ini", args.window, (w, h)) if args.window else None
     if args.display:
         xvfb, display = None, args.display
     else:
@@ -401,8 +404,6 @@ def main() -> int:
     # The program needs its full Windows path: `explorer /desktop=... Outpost2.exe` silently starts nothing.
     exe = "C:\\" + str((run.GAME_DIR / "Outpost2.exe").relative_to(run.PREFIX / "drive_c")).replace("/", "\\")
 
-    saves = SavesAside(run.GAME_DIR / "OPU" / "saves", out) if args.clean_saves else None
-    window_size = WindowSize(run.GAME_DIR / "OPU" / "outpost2.ini", args.window, (w, h)) if args.window else None
     events = Events(out / "shell.jsonl")
     driver: list[dict] = []
     log = open(out / "wine.log", "w")
