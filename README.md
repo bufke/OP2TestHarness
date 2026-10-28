@@ -29,6 +29,7 @@ When run from Claude Code, `run.sh` and `make check` need `dangerouslyDisableSan
 | `--ticks N` | 3000 | quit after game tick N (100 ticks = 1 mark). 0 = run until the mission ends. Default: the scenario's `ticks` |
 | `--trace-every N` | 0, or 1 with `--scenario` | `trace.jsonl` line every N ticks (sub-pixel unit positions, see below) |
 | `--trace-map` | | add `map` to each trace line: the tiles whose cell type, graphic or wall-or-building bit changed since the previous line, `[[x, y, cell, graphic, wall], ...]` in file coordinates, row by row (the first line lists none). Default: the scenario's `traceMap` |
+| `--trace-from TICK` | 0 | no `trace.jsonl` lines before TICK (then every `--trace-every` from there, and the last tick): a full per-tick `--trace-raw` trace of a long run reaches 500 MB |
 | `--trace-raw` | | add raw MapObject (0x80) and PathContext (0xD4) bytes as hex to each trace unit, and to each `ents` entry its animation, frame and raw MapObject bytes (`[..., px, py, anim, frame, "raw"]`; with `--draw-every 1` the animation and frame are what was drawn, e.g. a structure a ConVec builds) |
 | `--screenshot-every N` | 0 (off) | PNG at tick 5, then every multiple of N, plus one at the end |
 | `--telemetry-every N` | 100 | JSONL record at tick 1, then every multiple of N, plus one at the end. 0 = off |

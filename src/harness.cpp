@@ -3280,6 +3280,7 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   cfg.presents   = EnvInt("OP2H_PRESENTS", 0) != 0;
   cfg.drawEvery  = EnvInt("OP2H_DRAW_EVERY", 0);
   cfg.traceEvery = EnvInt("OP2H_TRACE_EVERY", 0);
+  g_nextTrace    = EnvInt("OP2H_TRACE_FROM", 0);  // --trace-from: no trace lines before this tick (full raw traces reach 500 MB)
   g_traceRaw     = EnvInt("OP2H_TRACE_RAW", 0) != 0;
   g_traceMap     = EnvInt("OP2H_TRACE_MAP", 0) != 0;
   g_eco          = EnvInt("OP2H_ECO", 0) != 0;
