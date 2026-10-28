@@ -43,6 +43,7 @@ When run from Claude Code, `run.sh` and `make check` need `dangerouslyDisableSan
 | `--stop-from T` | 0 | `--stop` only counts events after tick T |
 | `--campaign FILE` | | start as a campaign mission with this carry-over (MissionResults): `key value` lines `food`, `common`, `rare`, `workers`, `scientists`, `kids`, `satellites`, `moraleLevel`, `morale`, `event`, `techLevel`, `mission` (the finished mission's number; default the DLL's minus one, as the game starts the next one), and `techs` followed by the completed topic ids. Older files without `techs` still start with no carried research |
 | `--no-turbo` | | keep the game's frame limiter and render every frame (real time at `--speed`) |
+| `--presents` | | `present.log`: detail/minimap/command pane presents per game tick and per real second |
 | `--speed 1-10` | 10 | in-game speed setting. Only matters with `--no-turbo` |
 | `--draw-every N` | 0 | in turbo mode, also render every N ticks. Default: render only just before screenshots |
 | `--size WxH` | 1024x768 | requested client size. The game rounds it (1024x768 gives 1032x766) |
@@ -107,6 +108,9 @@ The exit status is 0 when the run reached its tick limit or the mission ended.
   `radius`, `indirect` = type +0x250), and `cells`: the cell type of every tile as the running game sees it, in file
   coordinates, row-major (`op2-inspect verify_coords` checks it against the .map).
 - `shot_<tick>.png`: the game window's client area.
+- `present.log` (with `--presents`): one JSON object per game tick and per real second. Tick records count the detail,
+  minimap and command surfaces' presents; second records add the interval's `ms`, tick delta and ending tick. The hook is
+  the shared DIB present method 0x4A9410 (BitBlt/StretchDIBits), filtered by the three panes' surface pointers.
 - `harness.log`: what the in-game module did, including script commands, suppressed dialogs, the quit reason and the
   tick rate.
 - `wine.log`, and `outpost2.ini`: the private settings copy used for the run (see below).
@@ -403,7 +407,7 @@ harness/shell.sh --drive harness/oracle/shell/eden1.txt --script harness/oracle/
 | `--desktop WxH` | virtual desktop and X screen, default 800x600; the game's 640x480 window is centred in it |
 | `--ini KEY=VALUE` | a `[Game]` key in the run's private outpost2.ini (repeatable): `IntroAVI`, `ShowMovies`, `Music`, `Sound`, `GameSpeed`, `Demo` ... |
 | `--script FILE` | in-game tick script (the order verbs of "Scripted input", e.g. a mission's winning orders); its ticks count from each game's start. Input verbs don't apply: the driver's real input does |
-| `--audio`, `--telemetry-every N` | in-game audio.jsonl and telemetry.jsonl, as in mission runs |
+| `--audio`, `--presents`, `--telemetry-every N` | in-game audio.jsonl, present.log and telemetry.jsonl, as in mission runs |
 | `--timeout S` | wall-clock limit (default 600) |
 | `--clean-saves` | run with an empty `OPU/saves` (the SAVE and LOAD dialogs list SGAME*.OP2 from there): the old saves are set aside and put back after the run, and the run's own go to `<out>/saves` (`shell_saveload`); such runs take turns (a lock file beside the folder) |
 | `--window WxH\|max` | the window's size: [GAME_WINDOW] of prefix-harness's OPU/outpost2.ini set for the run (at the desktop's top left, [DESKTOP] the run's desktop; `max`: MAXIMIZED=1) and put back after; such runs take turns. Make `--desktop` at least as large. Wine rounds the window up to a multiple of 32 px, so pick multiples of 32 (`shell_window_*`, notes/findings-shell.md "The shell window's size") |
@@ -415,12 +419,13 @@ wait <ev> [field=value | field=~regex ...] [timeout=S]   the next shell.jsonl ev
 sleep <S>                                                 e.g. to let a movie play
 shot <name> | shots <name> <count> <every S>             screenshots, cropped to the game's window
 click <x> <y> [right] | move <x> <y>                     desktop pixels
+unfocus | minimize | restore                              focus another window, minimize, or restore the game window
 ctl <text | id=N> [in=<window regex>] [right]             click a control's centre ('_' = space, '&' ignored)
 key <keysym> ...                                          X keysyms: Escape Return space n alt+n Down F1 ...
 dump [tag] | mark <text> | quit
-state [tag] [after=N]                                     the game's tick, pause flag, cursor handle, selection with
-                                                          the units' commands, and view: running, read on the game
-                                                          thread N ticks on; paused, at once (unlike telemetry)
+state [tag] [after=N]                                     the game's tick, pause flag, active/iconic state, cursor handle,
+                                                          selection with the units' commands, and view: running, read on
+                                                          the game thread N ticks on; paused, at once (unlike telemetry)
 ```
 
 Outputs: `shell.jsonl` (below), `driver.jsonl` (every step with its time on shell.jsonl's clock), `shot_<name>.png`
@@ -443,8 +448,8 @@ another, probably a race between OPU loading its private fonts and the first dia
   TApp::ActivateShell (0x486DB0), the game handing back to the shell with its end reason; `game`: first cycle, every
   500 ticks, the end reason changing; `script`: `done` after every tick-script command has run (the first-cycle event
   precedes these commands, so wait for `script` when the setup matters); `dump`: windows and controls on request;
-  `state`: the tick, the pause flag (0x56E9E0) and count, the cursor's handle (to compare within a run), the
-  selection (0x547210) with each unit's command, and the detail view's top-left corner in file pixels, on request:
+  `state`: the tick, the pause flag (0x56E9E0) and count, active and iconic flags, the cursor's handle (to compare
+  within a run), the selection (0x547210) with each unit's command, and the detail view's top-left corner in file pixels, on request:
   running, by the game thread at the end of a cycle `after` ticks on (one cycle's state, a tick count rather than
   wall time); paused or outside a game, by the control thread at once. Probe what an order did after enough ticks
   for it to be under way and not yet over, so flow.json stays the same from run to run.

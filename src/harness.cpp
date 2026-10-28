@@ -40,6 +40,7 @@ struct Config {
   int drawEvery = 0;  // Turbo only: render every N ticks (0 = only just before screenshots).
   int traceEvery = 0;  // trace.jsonl sample interval (0 = off).
   bool turbo = true;
+  bool presents = false;  // OP2H_PRESENTS: count pane presents per tick and per real second.
 } cfg;
 
 std::string Env(const char* name, const char* def = "") {
@@ -2295,6 +2296,101 @@ int64_t g_startTime = 0;
 int64_t Now()       { LARGE_INTEGER t;  QueryPerformanceCounter(&t);    return t.QuadPart; }
 int64_t Frequency() { LARGE_INTEGER f;  QueryPerformanceFrequency(&f);  return f.QuadPart; }
 
+// Pane presents: the DIB surface's +0x28 method (0x4A9410, vtable slot 0x4D74E0) ends in GDI BitBlt or StretchDIBits.
+// Identify GameFrame's detail, minimap and command surfaces; other users of the shared surface implementation don't count.
+struct PresentCounts { uint32_t detail = 0, minimap = 0, command = 0; };
+using PresentFn = void(__thiscall*)(void*, const RECT*);
+PresentFn g_origPresent = nullptr;
+FILE* g_present = nullptr;
+CRITICAL_SECTION g_presentLock;
+PresentCounts g_presentTickCounts, g_presentSecondCounts;
+int g_presentTick = -1, g_presentSecondTick = 0;
+int64_t g_presentSecondStart = 0, g_presentNextSecond = 0;
+
+void WritePresentTickLocked() {
+  if (g_presentTick < 0) return;
+  fprintf(g_present, "{\"kind\":\"tick\",\"tick\":%d,\"detail\":%u,\"minimap\":%u,\"command\":%u}\n",
+          g_presentTick, g_presentTickCounts.detail, g_presentTickCounts.minimap, g_presentTickCounts.command);
+}
+
+void SyncPresentTickLocked(int tick) {
+  if (tick == g_presentTick) return;
+  WritePresentTickLocked();
+  g_presentTick = tick;
+  g_presentTickCounts = {};
+}
+
+void FlushPresentSecondLocked(int64_t now, bool final) {
+  if (!final && now < g_presentNextSecond) return;
+  const int tick = g_gameImpl.tick_;
+  fprintf(g_present,
+          "{\"kind\":\"second\",\"ms\":%.1f,\"ticks\":%d,\"tick\":%d,\"detail\":%u,\"minimap\":%u,\"command\":%u}\n",
+          (now - g_presentSecondStart) * 1000.0 / Frequency(), tick - g_presentSecondTick, tick,
+          g_presentSecondCounts.detail, g_presentSecondCounts.minimap, g_presentSecondCounts.command);
+  fflush(g_present);
+  g_presentSecondCounts = {};
+  g_presentSecondStart = now;
+  g_presentNextSecond = now + Frequency();
+  g_presentSecondTick = tick;
+}
+
+void PresentTick(int tick) {
+  if (!g_present) return;
+  EnterCriticalSection(&g_presentLock);
+  SyncPresentTickLocked(tick);
+  FlushPresentSecondLocked(Now(), false);
+  LeaveCriticalSection(&g_presentLock);
+}
+
+void PresentClock() {
+  if (!g_present) return;
+  EnterCriticalSection(&g_presentLock);
+  FlushPresentSecondLocked(Now(), false);
+  LeaveCriticalSection(&g_presentLock);
+}
+
+void __fastcall PresentHook(void* self, void*, const RECT* rect) {
+  uint32_t PresentCounts::* field = nullptr;
+  if (self == g_gameFrame.detailPane_.pGfxSurface_) field = &PresentCounts::detail;
+  else if (self == g_gameFrame.miniMapPane_.pGfxSurface_) field = &PresentCounts::minimap;
+  else if (self == g_gameFrame.commandPane_.pGfxSurface_) field = &PresentCounts::command;
+  if (g_present && field) {
+    EnterCriticalSection(&g_presentLock);
+    SyncPresentTickLocked(g_gameImpl.tick_);
+    ++(g_presentTickCounts.*field);
+    ++(g_presentSecondCounts.*field);
+    LeaveCriticalSection(&g_presentLock);
+  }
+  g_origPresent(self, rect);
+}
+
+void InstallPresentHook() {
+  if (!cfg.presents) return;
+  g_present = fopen((cfg.out + "\\present.log").c_str(), "w");
+  if (!g_present) { Log("present: cannot open log");  return; }
+  InitializeCriticalSection(&g_presentLock);
+  g_presentSecondStart = g_presentNextSecond = Now();
+  g_presentNextSecond += Frequency();
+  g_presentSecondTick = g_gameImpl.tick_;
+  static const uint8_t present[] = { 0x83, 0xEC, 0x08, 0x53, 0x56, 0x57 };
+  g_origPresent = reinterpret_cast<PresentFn>(HookEntry(0x4A9410, present, 6, reinterpret_cast<void*>(&PresentHook)));
+  Log("present: hook %s", g_origPresent ? "installed" : "FAILED");
+  if (g_origPresent) return;
+  fclose(g_present);
+  g_present = nullptr;
+  DeleteCriticalSection(&g_presentLock);
+}
+
+void ClosePresents() {
+  if (!g_present) return;
+  EnterCriticalSection(&g_presentLock);
+  WritePresentTickLocked();
+  FlushPresentSecondLocked(Now(), true);
+  fclose(g_present);
+  g_present = nullptr;
+  LeaveCriticalSection(&g_presentLock);
+}
+
 void TakeShot(int tick) {
   char path[MAX_PATH * 2];
   snprintf(path, sizeof(path), "%s\\shot_%07d.bmp", cfg.out.c_str(), tick);
@@ -2308,6 +2404,7 @@ void Quit(const char* why) {
   WriteTrace(g_gameImpl.tick_);
   if (cfg.shotEvery > 0) TakeShot(g_gameImpl.tick_);
   WriteSessionState(g_gameImpl.tick_);
+  ClosePresents();
   if (g_events) fclose(g_events);
   if (g_telem) fclose(g_telem);
   if (g_trace) fclose(g_trace);
@@ -2373,6 +2470,7 @@ bool WantDraw(int tick) {
 void __fastcall GameCycleHook(GameImpl* self, void*) {
   g_origGameCycle(self);
   const int tick = self->tick_;
+  PresentTick(tick);
   if (tick == g_lastTick) return;
   if (g_lastTick < 0) {
     ParkCursor();
@@ -2926,6 +3024,7 @@ void ProbeTick(int tick);
 void __fastcall ShellCycleHook(GameImpl* self, void*) {
   g_origGameCycle(self);
   const int tick = self->tick_;
+  PresentTick(tick);
   if (tick == g_shellGameTick) return;
   if (tick < g_shellGameTick || g_shellGameTick < 0) {
     // A new game: reset the per-game state.
@@ -2956,6 +3055,7 @@ void __fastcall ShellCycleHook(GameImpl* self, void*) {
 // ---- Control file thread.
 
 std::string g_shellCtl;
+HWND g_focusWindow = nullptr;
 BOOL CALLBACK AddWindowJson(HWND h, LPARAM p) {
   DWORD pid = 0;
   GetWindowThreadProcessId(h, &pid);
@@ -2983,9 +3083,10 @@ void DumpState(const std::string& tag) {
   // The cursor's handle (GetCursorInfo, the X pointer's shape as Wine shows it): only compared within a run.
   CURSORINFO ci = { sizeof(ci) };
   GetCursorInfo(&ci);
-  ShellEvent("\"ev\":\"state\",\"tag\":%s,\"tick\":%d,\"paused\":%d,\"pauseCount\":%d,\"cursor\":\"%p\"%s",
-             JsonStr(tag.c_str()).c_str(), g_shellGameTick, inGame ? int(g_tApp.AppPaused()) : 0,
-             inGame ? g_gameFrame.gamePausedCount_ : 0, (void*)ci.hCursor, inGame ? InputStateJson(true).c_str() : "");
+  ShellEvent("\"ev\":\"state\",\"tag\":%s,\"tick\":%d,\"paused\":%d,\"pauseCount\":%d,\"active\":%d,\"iconic\":%d,"
+             "\"cursor\":\"%p\"%s", JsonStr(tag.c_str()).c_str(), g_shellGameTick, inGame ? int(g_tApp.AppPaused()) : 0,
+             inGame ? g_gameFrame.gamePausedCount_ : 0, inGame ? int(g_tApp.AppActive()) : 0,
+             inGame && IsIconic(g_gameFrame.hWnd_), (void*)ci.hCursor, inGame ? InputStateJson(true).c_str() : "");
 }
 
 // The control thread's side: answer now if no cycle will, else leave it to ProbeTick.
@@ -3020,6 +3121,7 @@ void ProbeTick(int tick) {
 DWORD WINAPI ShellControlThread(void*) {
   for (;;) {
     Sleep(25);
+    PresentClock();
     ProbeNowIfIdle();
     FILE* f = fopen(g_shellCtl.c_str(), "r");
     if (!f) continue;
@@ -3037,8 +3139,24 @@ DWORD WINAPI ShellControlThread(void*) {
         sscanf(c.c_str() + 5, " %199s %d", tag, &after);
         RequestProbe(tag, after);
       }
+      else if (c == "unfocus" || c == "minimize" || c == "restore") {
+        const HWND h = g_gameFrame.hWnd_;
+        if (c == "unfocus") {
+          if (!g_focusWindow) g_focusWindow = CreateWindowExA(0, "Static", "Harness focus target", WS_OVERLAPPEDWINDOW,
+                                                             8, 8, 200, 100, nullptr, nullptr, nullptr, nullptr);
+          ShowWindow(g_focusWindow, SW_SHOW);
+          SetForegroundWindow(g_focusWindow);
+        } else {
+          if (g_focusWindow) { DestroyWindow(g_focusWindow);  g_focusWindow = nullptr; }
+          ShowWindow(h, c == "minimize" ? SW_MINIMIZE : SW_RESTORE);
+          if (c == "restore") { SetForegroundWindow(h);  SetActiveWindow(h);  SetFocus(h); }
+        }
+        ShellEvent("\"ev\":\"window\",\"what\":%s,\"active\":%d,\"iconic\":%d", JsonStr(c.c_str()).c_str(),
+                   int(g_tApp.AppActive()), IsIconic(h));
+      }
       else if (c == "quit") {
         ShellEvent("\"ev\":\"quit\"");
+        ClosePresents();
         if (g_telem) fclose(g_telem);
         if (g_audio) fclose(g_audio);
         if (g_log) fclose(g_log);
@@ -3055,12 +3173,14 @@ void ShellInit() {
   cfg.out        = Env("OP2H_OUT", ".");
   cfg.script     = Env("OP2H_SCRIPT");
   cfg.telemEvery = EnvInt("OP2H_TELEM_EVERY", 0);
+  cfg.presents   = EnvInt("OP2H_PRESENTS", 0) != 0;
   g_log   = fopen((cfg.out + "\\harness.log").c_str(), "w");
   g_shell = fopen((cfg.out + "\\shell.jsonl").c_str(), "w");
   g_telem = cfg.telemEvery > 0 ? fopen((cfg.out + "\\telemetry.jsonl").c_str(), "w") : nullptr;
   g_audio = EnvInt("OP2H_AUDIO", 0) ? fopen((cfg.out + "\\audio.jsonl").c_str(), "w") : nullptr;
   g_shellCtl = cfg.out + "\\ctl.txt";
   Log("harness: shell mode");
+  InstallPresentHook();
 
   // A private copy of the settings, as in mission runs; here sound and the movies stay as configured (OP2H_INI_<key>
   // overrides a [Game] key, e.g. OP2H_INI_IntroAVI=1).
@@ -3109,6 +3229,7 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   cfg.difficulty = EnvInt("OP2H_DIFFICULTY", 1);
   cfg.players    = EnvInt("OP2H_PLAYERS", 1);
   cfg.turbo      = EnvInt("OP2H_TURBO", 1) != 0;
+  cfg.presents   = EnvInt("OP2H_PRESENTS", 0) != 0;
   cfg.drawEvery  = EnvInt("OP2H_DRAW_EVERY", 0);
   cfg.traceEvery = EnvInt("OP2H_TRACE_EVERY", 0);
   g_traceRaw     = EnvInt("OP2H_TRACE_RAW", 0) != 0;
@@ -3155,6 +3276,7 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   g_origGameCycle = reinterpret_cast<GameCycleFn>(RelinkCall(CallProcessGameCycle, reinterpret_cast<void*>(&GameCycleHook)));
   if (cfg.turbo) { const uint8_t jmp = 0xEB;  WriteCode(OnIdleFrameLimiter, &jmp, 1); }
   memcpy(g_drawPanesCode, reinterpret_cast<void*>(OnIdleDrawPanes), 2);
+  InstallPresentHook();
   JumpTo(FnOP2MessageBox, reinterpret_cast<void*>(&MessageBoxHook));
   if (g_audio) InstallAudioHooks();
   else if (g_events) InstallMessageHook();

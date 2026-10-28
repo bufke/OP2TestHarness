@@ -20,6 +20,7 @@ Driver script, one step per line ('#' starts a comment). Times are wall-clock se
     ctl <text | id=N> [in=<window text regex>] [right]        click the centre of a control (a `dump` finds it; '_' in
                                                               text stands for a space)
     move <x> <y>                                              move the pointer
+    unfocus | minimize | restore                              focus another window, minimize, or restore the game window
     key <keysym> [keysym ...]                                 key presses (X keysym names: Escape Return space a F1 ...)
     dump [tag]                                                log every window and control (shell.jsonl `dump`)
     state [tag] [after=N]                                     log the game's tick, pause flag, cursor handle, selection
@@ -364,6 +365,7 @@ def main() -> int:
     ap.add_argument("--desktop", default="800x600", help="Wine virtual desktop (and X screen) size")
     ap.add_argument("--script", type=Path, help="in-game tick script (harness verbs, e.g. a mission's winning orders)")
     ap.add_argument("--audio", action="store_true", help="in-game audio.jsonl (README \"Audio log\")")
+    ap.add_argument("--presents", action="store_true", help="log pane presents per game tick and real second to present.log")
     ap.add_argument("--telemetry-every", type=int, default=0, metavar="N", help="in-game telemetry every N ticks")
     ap.add_argument("--ini", action="append", default=[], metavar="KEY=VALUE",
                     help="[Game] setting in the run's private outpost2.ini, e.g. IntroAVI=1 (repeatable)")
@@ -382,7 +384,7 @@ def main() -> int:
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     for old in [*out.glob("shot_*.png"), *(out / n for n in ("shell.jsonl", "driver.jsonl", "summary.json", "harness.log",
-                                                              "audio.jsonl", "telemetry.jsonl", "ctl.txt"))]:
+                                                              "audio.jsonl", "telemetry.jsonl", "present.log", "ctl.txt"))]:
         old.unlink(missing_ok=True)
     w, h = (int(v) for v in args.desktop.lower().split("x"))
     # The ini and the saves go back however the run ends: SIGTERM (`timeout`) raises like Ctrl+C, so the finally runs.
@@ -431,7 +433,7 @@ def session(args, out: Path, w: int, h: int, procs: dict[str, subprocess.Popen])
     env = dict(os.environ, DISPLAY=display, WINEPREFIX=str(run.PREFIX), WINEDEBUG="-all",
                WINEDLLOVERRIDES="winepulse.drv=d;winealsa.drv=d;winedbg.exe=d",
                OP2H_SHELL="1", OP2H_OUT=run.win_path(out), OP2H_AUDIO="1" if args.audio else "0",
-               OP2H_TELEM_EVERY=str(args.telemetry_every))
+               OP2H_PRESENTS="1" if args.presents else "0", OP2H_TELEM_EVERY=str(args.telemetry_every))
     env.pop("WAYLAND_DISPLAY", None)
     env.pop("OP2H_MISSION", None)
     for kv in args.ini:
@@ -462,16 +464,17 @@ def session(args, out: Path, w: int, h: int, procs: dict[str, subprocess.Popen])
         driver.append(d)
         print(json.dumps(d), flush=True)
 
-    def dump(tag: str) -> dict | None:
+    def control(text: str):
         tmp = out / "ctl.tmp"
-        tmp.write_text(f"dump {tag}\n")
+        tmp.write_text(text + "\n")
         tmp.rename(out / "ctl.txt")
+
+    def dump(tag: str) -> dict | None:
+        control(f"dump {tag}")
         return events.wait("dump", [("tag", tag)], 10, alive)
 
     def state(tag: str, after: int) -> dict | None:
-        tmp = out / "ctl.tmp"
-        tmp.write_text(f"state {tag} {after}\n")
-        tmp.rename(out / "ctl.txt")
+        control(f"state {tag} {after}")
         return events.wait("state", [("tag", tag)], 10 + after / 10, alive)
 
     def steps() -> tuple[bool, str | None]:
@@ -525,6 +528,9 @@ def session(args, out: Path, w: int, h: int, procs: dict[str, subprocess.Popen])
             elif verb == "move":
                 x.move(int(a[0]), int(a[1]))
                 record("move", at=[int(a[0]), int(a[1])])
+            elif verb in ("unfocus", "minimize", "restore"):
+                control(verb)
+                record(verb)
             elif verb == "key":
                 for k in a:
                     x.key(k)
@@ -539,7 +545,7 @@ def session(args, out: Path, w: int, h: int, procs: dict[str, subprocess.Popen])
                 if e is None:
                     record("state", tag=tag, found=None)
                     return False, f"line {lineno}: no answer: {line}"
-                record("state", tag=tag, **{k: e.get(k) for k in ("tick", "paused", "pauseCount", "cursor", "selected", "cmds", "view")})
+                record("state", tag=tag, **{k: e.get(k) for k in ("tick", "paused", "pauseCount", "active", "iconic", "cursor", "selected", "cmds", "view")})
             elif verb == "mark":
                 record("mark", text=" ".join(a))
             elif verb == "quit":
