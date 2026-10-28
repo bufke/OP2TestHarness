@@ -223,7 +223,7 @@ def main() -> int:
     ap.add_argument("--no-turbo", action="store_true", help="keep the game's frame limiter (real-time at --speed)")
     ap.add_argument("--presents", action="store_true", help="log pane presents per game tick and real second to present.log")
     ap.add_argument("--rng-log", metavar="FROM-TO",
-                    help="log each gameplay RNG draw in these ticks with its caller's address to rng.log")
+                    help="log each gameplay RNG draw in these ticks (or one tick) with its caller's address to rng.log")
     ap.add_argument("--draw-every", type=int, default=0, metavar="N",
                     help="turbo: render every N ticks (default: only right before screenshots; 1 = always)")
     ap.add_argument("--seed", type=int, help="random number seed (default 1, or the scenario's seed)")

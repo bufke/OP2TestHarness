@@ -2393,7 +2393,15 @@ uint32_t __fastcall RandNHook(void* self, void*, int n) {
 
 void InstallRngLog() {
   const std::string spec = Env("OP2H_RNG_LOG");
-  if (spec.empty() || sscanf(spec.c_str(), "%d-%d", &g_rngFrom, &g_rngTo) != 2) return;
+  if (spec.empty()) return;
+  // FROM-TO, or a single tick.
+  char rest = 0;
+  const int n = sscanf(spec.c_str(), "%d-%d%c", &g_rngFrom, &g_rngTo, &rest);
+  if (n == 1 && spec.find('-') == std::string::npos) g_rngTo = g_rngFrom;
+  if ((n != 2 && !(n == 1 && g_rngTo == g_rngFrom)) || g_rngFrom < 0 || g_rngTo < g_rngFrom) {
+    Log("rng: bad --rng-log range \"%s\" (want FROM-TO with FROM <= TO, or one tick); no log", spec.c_str());
+    return;
+  }
   g_rngLog = fopen((cfg.out + "\\rng.log").c_str(), "w");
   if (!g_rngLog) { Log("rng: cannot open log");  return; }
   static const uint8_t rand0[] = { 0x8B, 0x01, 0x83, 0xEC, 0x08 };
