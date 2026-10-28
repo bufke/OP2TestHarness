@@ -1645,7 +1645,8 @@ void RunScriptCmd(const ScriptCmd& c, int tick) {
     Log("spawn %u: %s -> unit %d", unsigned(g_spawned.size()), arg(0).c_str(), u.GetID());
     g_spawned.push_back(u.GetID());
     g_spawnGone.push_back(!u.IsLive());
-    g_spawnType.push_back(type);
+    // The type the game made: a common ore mine on a rare beacon becomes MINE_ADV (the spawn stays listed).
+    g_spawnType.push_back(u.IsLive() ? u.GetType() : type);
   }
   else if (c.verb == "view") {
     Player[0].CenterViewOn(loc(0));
