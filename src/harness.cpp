@@ -2307,8 +2307,10 @@ PresentCounts g_presentTickCounts, g_presentSecondCounts;
 int g_presentTick = -1, g_presentSecondTick = 0;
 int64_t g_presentSecondStart = 0, g_presentNextSecond = 0;
 
+// The *Locked writers re-check g_present: the control thread's quit can close the log between a game-thread caller's
+// unlocked check and its EnterCriticalSection.
 void WritePresentTickLocked() {
-  if (g_presentTick < 0) return;
+  if (!g_present || g_presentTick < 0) return;
   fprintf(g_present, "{\"kind\":\"tick\",\"tick\":%d,\"detail\":%u,\"minimap\":%u,\"command\":%u}\n",
           g_presentTick, g_presentTickCounts.detail, g_presentTickCounts.minimap, g_presentTickCounts.command);
 }
@@ -2321,8 +2323,9 @@ void SyncPresentTickLocked(int tick) {
 }
 
 void FlushPresentSecondLocked(int64_t now, bool final) {
-  if (!final && now < g_presentNextSecond) return;
+  if (!g_present || (!final && now < g_presentNextSecond)) return;
   const int tick = g_gameImpl.tick_;
+  if (tick < g_presentSecondTick) g_presentSecondTick = 0;  // a new shell game restarted the tick count
   fprintf(g_present,
           "{\"kind\":\"second\",\"ms\":%.1f,\"ticks\":%d,\"tick\":%d,\"detail\":%u,\"minimap\":%u,\"command\":%u}\n",
           (now - g_presentSecondStart) * 1000.0 / Frequency(), tick - g_presentSecondTick, tick,
