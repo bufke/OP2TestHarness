@@ -205,7 +205,8 @@ def main() -> int:
                     help="trace.jsonl (sub-tile positions) every N ticks; default 1 with --scenario, else 0 (off)")
     ap.add_argument("--trace-raw", action="store_true", help="add raw MapObject/PathContext bytes to trace lines")
     ap.add_argument("--trace-from", type=int, default=0, metavar="TICK",
-                    help="no trace lines before this tick (a long --trace-raw run's trace stays small)")
+                    help="no trace lines before this tick, rounded up to a multiple of --trace-every (a long "
+                         "--trace-raw run's trace stays small)")
     ap.add_argument("--trace-map", action="store_true",
                     help="add the map tiles changed since the previous trace line (default: the scenario's traceMap)")
     ap.add_argument("--campaign", type=Path, metavar="FILE",
