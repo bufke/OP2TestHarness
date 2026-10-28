@@ -44,6 +44,7 @@ When run from Claude Code, `run.sh` and `make check` need `dangerouslyDisableSan
 | `--campaign FILE` | | start as a campaign mission with this carry-over (MissionResults): `key value` lines `food`, `common`, `rare`, `workers`, `scientists`, `kids`, `satellites`, `moraleLevel`, `morale`, `event`, `techLevel`, `mission` (the finished mission's number; default the DLL's minus one, as the game starts the next one), and `techs` followed by the completed topic ids. Older files without `techs` still start with no carried research |
 | `--no-turbo` | | keep the game's frame limiter and render every frame (real time at `--speed`) |
 | `--presents` | | `present.log`: detail/minimap/command pane presents per game tick and per real second |
+| `--rng-log FROM-TO` | | `rng.log`: each gameplay RNG draw (Random::Rand 0x46F000, Rand(n) 0x46F060) in those ticks as `tick caller n` (`-` for a plain Rand()), the caller being the return address: which code drew where op2-sim's RNG first differs |
 | `--speed 1-10` | 10 | in-game speed setting. Only matters with `--no-turbo` |
 | `--draw-every N` | 0 | in turbo mode, also render every N ticks. Default: render only just before screenshots |
 | `--size WxH` | 1024x768 | requested client size. The game rounds it (1024x768 gives 1032x766) |

@@ -222,6 +222,8 @@ def main() -> int:
     ap.add_argument("--speed", type=int, default=10, help="in-game speed setting 1-10 (only matters with --no-turbo)")
     ap.add_argument("--no-turbo", action="store_true", help="keep the game's frame limiter (real-time at --speed)")
     ap.add_argument("--presents", action="store_true", help="log pane presents per game tick and real second to present.log")
+    ap.add_argument("--rng-log", metavar="FROM-TO",
+                    help="log each gameplay RNG draw in these ticks with its caller's address to rng.log")
     ap.add_argument("--draw-every", type=int, default=0, metavar="N",
                     help="turbo: render every N ticks (default: only right before screenshots; 1 = always)")
     ap.add_argument("--seed", type=int, help="random number seed (default 1, or the scenario's seed)")
@@ -297,6 +299,7 @@ def main() -> int:
                OP2H_SPEED=str(args.speed),
                OP2H_TURBO="0" if args.no_turbo else "1",
                OP2H_PRESENTS="1" if args.presents else "0",
+               OP2H_RNG_LOG=args.rng_log or "",
                OP2H_DRAW_EVERY=str(args.draw_every),
                OP2H_SEED=str(args.seed),
                OP2H_DIFFICULTY=str(args.difficulty),

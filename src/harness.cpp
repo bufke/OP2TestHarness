@@ -2367,6 +2367,42 @@ void __fastcall PresentHook(void* self, void*, const RECT* rect) {
   g_origPresent(self, rect);
 }
 
+// --rng-log FROM-TO: every draw from the gameplay RNG (Random::Rand 0x46F000 and Rand(n) 0x46F060 on 0x56BE20) in
+// those ticks, with its caller, to rng.log: `tick caller n` (n is - for a plain Rand()). For finding which code drew
+// where op2-sim's RNG first differs.
+using RandFn  = uint32_t(__thiscall*)(void*);
+using RandNFn = uint32_t(__thiscall*)(void*, int);
+RandFn  g_rand;
+RandNFn g_randN;
+FILE* g_rngLog = nullptr;
+int g_rngFrom = 0, g_rngTo = -1;
+
+bool RngLogged(const void* self) {
+  return g_rngLog && self == &g_gameRNG && g_gameImpl.tick_ >= g_rngFrom && g_gameImpl.tick_ <= g_rngTo;
+}
+
+uint32_t __fastcall RandHook(void* self, void*) {
+  if (RngLogged(self)) { fprintf(g_rngLog, "%d %p -\n", g_gameImpl.tick_, __builtin_return_address(0));  fflush(g_rngLog); }
+  return g_rand(self);
+}
+
+uint32_t __fastcall RandNHook(void* self, void*, int n) {
+  if (RngLogged(self)) { fprintf(g_rngLog, "%d %p %d\n", g_gameImpl.tick_, __builtin_return_address(0), n);  fflush(g_rngLog); }
+  return g_randN(self, n);
+}
+
+void InstallRngLog() {
+  const std::string spec = Env("OP2H_RNG_LOG");
+  if (spec.empty() || sscanf(spec.c_str(), "%d-%d", &g_rngFrom, &g_rngTo) != 2) return;
+  g_rngLog = fopen((cfg.out + "\\rng.log").c_str(), "w");
+  if (!g_rngLog) { Log("rng: cannot open log");  return; }
+  static const uint8_t rand0[] = { 0x8B, 0x01, 0x83, 0xEC, 0x08 };
+  static const uint8_t randN[] = { 0x8B, 0x01, 0x83, 0xEC, 0x0C };
+  g_rand  = reinterpret_cast<RandFn>(HookEntry(0x46F000, rand0, 5, reinterpret_cast<void*>(&RandHook)));
+  g_randN = reinterpret_cast<RandNFn>(HookEntry(0x46F060, randN, 5, reinterpret_cast<void*>(&RandNHook)));
+  Log("rng: log ticks %d-%d, hooks %s", g_rngFrom, g_rngTo, g_rand && g_randN ? "installed" : "FAILED");
+}
+
 void InstallPresentHook() {
   if (!cfg.presents) return;
   g_present = fopen((cfg.out + "\\present.log").c_str(), "w");
@@ -3280,6 +3316,7 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   if (cfg.turbo) { const uint8_t jmp = 0xEB;  WriteCode(OnIdleFrameLimiter, &jmp, 1); }
   memcpy(g_drawPanesCode, reinterpret_cast<void*>(OnIdleDrawPanes), 2);
   InstallPresentHook();
+  InstallRngLog();
   JumpTo(FnOP2MessageBox, reinterpret_cast<void*>(&MessageBoxHook));
   if (g_audio) InstallAudioHooks();
   else if (g_events) InstallMessageHook();
