@@ -2272,7 +2272,7 @@ void WriteSessionState(int tick) {
       memcpy(&found, &wr->playerDiscoveredMask_, sizeof(found));
       fprintf(f, ",\"tech\":%d,\"discovered\":%d", wr->techID_, int(found & 1));
     } else if (IsDisaster(t)) {
-      fprintf(f, ",\"timer\":%d,\"act\":\"%s\"", mo->actionTimer_, ActionName(int(mo->action_)));
+      fprintf(f, ",\"timer\":%d,\"act\":\"%s\",\"flags\":%u", mo->actionTimer_, ActionName(int(mo->action_)), unsigned(mo->flags_));
     }
     fputc('}', f);
   }

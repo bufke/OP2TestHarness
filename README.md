@@ -312,7 +312,8 @@ the telemetry of a run with `--state` is byte-identical to one without (measured
   a ConVec's `kit`, `weapon`, `dest`, `emp`; structures: `flags` (MoFlagBld*: 0x1 active, 0x2000 power, 0x4000
   workers, 0x8000 scientists), `dock`, a lab's `research` {tech, team, left, cost} (ECONOMY.md section 7), a
   factory's `bays` and `producing`), `gaia` (beacons: ore 0 common / 1 rare, bar 0 = 3-bar, variant, surveyed by
-  player 0; magma vents; fumaroles; wreckage: tech, discovered; disasters with their timer) and `cells` (file
+  player 0; magma vents; fumaroles; wreckage: tech, discovered; disasters with their timer, action and flags
+  (0x2000 started, 0x4000 first warning done, 0x8000 second warning done)) and `cells` (file
   coordinates row by row: cell type | lava << 5 | microbe << 6 | wall or building << 7 | lava possible << 8 |
   lava/Blight expansion marker << 9).
 - `--stop KINDS` ends the run (as a tick limit does, with all outputs) at the first event after `--stop-from` of
