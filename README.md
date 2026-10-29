@@ -313,7 +313,8 @@ the telemetry of a run with `--state` is byte-identical to one without (measured
   workers, 0x8000 scientists), `dock`, a lab's `research` {tech, team, left, cost} (ECONOMY.md section 7), a
   factory's `bays` and `producing`), `gaia` (beacons: ore 0 common / 1 rare, bar 0 = 3-bar, variant, surveyed by
   player 0; magma vents; fumaroles; wreckage: tech, discovered; disasters with their timer) and `cells` (file
-  coordinates row by row: cell type | lava << 5 | microbe << 6 | wall or building << 7 | lava possible << 8).
+  coordinates row by row: cell type | lava << 5 | microbe << 6 | wall or building << 7 | lava possible << 8 |
+  lava/Blight expansion marker << 9).
 - `--stop KINDS` ends the run (as a tick limit does, with all outputs) at the first event after `--stop-from` of
   the listed kinds: `new` (player 0's), `enemy` (another player's unit appeared), `gone`, `hit`, `idle`, `tech`,
   `objective`, `msg`, `disaster`, `end`, `any` (all but msg and hit); `kind:<unit id>` waits for that unit, e.g.

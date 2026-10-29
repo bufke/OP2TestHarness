@@ -2276,12 +2276,12 @@ void WriteSessionState(int tick) {
     }
     fputc('}', f);
   }
-  // Cells, file coordinates row by row: cell type | lava << 5 | microbe << 6 | wall or building << 7 | lava possible << 8.
+  // Cells, file coordinates: type | lava << 5 | microbe << 6 | wall/building << 7 | lava possible << 8 | expand << 9.
   fputs("],\n\"cells\":[", f);
   for (int y = 0; y < h; ++y)
     for (int x = 0; x < w; ++x) {
       const TileData t = GameMap::GetImpl()->Tile(x + pad, y);
-      fprintf(f, "%s%u", (x | y) ? "," : "", t.cellType | (t.lava << 5) | (t.microbe << 6) | (t.wallOrBuilding << 7) | (t.lavaPossible << 8));
+      fprintf(f, "%s%u", (x | y) ? "," : "", t.cellType | (t.lava << 5) | (t.microbe << 6) | (t.wallOrBuilding << 7) | (t.lavaPossible << 8) | (t.expand << 9));
     }
   fputs("]}\n", f);
   fclose(f);
