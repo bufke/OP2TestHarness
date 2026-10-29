@@ -221,7 +221,7 @@ Script verbs for colony experiments (oracle scenarios `eco_*`, spec in `oracle/E
 0    beacon   44 60 vent            # magma vent (`fumarole` for a fumarole)
 5    route    @3 @1 @2              # cargo truck @3 on a mine (@1) <-> smelter (@2) route, as the UI sends it
 5    produce  @4 CARGO_TRUCK        # factory order (TYPE [weapon]); `idle`/`unidle <bldg>`, `train <university> <n>`
-5    kit      @5 TOKAMAK            # put a structure kit in a ConVec; `build <convec> <x> <y>` (footprint bottom-right)
+5    kit      @5 TOKAMAK            # put a structure kit in a ConVec; `build <convec> <x> <y>` (the margin's bottom-right tile)
 5    bay      @4 0 TOKAMAK          # fill a factory bay; `transfercargo <factory> <bay> [1]` (1: a Spaceport's bay
                                     # into the rocket on its pad); `launch <spaceport> [x y]` launches that rocket
 5    cargo    @3 2 1000             # set a truck's cargo (CargoType, amount); `load`/`unload <truck>`
@@ -575,7 +575,11 @@ installing, check that no other agent's runs depend on the installed version.
 - In OPU 1.4.1, TethysAPI `Unit::DoMove` on human units crashes; send command packets instead. `ScGroup::RemoveUnit` on
   a non-member crashes, and so does `FindEMPMissileTarget`. Triggers naming an AI player fire immediately. Mission
   callback names are `OnLoad/OnUnload/OnEnd`, not the TethysAPI docs' `OnLoadMission`.
-- A building whose 1-tile margin touches a cliff gets silently relocated by the game.
+- A `build` whose site's 1-tile margin touches a cliff (or anything else the cursor refuses) is never moved: the
+  ConVec drives to the margin's bottom-right tile and the order ends there with "can't build here", kit kept; if that
+  tile is itself a cliff it waits beside it forever (runs eco_build_cliff, input_build_cliff_*). Only structures a
+  mission creates (`spawn`, CreateUnit) are relocated: their spiral search skips the right margin column
+  (harness/oracle/FINDINGS.md, notes/findings-sim.md "Spawn relocation").
 - The harness and every oracle run assume GOG 1.2 + **OPU 1.4.1** (op2ext loads the harness). Players need OPU too:
   op2-rs installs it from OPU's own installer into its data folder (`op2_formats::opu`, docs/game-data.md). Try setup
   flows with `--config-dir`/`--data-dir` (the worktree checker refuses `XDG_*` overrides).
