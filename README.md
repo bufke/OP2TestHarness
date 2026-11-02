@@ -122,7 +122,7 @@ The exit status is 0 when the run reached its tick limit or the mission ended.
 ## Scripted input (`--script`)
 
 One command per line: `<tick> <verb> <args>`. Text after `#` is ignored. Unit IDs are the `id`s from the telemetry,
-or `@N` for the unit made by the Nth `spawn` command. Coordinates are internal tile coordinates unless a
+or `@N` for the unit made by the Nth `spawn` command, or a name (`$NAME`, "Unit names" below). Coordinates are internal tile coordinates unless a
 `coords file` line switched to file coordinates. Example: `test/hello_script.txt`.
 
 ```
@@ -250,6 +250,39 @@ capacities, morale inputs) and `pi`, every dword of PlayerImpl 0x00..0x1EF; and 
 beacon. `gamedata.json` gets `morale` (levels and modifiers as loaded), `mines`
 (the yield table) and `typeExtra` ([mapId, resource priority, research topic]). Scenarios may also set
 `telemetryEvery`, `traceEvery` and `difficulty`. Runs without `--eco` produce the same output as before.
+
+## Unit names (`$NAME`, `as NAME`)
+
+Unit ids are handed out as units appear, so a fight that goes differently shifts every later id (p12: miner 154 -> 155,
+rare mine 162 -> 168) and a script naming ids can't be replayed under another history. A script can name units
+instead; the harness resolves a name when the command runs, in the game, so it follows whatever ids that run has:
+
+```
+5    produce  16 BIG_TRUCK as T1     # `as NAME` ends a produce or build: NAME = the unit that order makes
+5    build    $MINER2 22 17 MINE as M2  # a build with a TYPE; op2-inspect: `buildat <id> x y as NAME` too
+10   name     M1 $MINER@21,18        # bind an existing unit (id, @N, $NAME or selector) to a name now
+700  move     $T1 232 40             # a word `$NAME` anywhere a unit goes
+700  route    $T1 $MINE1 $SMELTER    # (names are case-insensitive: letters, digits, _)
+710  attack   $GUN@12,34 $TANK_2     # `$TYPE@x,y`: the live unit of TYPE nearest to the tile, within 3 tiles
+```
+
+- `as NAME` binds the first matching unit that appears after the order: for `produce`, a new vehicle of the produced
+  type within 8 tiles of the factory; for `build`, a new structure (any type: a Mine on a rare beacon becomes
+  MINE_ADV) inside the build rectangle plus margin. Only that player's units match, in the order the orders were
+  given. An order that never makes its unit (factory busy, site refused) leaves its name waiting, and the next unit
+  that fits takes it, so check the log. `harness.log` has a line `script: name T1 = unit 139 (BIG_TRUCK)` when a name
+  binds, and `state.json` lists `names` (name -> id) when any exist.
+- A name keeps the unit's type and owner: once the unit is gone (or its object index now holds something else) the
+  name resolves to nothing. `$TYPE@x,y` takes any owner and the nearest unit (tiles in the script's coordinate mode,
+  `coords file` included); a type outside 3 tiles of the point is not found.
+- Names only exist in the original game's harness: the sim replay (`game_verify`, op2-missionhost) has no names.
+
+**A command naming a unit that doesn't exist is skipped, not fatal** (before: an id past the object table crashed the
+game, exit 5). This covers every verb whose first argument is a unit (the first two for `attack`/`guard`/`repairobj`/
+`reprogram`/`dismantle`, the first three for `route`; `scatter` leaves missing units out). The log gets
+`script: WARN tick T line L: `<the command>`: <reason> (order skipped)`, `L` being the line in the script file, and
+op2-inspect's game_step prints it as `! SCRIPT ORDER SKIPPED tick T: ...`. `@N` spawns keep their own rule (skipped
+once they have died). Existing scripts are unchanged: an order to a live unit runs as before.
 
 ## Audio log (`--audio`)
 

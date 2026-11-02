@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <climits>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -667,7 +669,7 @@ void WriteGameData(const char* path) {
 //   view <x> <y>                                             (centre player 0's view on a tile, for screenshots)
 // A <unit> is an internal unit ID as telemetry reports it, or @N for the unit spawned by the Nth spawn command.
 
-struct ScriptCmd { int tick;  std::string verb;  std::vector<std::string> args;  bool fileCoords; };
+struct ScriptCmd { int tick;  std::string verb;  std::vector<std::string> args;  bool fileCoords;  int line = 0; };
 std::vector<ScriptCmd> g_script;
 size_t g_scriptPos = 0;
 
@@ -678,13 +680,15 @@ void LoadScript(const std::string& path) {
   if (!f) { Log("script: cannot open %s", path.c_str());  return; }
   char line[512];
   bool fileCoords = false;
+  int lineNo = 0;
   while (fgets(line, sizeof(line), f)) {
+    ++lineNo;
     if (char* hash = strchr(line, '#')) *hash = 0;
     std::vector<std::string> tok;
     for (char* t = strtok(line, " \t\r\n"); t; t = strtok(nullptr, " \t\r\n")) tok.emplace_back(t);
     if (tok.size() < 2) continue;
     if (tok[1] == "coords") { fileCoords = tok.size() > 2 && tok[2] == "file";  continue; }
-    g_script.push_back({ atoi(tok[0].c_str()), tok[1], std::vector<std::string>(tok.begin() + 2, tok.end()), fileCoords });
+    g_script.push_back({ atoi(tok[0].c_str()), tok[1], std::vector<std::string>(tok.begin() + 2, tok.end()), fileCoords, lineNo });
   }
   fclose(f);
   std::stable_sort(g_script.begin(), g_script.end(), [](auto& l, auto& r) { return l.tick < r.tick; });
@@ -1086,8 +1090,117 @@ MapID TypeByName(const std::string& name) {
   return MapID::None;
 }
 
-Unit ScriptUnit(const std::string& s) {
+// Unit names (README "Unit names"). Unit ids are handed out as units appear, so they differ between runs whose history
+// differs; a script that must survive that names units instead. A word `$NAME` stands for the unit bound to NAME; a
+// word `$TYPE@x,y` for the live unit of that type nearest to the tile (x,y) (within NameNearTiles), both resolved when
+// the command runs. NAME is bound by `name NAME <unit>` or by `as NAME` ending a `produce` or `build`: the unit that
+// order makes. That unit is found by watching the objects each cycle (NameScan): a new vehicle of the produced type
+// within NameFactoryTiles of the factory, or a new structure within the build rectangle. The binding keeps the unit's
+// type and owner, so a name whose unit died (and whose object index the game reused) resolves to nothing.
+constexpr int NameNearTiles = 3, NameFactoryTiles = 8;
+
+struct NameBinding { int id, type, owner; };
+std::map<std::string, NameBinding> g_names;
+// An `as NAME` waiting for its unit: a vehicle of `type` near (fx,fy), or any structure inside the rectangle.
+struct PendingName { std::string name;  bool structure;  int owner, type, fx, fy, x1, y1, x2, y2, tick; };
+std::vector<PendingName> g_pendingNames;
+std::vector<int> g_nameSeen;  // Per object index: the type NameScan saw there last (-1 none).
+bool g_scriptFileCoords = false;  // The coordinate mode of the command being run (for `$TYPE@x,y`).
+
+std::string UpperName(std::string s) {
+  for (auto& ch : s) ch = char(toupper(uint8_t(ch)));
+  return s;
+}
+
+void BindName(const std::string& name, Unit u) {
+  g_names[UpperName(name)] = { u.GetID(), int(u.GetType()), u.GetOwner() };
+  Log("script: name %s = unit %d (%s)", UpperName(name).c_str(), u.GetID(), TypeName(u.GetType()));
+}
+
+// Matches the objects that appeared since the last scan against the pending names; only runs while some wait (a
+// script without `as` costs nothing), and it only reads the game.
+void NameScan(bool baseline = false) {
+  if (g_pendingNames.empty() && !baseline) { g_nameSeen.clear();  return; }  // Nothing waits: forget the baseline too.
+  const size_t n = MapImpl::GetInstance()->MaxNumUnits();
+  if (g_nameSeen.size() < n) g_nameSeen.resize(n, -1);
+  std::vector<uint8_t> now(g_nameSeen.size(), 0);
+  for (int p = 0; p < g_gameImpl.numPlayers_; ++p) {
+    auto visit = [&](Unit u) {
+      if (!u.IsLive()) return;
+      const int id = u.GetID(), type = int(u.GetType());
+      if (id <= 0 || size_t(id) >= g_nameSeen.size()) return;
+      now[id] = 1;
+      if (g_nameSeen[id] == type) return;
+      g_nameSeen[id] = type;
+      const Location at = u.GetLocation();
+      for (size_t k = 0; k < g_pendingNames.size(); ++k) {
+        const PendingName& w = g_pendingNames[k];
+        if (w.owner != u.GetOwner() || w.structure != u.IsBuilding()) continue;
+        const bool here = w.structure ? (at.x >= w.x1 && at.x <= w.x2 && at.y >= w.y1 && at.y <= w.y2)
+                                      : (type == w.type && abs(at.x - w.fx) <= NameFactoryTiles && abs(at.y - w.fy) <= NameFactoryTiles);
+        if (!here) continue;
+        BindName(w.name, u);
+        g_pendingNames.erase(g_pendingNames.begin() + k);
+        break;
+      }
+    };
+    for (Unit u : PlayerBuildingEnum(p)) visit(u);
+    for (Unit u : PlayerVehicleEnum(p))  visit(u);
+  }
+  for (size_t id = 1; id < g_nameSeen.size(); ++id) if (!now[id]) g_nameSeen[id] = -1;
+}
+
+// Whether the unit's object index is in range and holds a live object. Unit::IsLive alone reads the object table
+// at any index, so an id past its end (a script from another army history) crashes the game.
+bool Exists(Unit u) {
+  const int id = u.GetID();
+  return id > 0 && size_t(id) < MapImpl::GetInstance()->MaxNumUnits() && u.IsLive();
+}
+
+// The unit a `$` word names, or none; `why` says what was wrong.
+Unit ResolveDollar(const std::string& word, std::string* why) {
+  const std::string body = word.substr(1);
+  const size_t at = body.find('@');
+  if (at == std::string::npos) {
+    const auto it = g_names.find(UpperName(body));
+    if (it == g_names.end()) {
+      bool waiting = false;
+      for (const auto& w : g_pendingNames) waiting |= w.name == UpperName(body);
+      if (why) *why = waiting ? "name " + body + " is bound to nothing yet (its unit hasn't appeared)" : "no name " + body;
+      return Unit();
+    }
+    const Unit u(it->second.id);
+    if (!Exists(u) || int(u.GetType()) != it->second.type || u.GetOwner() != it->second.owner) {
+      if (why) *why = "the unit named " + body + " (id " + std::to_string(it->second.id) + ") is gone";
+      return Unit();
+    }
+    return u;
+  }
+  int x = 0, y = 0;
+  const MapID type = TypeByName(body.substr(0, at));
+  if (type == MapID::None || sscanf(body.c_str() + at + 1, "%d,%d", &x, &y) != 2) {
+    if (why) *why = "bad selector " + word + " (expected $TYPE@x,y)";
+    return Unit();
+  }
+  x += g_scriptFileCoords ? PadTiles() : 0;
+  int best = INT_MAX, bestId = 0;
+  for (int p = 0; p < g_gameImpl.numPlayers_; ++p) {
+    auto visit = [&](Unit u) {
+      if (!u.IsLive() || u.GetType() != type) return;
+      const Location l = u.GetLocation();
+      const int d = std::max(abs(l.x - x), abs(l.y - y));
+      if (d <= NameNearTiles && d < best) best = d, bestId = u.GetID();
+    };
+    for (Unit u : PlayerBuildingEnum(p)) visit(u);
+    for (Unit u : PlayerVehicleEnum(p))  visit(u);
+  }
+  if (!bestId && why) *why = "no live " + body.substr(0, at) + " within " + std::to_string(NameNearTiles) + " tiles of " + body.substr(at + 1);
+  return Unit(bestId);
+}
+
+Unit ScriptUnit(const std::string& s, std::string* why = nullptr) {
   if (!s.empty() && s[0] == '@') { const size_t n = atoi(s.c_str() + 1);  return Unit(n < g_spawned.size() ? g_spawned[n] : 0); }
+  if (!s.empty() && s[0] == '$') return ResolveDollar(s, why);
   return Unit(atoi(s.c_str()));
 }
 
@@ -1619,14 +1732,82 @@ void RunGroupCmd(const ScriptCmd& c) {
   else Log("script: group: unknown op %s", op.c_str());
 }
 
-void RunScriptCmd(const ScriptCmd& c, int tick) {
+// Which of a verb's arguments are units that must exist (`first`..`last`, inclusive; `list`: every argument from
+// `first`, the missing ones dropped instead of the command skipped). Verbs not listed take no units there.
+struct UnitArgs { const char* verb;  size_t first, last;  bool list; };
+const UnitArgs* UnitArgsOf(const std::string& v) {
+  static const UnitArgs table[] = {
+    {"move",0,0,0},{"dock",0,0,0},{"dockeg",0,0,0},{"attackground",0,0,0},{"lights",0,0,0},{"movewp",0,0,0},{"standground",0,0,0},
+    {"patrol",0,0,0},{"stop",0,0,0},{"selfdestruct",0,0,0},{"research",0,0,0},{"poke",0,0,0},{"produce",0,0,0},{"idle",0,0,0},
+    {"unidle",0,0,0},{"train",0,0,0},{"load",0,0,0},{"unload",0,0,0},{"kit",0,0,0},{"cargo",0,0,0},{"bay",0,0,0},
+    {"transfercargo",0,0,0},{"launch",0,0,0},{"build",0,0,0},{"doze",0,0,0},{"buildwall",0,0,0},{"removewall",0,0,0},
+    {"attack",0,1,0},{"guard",0,1,0},{"route",0,2,0},{"scatter",0,0,1},{"repairobj",0,1,0},{"reprogram",0,1,0},{"dismantle",0,1,0} };
+  for (const auto& e : table) if (v == e.verb) return &e;
+  return nullptr;
+}
+
+std::string OrderText(const ScriptCmd& c) {
+  std::string t = c.verb;
+  for (const auto& a : c.args) t += " " + a;
+  return t;
+}
+
+void RunScriptCmd(const ScriptCmd& orig, int tick) {
+  ScriptCmd c = orig;  // Names resolve into ids in this copy.
+  g_scriptFileCoords = c.fileCoords;
+  // `as NAME` ends a produce or build: the unit it makes gets the name.
+  std::string asName;
+  if (c.args.size() >= 2 && c.args[c.args.size() - 2] == "as" && (c.verb == "produce" || c.verb == "build")) {
+    asName = c.args.back();
+    c.args.resize(c.args.size() - 2);
+  }
+  // Orders to a unit that doesn't exist (an id the game gave in another army history, a name never bound) are skipped
+  // with a warning; the UI can't give them, and some crash the game. `$` words become ids here.
+  if (const UnitArgs* ua = UnitArgsOf(c.verb)) {
+    std::vector<std::string> ids;
+    for (size_t i = 0; i < c.args.size(); ++i) {
+      const std::string& a = c.args[i];
+      const bool isUnit = i >= ua->first && (ua->list || i <= ua->last) && !(a == "none" && i == 1) && !(!a.empty() && a[0] == '@');
+      if (!isUnit) { ids.push_back(a);  continue; }
+      std::string why;
+      const Unit u = ScriptUnit(a, &why);
+      if (Exists(u)) { ids.push_back(!a.empty() && a[0] == '$' ? std::to_string(u.GetID()) : a);  continue; }
+      if (why.empty()) why = "no unit " + a;
+      Log("script: WARN tick %d line %d: `%s`: %s (%s)", tick, c.line, OrderText(orig).c_str(), why.c_str(),
+          ua->list ? "unit left out" : "order skipped");
+      if (!ua->list) return;
+    }
+    if (ids.empty() && ua->list) return;
+    c.args = ids;
+  } else if (c.verb == "name") {
+    // name NAME <unit>: bind an existing unit now.
+    std::string why;
+    const Unit u = c.args.size() > 1 ? ScriptUnit(c.args[1], &why) : Unit();
+    if (Exists(u)) BindName(c.args[0], u);
+    else Log("script: WARN tick %d line %d: `%s`: %s (not bound)", tick, c.line, OrderText(orig).c_str(),
+             why.empty() ? "no such unit" : why.c_str());
+    return;
+  }
+  if (!asName.empty()) {
+    NameScan(true);  // Bring the scan up to now, so only units that appear after this order count.
+    PendingName w = { UpperName(asName), false, 0, 0, 0, 0, 0, 0, 0, 0, tick };
+    const Unit f = ScriptUnit(c.args[0]);
+    w.owner = f.GetOwner();
+    if (c.verb == "produce") {
+      w.type = int(TypeByName(c.args.size() > 1 ? c.args[1] : ""));
+      w.fx = f.GetLocation().x, w.fy = f.GetLocation().y;
+    } else if (c.args.size() >= 3) {  // build <convec> x y [TYPE]: the structure appears inside the footprint plus its margin
+      const Location br(atoi(c.args[1].c_str()) + (c.fileCoords ? PadTiles() : 0), atoi(c.args[2].c_str()));
+      const MapID kit = c.args.size() > 3 ? TypeByName(c.args[3]) : MapID(f.IsLive() ? f.GetMapObject()->cargo_ : 0);
+      int wd = 3, ht = 3;
+      if (kit != MapID::None) { const auto& st = MapObjectType::GetInstance(int(kit))->stats_.building;  wd = st.width, ht = st.height; }
+      w.structure = true, w.x1 = br.x - wd - 1, w.y1 = br.y - ht - 1, w.x2 = br.x + 1, w.y2 = br.y + 1;
+    }
+    g_pendingNames.push_back(w);
+  }
   auto arg = [&](size_t i) -> std::string { return i < c.args.size() ? c.args[i] : std::string(); };
   auto num = [&](size_t i) { return atoi(arg(i).c_str()); };
-  auto unit = [&](size_t i) {
-    const std::string s = arg(i);
-    if (!s.empty() && s[0] == '@') { const size_t n = atoi(s.c_str() + 1);  return Unit(n < g_spawned.size() ? g_spawned[n] : 0); }
-    return Unit(atoi(s.c_str()));
-  };
+  auto unit = [&](size_t i) { return ScriptUnit(arg(i)); };
   auto loc = [&](size_t i) { return Location(num(i) + (c.fileCoords ? PadTiles() : 0), num(i + 1)); };
   std::string all;
   for (auto& a : c.args) all += " " + a;
@@ -2287,7 +2468,17 @@ void WriteSessionState(int tick) {
             num >= 0 && num < g_research.numTechs_ ? g_research.ppTechInfos_[num]->techID : 0);
     firstType = false;
   }
-  fputs("},\n\"objectives\":[", f);
+  fputs("}", f);
+  if (!g_names.empty()) {  // name -> [id, type]: the units `as NAME` and `name` bound
+    fputs(",\n\"names\":{", f);
+    bool firstName = true;
+    for (const auto& [name, b] : g_names) {
+      fprintf(f, "%s\"%s\":%d", firstName ? "" : ",", name.c_str(), b.id);
+      firstName = false;
+    }
+    fputc('}', f);
+  }
+  fputs(",\n\"objectives\":[", f);
   bool first = true;
   ForEachObjective([&](int, const VictoryConditionImpl* v) {
     fprintf(f, "%s{\"met\":%d,\"text\":", first ? "" : ",", ObjectiveMet(v));
@@ -2593,6 +2784,7 @@ void __fastcall GameCycleHook(GameImpl* self, void*) {
     if (g_pendingShots[k] <= tick) { TakeShot(tick);  g_pendingShots.erase(g_pendingShots.begin() + k); }
     else ++k;
   }
+  NameScan();
   while (g_scriptPos < g_script.size() && g_script[g_scriptPos].tick <= tick) RunScriptCmd(g_script[g_scriptPos++], tick);
   if (cfg.turbo) SetDrawing(WantDraw(tick));
   if (g_botTick) g_botTick(tick);
@@ -3129,6 +3321,7 @@ void __fastcall ShellCycleHook(GameImpl* self, void*) {
   if (tick < g_shellGameTick || g_shellGameTick < 0) {
     // A new game: reset the per-game state.
     g_scriptPos = 0;
+    g_names.clear(), g_pendingNames.clear(), g_nameSeen.clear();
     g_shellEnd = 0;
     g_nextTelem = 0;
     RECT r = {};
@@ -3139,6 +3332,7 @@ void __fastcall ShellCycleHook(GameImpl* self, void*) {
   }
   g_shellGameTick = tick;
   const bool hadCommands = g_scriptPos < g_script.size();
+  NameScan();
   while (g_scriptPos < g_script.size() && g_script[g_scriptPos].tick <= tick) RunScriptCmd(g_script[g_scriptPos++], tick);
   if (hadCommands && g_scriptPos == g_script.size()) ShellEvent("\"ev\":\"script\",\"what\":\"done\",\"tick\":%d", tick);
   AudioTick(tick);
