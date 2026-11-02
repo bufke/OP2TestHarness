@@ -202,6 +202,13 @@ void WriteUnit(FILE* f, bool& first, Unit u) {
       fprintf(f, ",\"truck\":[%d,%d]", int(mo->truckCargoType_), int(mo->truckCargoAmount_));
     if (u.IsBuilding())
       if (const Location d = u.GetDockLocation(); d) fprintf(f, ",\"dock\":[%d,%d]", d.x, d.y);
+    // A building's hive (+0x38), the tube network the allocation pass last gave it, which DoDamage's Damage
+    // Prevention reads when the building is hit (0x4A39EB, 0x430050): [+0x8, Command Centers +0xC, one enabled +0x10,
+    // DIRTs +0x14, members +0x18].
+    if (u.IsBuilding()) {
+      const int* h = *reinterpret_cast<const int* const*>(b + 0x38);
+      if (h && !IsBadReadPtr(h, 0x1C)) fprintf(f, ",\"hive\":[%d,%d,%d,%d,%d]", h[2], h[3], h[4], h[5], h[6]);
+    }
   }
   fputc('}', f);
   first = false;
