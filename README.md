@@ -263,26 +263,31 @@ instead; the harness resolves a name when the command runs, in the game, so it f
 10   name     M1 $MINER@21,18        # bind an existing unit (id, @N, $NAME or selector) to a name now
 700  move     $T1 232 40             # a word `$NAME` anywhere a unit goes
 700  route    $T1 $MINE1 $SMELTER    # (names are case-insensitive: letters, digits, _)
-710  attack   $GUN@12,34 $TANK_2     # `$TYPE@x,y`: the live unit of TYPE nearest to the tile, within 3 tiles
+710  attack   $TOWER_GUARD@12,34 $TANK_2  # `$TYPE@x,y`: the live unit of TYPE nearest to the tile, within 3 tiles
 ```
 
-- `as NAME` binds the first matching unit that appears after the order: for `produce`, a new vehicle of the produced
-  type within 8 tiles of the factory; for `build`, a new structure (any type: a Mine on a rare beacon becomes
-  MINE_ADV) inside the build rectangle plus margin. Only that player's units match, in the order the orders were
-  given. An order that never makes its unit (factory busy, site refused) leaves its name waiting, and the next unit
-  that fits takes it, so check the log. `harness.log` has a line `script: name T1 = unit 139 (BIG_TRUCK)` when a name
-  binds, and `state.json` lists `names` (name -> id) when any exist.
-- A name keeps the unit's type and owner: once the unit is gone (or its object index now holds something else) the
-  name resolves to nothing. `$TYPE@x,y` takes any owner and the nearest unit (tiles in the script's coordinate mode,
-  `coords file` included); a type outside 3 tiles of the point is not found.
+- `as NAME` binds a unit that appears after the order: for `produce`, a new vehicle of the produced type within 8 tiles
+  of the factory (if several pending names fit, the one whose factory is nearest takes it, ties to the earlier order);
+  for `build`, a new structure (any type: a Mine on a rare beacon becomes MINE_ADV) inside the build rectangle plus
+  margin. Only that player's units match. A `produce` on a Structure Factory can't bind (it makes kits) and is refused
+  with a warning. A name that finds no unit within 4000 ticks (factory busy, site refused) is dropped with a WARN, so a
+  later unit doesn't take it. `harness.log` has `script: name T1 = unit 139 (BIG_TRUCK)` when a name binds, and
+  `state.json` lists `names` (name -> id) when any exist.
+- A name is letters, digits and `_` (not all digits), case-insensitive; anything else is refused with a WARN. It is
+  unbound the first cycle its unit isn't live or isn't the bound type any more, so a new unit that reuses the id doesn't
+  inherit it (a unit that dies and is replaced by one of the same type inside one cycle would). `$TYPE@x,y` takes any
+  owner and the nearest unit of exactly that type (so `$MINE@x,y` doesn't match a MINE_ADV; tiles in the script's
+  coordinate mode, `coords file` included); none within 3 tiles is not found.
 - Names only exist in the original game's harness: the sim replay (`game_verify`, op2-missionhost) has no names.
 
-**A command naming a unit that doesn't exist is skipped, not fatal** (before: an id past the object table crashed the
-game, exit 5). This covers every verb whose first argument is a unit (the first two for `attack`/`guard`/`repairobj`/
-`reprogram`/`dismantle`, the first three for `route`; `scatter` leaves missing units out). The log gets
+**An order naming something that can't be resolved is skipped, not fatal.** That is a `$name` or `$TYPE@x,y` that
+doesn't resolve, or a plain id past the object table (before: reading it crashed the game, exit 5). Every verb whose
+first argument is a unit is covered (the first two for `attack`/`guard`/`repairobj`/`reprogram`/`dismantle`, the first
+three for `route`; `scatter` leaves such units out). The log gets
 `script: WARN tick T line L: `<the command>`: <reason> (order skipped)`, `L` being the line in the script file, and
-op2-inspect's game_step prints it as `! SCRIPT ORDER SKIPPED tick T: ...`. `@N` spawns keep their own rule (skipped
-once they have died). Existing scripts are unchanged: an order to a live unit runs as before.
+op2-inspect's game_step prints it as `! SCRIPT WARNING tick T: ...`. A plain id in range that names a dead unit
+is sent exactly as before (the packet may still change the actor's state, as in the recorded runs) and only noted in
+the log. `@N` spawns keep their own rule (skipped once they have died).
 
 ## Audio log (`--audio`)
 

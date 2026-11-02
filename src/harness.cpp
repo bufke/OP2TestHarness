@@ -1096,11 +1096,15 @@ MapID TypeByName(const std::string& name) {
 // the command runs. NAME is bound by `name NAME <unit>` or by `as NAME` ending a `produce` or `build`: the unit that
 // order makes. That unit is found by watching the objects each cycle (NameScan): a new vehicle of the produced type
 // within NameFactoryTiles of the factory, or a new structure within the build rectangle. The binding keeps the unit's
-// type and owner, so a name whose unit died (and whose object index the game reused) resolves to nothing.
-constexpr int NameNearTiles = 3, NameFactoryTiles = 8;
+// type and owner, and NameScan unbinds a name the first cycle its unit is no longer live (or no longer that type), so
+// a name whose unit died resolves to nothing even after the game reuses the object index. (A unit that dies and is
+// replaced by one of the same type within a single cycle would not be noticed.) An `as NAME` that finds no unit within
+// NamePendingTicks is dropped with a warning. NAME is letters, digits and _ (not all digits).
+constexpr int NameNearTiles = 3, NameFactoryTiles = 8, NamePendingTicks = 4000;
 
 struct NameBinding { int id, type, owner; };
 std::map<std::string, NameBinding> g_names;
+std::map<std::string, int> g_goneNames;  // Unbound because the unit died: name -> its id (for the warning).
 // An `as NAME` waiting for its unit: a vehicle of `type` near (fx,fy), or any structure inside the rectangle.
 struct PendingName { std::string name;  bool structure;  int owner, type, fx, fy, x1, y1, x2, y2, tick; };
 std::vector<PendingName> g_pendingNames;
@@ -1112,14 +1116,48 @@ std::string UpperName(std::string s) {
   return s;
 }
 
+// Whether the unit's object index is in range and holds a live object. Unit::IsLive alone reads the object table
+// at any index, so an id past its end (a script from another army history) crashes the game.
+bool Exists(Unit u) {
+  const int id = u.GetID();
+  return id > 0 && size_t(id) < MapImpl::GetInstance()->MaxNumUnits() && u.IsLive();
+}
+
+bool ValidName(const std::string& n) {
+  if (n.empty()) return false;
+  bool digits = true;
+  for (char ch : n) {
+    if (!isalnum(uint8_t(ch)) && ch != '_') return false;
+    digits &= isdigit(uint8_t(ch)) != 0;
+  }
+  return !digits;
+}
+
 void BindName(const std::string& name, Unit u) {
   g_names[UpperName(name)] = { u.GetID(), int(u.GetType()), u.GetOwner() };
+  g_goneNames.erase(UpperName(name));
   Log("script: name %s = unit %d (%s)", UpperName(name).c_str(), u.GetID(), TypeName(u.GetType()));
 }
 
-// Matches the objects that appeared since the last scan against the pending names; only runs while some wait (a
+// Each cycle (before the script's commands): unbinds names whose unit is gone, expires pending names, and matches the
+// objects that appeared since the last scan against the pending ones. The object scan only runs while some wait (a
 // script without `as` costs nothing), and it only reads the game.
 void NameScan(bool baseline = false) {
+  for (auto it = g_names.begin(); it != g_names.end();) {
+    const Unit u(it->second.id);
+    if (Exists(u) && int(u.GetType()) == it->second.type) { ++it;  continue; }
+    Log("script: name %s: unit %d is gone, unbound", it->first.c_str(), it->second.id);
+    g_goneNames[it->first] = it->second.id;
+    it = g_names.erase(it);
+  }
+  const int now_tick = g_gameImpl.tick_;
+  for (size_t k = 0; k < g_pendingNames.size();) {
+    if (now_tick - g_pendingNames[k].tick > NamePendingTicks) {
+      Log("script: WARN tick %d: `as %s` from tick %d found no unit in %d ticks: dropped", now_tick, g_pendingNames[k].name.c_str(),
+          g_pendingNames[k].tick, NamePendingTicks);
+      g_pendingNames.erase(g_pendingNames.begin() + k);
+    } else ++k;
+  }
   if (g_pendingNames.empty() && !baseline) { g_nameSeen.clear();  return; }  // Nothing waits: forget the baseline too.
   const size_t n = MapImpl::GetInstance()->MaxNumUnits();
   if (g_nameSeen.size() < n) g_nameSeen.resize(n, -1);
@@ -1133,28 +1171,30 @@ void NameScan(bool baseline = false) {
       if (g_nameSeen[id] == type) return;
       g_nameSeen[id] = type;
       const Location at = u.GetLocation();
+      // The pending name that fits best: a structure inside its rectangle, a vehicle of the type nearest its factory
+      // (within NameFactoryTiles; ties go to the earlier order).
+      int best = -1, bestDist = INT_MAX;
       for (size_t k = 0; k < g_pendingNames.size(); ++k) {
         const PendingName& w = g_pendingNames[k];
         if (w.owner != u.GetOwner() || w.structure != u.IsBuilding()) continue;
-        const bool here = w.structure ? (at.x >= w.x1 && at.x <= w.x2 && at.y >= w.y1 && at.y <= w.y2)
-                                      : (type == w.type && abs(at.x - w.fx) <= NameFactoryTiles && abs(at.y - w.fy) <= NameFactoryTiles);
-        if (!here) continue;
-        BindName(w.name, u);
-        g_pendingNames.erase(g_pendingNames.begin() + k);
-        break;
+        int dist = 0;
+        if (w.structure) {
+          if (at.x < w.x1 || at.x > w.x2 || at.y < w.y1 || at.y > w.y2) continue;
+        } else {
+          dist = std::max(abs(at.x - w.fx), abs(at.y - w.fy));
+          if (type != w.type || dist > NameFactoryTiles) continue;
+        }
+        if (dist < bestDist) best = int(k), bestDist = dist;
+      }
+      if (best >= 0) {
+        BindName(g_pendingNames[best].name, u);
+        g_pendingNames.erase(g_pendingNames.begin() + best);
       }
     };
     for (Unit u : PlayerBuildingEnum(p)) visit(u);
     for (Unit u : PlayerVehicleEnum(p))  visit(u);
   }
   for (size_t id = 1; id < g_nameSeen.size(); ++id) if (!now[id]) g_nameSeen[id] = -1;
-}
-
-// Whether the unit's object index is in range and holds a live object. Unit::IsLive alone reads the object table
-// at any index, so an id past its end (a script from another army history) crashes the game.
-bool Exists(Unit u) {
-  const int id = u.GetID();
-  return id > 0 && size_t(id) < MapImpl::GetInstance()->MaxNumUnits() && u.IsLive();
 }
 
 // The unit a `$` word names, or none; `why` says what was wrong.
@@ -1166,7 +1206,10 @@ Unit ResolveDollar(const std::string& word, std::string* why) {
     if (it == g_names.end()) {
       bool waiting = false;
       for (const auto& w : g_pendingNames) waiting |= w.name == UpperName(body);
-      if (why) *why = waiting ? "name " + body + " is bound to nothing yet (its unit hasn't appeared)" : "no name " + body;
+      const auto gone = g_goneNames.find(UpperName(body));
+      if (why) *why = waiting ? "name " + body + " is bound to nothing yet (its unit hasn't appeared)"
+                    : gone != g_goneNames.end() ? "the unit named " + body + " (id " + std::to_string(gone->second) + ") is gone"
+                    : "no name " + body;
       return Unit();
     }
     const Unit u(it->second.id);
@@ -1201,7 +1244,16 @@ Unit ResolveDollar(const std::string& word, std::string* why) {
 Unit ScriptUnit(const std::string& s, std::string* why = nullptr) {
   if (!s.empty() && s[0] == '@') { const size_t n = atoi(s.c_str() + 1);  return Unit(n < g_spawned.size() ? g_spawned[n] : 0); }
   if (!s.empty() && s[0] == '$') return ResolveDollar(s, why);
-  return Unit(atoi(s.c_str()));
+  const int id = atoi(s.c_str());
+  if (id < 0 || size_t(id) >= MapImpl::GetInstance()->MaxNumUnits()) return Unit();  // Past the object table: reading it crashes.
+  return Unit(id);
+}
+
+// A plain numeric unit word whose object index is past the table (the case that used to crash the game).
+bool IdOutOfRange(const std::string& s) {
+  if (s.empty() || s[0] == '@' || s[0] == '$') return false;
+  const int id = atoi(s.c_str());
+  return id < 0 || size_t(id) >= MapImpl::GetInstance()->MaxNumUnits();
 }
 
 bool IsInputVerb(const std::string& v) {
@@ -1614,7 +1666,7 @@ bool RunEcoCmd(const ScriptCmd& c, int tick) {
     r.unitID[0] = uint16(u.GetID());
     for (size_t i = 2; i < c.args.size() && r.numUnits < 32; ++i) {
       const Unit more = ScriptUnit(arg(i));
-      if (more.IsLive()) r.unitID[r.numUnits++] = uint16(more.GetID());
+      if (Exists(more)) r.unitID[r.numUnits++] = uint16(more.GetID());
     }
     // SimpleCommand's unit list is followed by the waypoint count (0) and the target.
     uint8_t* after = reinterpret_cast<uint8_t*>(&r.unitID[r.numUnits]);
@@ -1761,8 +1813,9 @@ void RunScriptCmd(const ScriptCmd& orig, int tick) {
     asName = c.args.back();
     c.args.resize(c.args.size() - 2);
   }
-  // Orders to a unit that doesn't exist (an id the game gave in another army history, a name never bound) are skipped
-  // with a warning; the UI can't give them, and some crash the game. `$` words become ids here.
+  // Unit arguments. A `$name` or `$TYPE@x,y` becomes the id it resolves to now; one that doesn't resolve, or a plain id
+  // past the object table (reading it crashes the game), skips the order with a warning. Any other id is sent as
+  // before, a dead unit's included: the game's own checks apply, and its packet may still change the actor's state.
   if (const UnitArgs* ua = UnitArgsOf(c.verb)) {
     std::vector<std::string> ids;
     for (size_t i = 0; i < c.args.size(); ++i) {
@@ -1770,8 +1823,14 @@ void RunScriptCmd(const ScriptCmd& orig, int tick) {
       const bool isUnit = i >= ua->first && (ua->list || i <= ua->last) && !(a == "none" && i == 1) && !(!a.empty() && a[0] == '@');
       if (!isUnit) { ids.push_back(a);  continue; }
       std::string why;
-      const Unit u = ScriptUnit(a, &why);
-      if (Exists(u)) { ids.push_back(!a.empty() && a[0] == '$' ? std::to_string(u.GetID()) : a);  continue; }
+      if (!a.empty() && a[0] == '$') {
+        const Unit u = ScriptUnit(a, &why);
+        if (Exists(u)) { ids.push_back(std::to_string(u.GetID()));  continue; }
+      } else if (!IdOutOfRange(a)) {
+        ids.push_back(a);
+        if (!Exists(ScriptUnit(a))) Log("script: tick %d line %d: `%s`: no live unit %s (sent anyway)", tick, c.line, OrderText(orig).c_str(), a.c_str());
+        continue;
+      } else why = "no unit " + a + " (past the object table)";
       if (why.empty()) why = "no unit " + a;
       Log("script: WARN tick %d line %d: `%s`: %s (%s)", tick, c.line, OrderText(orig).c_str(), why.c_str(),
           ua->list ? "unit left out" : "order skipped");
@@ -1783,27 +1842,40 @@ void RunScriptCmd(const ScriptCmd& orig, int tick) {
     // name NAME <unit>: bind an existing unit now.
     std::string why;
     const Unit u = c.args.size() > 1 ? ScriptUnit(c.args[1], &why) : Unit();
-    if (Exists(u)) BindName(c.args[0], u);
+    if (c.args.empty() || !ValidName(c.args[0])) Log("script: WARN tick %d line %d: `%s`: a name is letters, digits and _ (not a number) (not bound)", tick, c.line, OrderText(orig).c_str());
+    else if (Exists(u)) BindName(c.args[0], u);
     else Log("script: WARN tick %d line %d: `%s`: %s (not bound)", tick, c.line, OrderText(orig).c_str(),
              why.empty() ? "no such unit" : why.c_str());
     return;
   }
-  if (!asName.empty()) {
-    NameScan(true);  // Bring the scan up to now, so only units that appear after this order count.
-    PendingName w = { UpperName(asName), false, 0, 0, 0, 0, 0, 0, 0, 0, tick };
-    const Unit f = ScriptUnit(c.args[0]);
-    w.owner = f.GetOwner();
-    if (c.verb == "produce") {
-      w.type = int(TypeByName(c.args.size() > 1 ? c.args[1] : ""));
-      w.fx = f.GetLocation().x, w.fy = f.GetLocation().y;
-    } else if (c.args.size() >= 3) {  // build <convec> x y [TYPE]: the structure appears inside the footprint plus its margin
-      const Location br(atoi(c.args[1].c_str()) + (c.fileCoords ? PadTiles() : 0), atoi(c.args[2].c_str()));
-      const MapID kit = c.args.size() > 3 ? TypeByName(c.args[3]) : MapID(f.IsLive() ? f.GetMapObject()->cargo_ : 0);
-      int wd = 3, ht = 3;
-      if (kit != MapID::None) { const auto& st = MapObjectType::GetInstance(int(kit))->stats_.building;  wd = st.width, ht = st.height; }
-      w.structure = true, w.x1 = br.x - wd - 1, w.y1 = br.y - ht - 1, w.x2 = br.x + 1, w.y2 = br.y + 1;
+  // A `produce`/`build` to a dead spawn is skipped below; it binds no name either.
+  bool deadSpawn = false;
+  if (!c.args.empty() && !c.args[0].empty() && c.args[0][0] == '@') {
+    const size_t n = atoi(c.args[0].c_str() + 1);
+    deadSpawn = n >= g_spawned.size() || (n < g_spawnGone.size() && g_spawnGone[n]);
+  }
+  if (!asName.empty() && !deadSpawn) {
+    const Unit f = c.args.empty() ? Unit() : ScriptUnit(c.args[0]);
+    const bool isProduce = c.verb == "produce";
+    if (!ValidName(asName)) Log("script: WARN tick %d line %d: `%s as %s`: a name is letters, digits and _ (not a number) (not bound)", tick, c.line, OrderText(orig).c_str(), asName.c_str());
+    else if (!Exists(f) || c.args.size() < (isProduce ? 2u : 3u)) Log("script: WARN tick %d line %d: `%s`: `as %s` needs a live unit and the order's arguments (not bound)", tick, c.line, OrderText(orig).c_str(), asName.c_str());
+    else if (isProduce && (strcmp(TypeName(f.GetType()), "FACT_STRUCTURE") == 0 || TypeByName(c.args[1]) == MapID::None))
+      Log("script: WARN tick %d line %d: `%s`: `as %s` can't bind: a Structure Factory makes kits, not units (not bound)", tick, c.line, OrderText(orig).c_str(), asName.c_str());
+    else {
+      NameScan(true);  // Bring the scan up to now, so only units that appear after this order count.
+      PendingName w = { UpperName(asName), false, f.GetOwner(), 0, 0, 0, 0, 0, 0, 0, tick };
+      if (isProduce) {
+        w.type = int(TypeByName(c.args[1]));
+        w.fx = f.GetLocation().x, w.fy = f.GetLocation().y;
+      } else {  // build <convec> x y [TYPE]: the structure appears inside the footprint plus its margin
+        const Location br(atoi(c.args[1].c_str()) + (c.fileCoords ? PadTiles() : 0), atoi(c.args[2].c_str()));
+        const MapID kit = c.args.size() > 3 ? TypeByName(c.args[3]) : MapID(f.GetMapObject()->cargo_);
+        int wd = 3, ht = 3;
+        if (kit != MapID::None) { const auto& st = MapObjectType::GetInstance(int(kit))->stats_.building;  wd = st.width, ht = st.height; }
+        w.structure = true, w.x1 = br.x - wd - 1, w.y1 = br.y - ht - 1, w.x2 = br.x + 1, w.y2 = br.y + 1;
+      }
+      g_pendingNames.push_back(w);
     }
-    g_pendingNames.push_back(w);
   }
   auto arg = [&](size_t i) -> std::string { return i < c.args.size() ? c.args[i] : std::string(); };
   auto num = [&](size_t i) { return atoi(arg(i).c_str()); };
@@ -2469,7 +2541,7 @@ void WriteSessionState(int tick) {
     firstType = false;
   }
   fputs("}", f);
-  if (!g_names.empty()) {  // name -> [id, type]: the units `as NAME` and `name` bound
+  if (!g_names.empty()) {  // name -> id of the units `as NAME` and `name` bound (names are [A-Za-z0-9_], so no escaping)
     fputs(",\n\"names\":{", f);
     bool firstName = true;
     for (const auto& [name, b] : g_names) {
@@ -3321,7 +3393,7 @@ void __fastcall ShellCycleHook(GameImpl* self, void*) {
   if (tick < g_shellGameTick || g_shellGameTick < 0) {
     // A new game: reset the per-game state.
     g_scriptPos = 0;
-    g_names.clear(), g_pendingNames.clear(), g_nameSeen.clear();
+    g_names.clear(), g_goneNames.clear(), g_pendingNames.clear(), g_nameSeen.clear();
     g_shellEnd = 0;
     g_nextTelem = 0;
     RECT r = {};
