@@ -101,8 +101,10 @@ The exit status is 0 when the run reached its tick limit or the mission ended.
     countdown) add `weapon`, `tur`, `reload`, `tgt` (ENGINE_PLAN.md). A unit under a weapon status effect adds
     `status`: its [EMP, stickyfoam, ESG] timers (+0x56, +0x54, +0x58, in 8-tick phases; 0 for an effect that is off). Top level: `fx` (weapon fire of spawned
     units, with `timer`), `ents` (every other live object as `[index, type, action, timer, px, py]`: explosions,
-    unspawned units), `alloc` (the object index allocator, 0x439A10: highest index so far and the ring of freed
-    objects as `[index, tick freed, reference count]`), `rng` (the gameplay RNG).
+    unspawned units), `alloc` (the object index allocator, 0x439A10: highest index so far, the ring of freed
+    objects as `[index, tick freed, reference count]` from its head to its tail, and the ring's `[head, tail]` slots;
+    the ring has 2048 slots as OPU patches it in memory, 1024 on disk; a slot holding a live object would be
+    `[index, 4294967295, 0]`), `rng` (the gameplay RNG).
 - `gamedata.json`, written at the first cycle: map geometry (`width`, `height`, `paddingTiles`, `clipRect`...), the
   game's cell type table (`trackSpeed` per track type: Legged, Wheeled, Miner, Tracked, Hover, `blocksLineOfSight`),
   every unit type's player-0 stats (`moveSpeed`, `turnRate`, `track`, `hp`, `armor`, the raw `stats` words, ...;
@@ -226,6 +228,7 @@ Script verbs for colony experiments (oracle scenarios `eco_*`, spec in `oracle/E
                                     # into the rocket on its pad); `launch <spaceport> [x y]` launches that rocket
 5    cargo    @3 2 1000             # set a truck's cargo (CargoType, amount); `load`/`unload <truck>`
 5    poke     @2 0x1e 2 1200        # write a MapObject field (offset, size 1/2/4, value), e.g. damage
+1    peek     0x439A10 64           # log game memory as hex (up to 256 bytes): code as OPU patches it in memory
 10   tech     0 5317                # _Player::MarkResearchComplete(techID) for player 0, as a mission grants a topic
                                     # (a topic not in the loaded tech tree is logged with the valid ids, not granted)
 10   doze     @0 38 36 41 38        # Robo-Dozer: bulldoze an inclusive rectangle (ctMoDoze, as its click sends it)

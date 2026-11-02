@@ -503,17 +503,22 @@ void WriteTrace(int tick) {
   fputc(']', f);
   WriteTraceFx(f);
   // Object index allocator (0x439A10): highest index handed out so far (0x54F838) and the ring of freed objects
-  // (0x54F844, head 0x54F840, tail 0x54F83C) as [index, tick freed, reference count +0x32].
+  // (0x54F844, head 0x54F840, tail 0x54F83C) as [index, tick freed, reference count +0x32], every slot from the head to
+  // the tail, then [head, tail]. The scan's mask is read from its `and ebx, imm32` (0x439AA0): 0x3FF in Outpost2.exe on
+  // disk, 0x7FF as OPU patches it in memory (a 2048-object table). A slot between head and tail can be stale: a live
+  // object there (+0x4 not -1; its +0x8 is a list pointer) is written [index, 4294967295, 0].
   {
     const int last = *reinterpret_cast<const int*>(0x54F838), head = *reinterpret_cast<const int*>(0x54F840),
-              tail = *reinterpret_cast<const int*>(0x54F83C);
+              tail = *reinterpret_cast<const int*>(0x54F83C), mask = *reinterpret_cast<const int*>(0x439AA2);
     const uint8_t* const* ring = *reinterpret_cast<const uint8_t* const* const*>(0x54F844);
     fprintf(f, ",\"alloc\":[%d,[", last);
-    for (int k = head, n = 0; k != tail && n < 64; k = (k + 1) & 0x3FF, ++n) {
+    for (int k = head, n = 0; k != tail && n <= mask; k = (k + 1) & mask, ++n) {
       const uint8_t* o = ring[k];
-      fprintf(f, "%s[%d,%d,%d]", n ? "," : "", *reinterpret_cast<const int*>(o + 0x10), *reinterpret_cast<const int*>(o + 0x8), o[0x32]);
+      const bool live = *reinterpret_cast<const int*>(o + 0x4) != -1;
+      fprintf(f, "%s[%d,%u,%d]", n ? "," : "", *reinterpret_cast<const int*>(o + 0x10),
+              live ? 0xFFFFFFFFu : *reinterpret_cast<const unsigned*>(o + 0x8), live ? 0 : o[0x32]);
     }
-    fputs("]]", f);
+    fprintf(f, "],[%d,%d]]", head, tail);
   }
   if (g_traceMap) WriteTraceMap(f);
   // Main gameplay RNG state (two 32-bit LFSRs at 0x56BE20, stepped by Random::Rand 0x46F000/0x46F060).
@@ -1244,6 +1249,16 @@ bool RunEcoCmd(const ScriptCmd& c, int tick) {
     if (IsBadWritePtr(b, size)) { Log("script: mem: bad address %s", arg(0).c_str());  return true; }
     if (size == 1) *b = uint8_t(value); else if (size == 2) *reinterpret_cast<uint16_t*>(b) = uint16_t(value);
     else *reinterpret_cast<int*>(b) = value;
+    return true;
+  }
+  if (v == "peek") {  // peek <address> <bytes>: log game memory as hex, e.g. code as patched in memory (OPU, op2ext)
+    const uint8_t* b = reinterpret_cast<const uint8_t*>(uintptr_t(strtoul(arg(0).c_str(), nullptr, 0)));
+    const int size = std::min(num(1), 256);
+    if (size <= 0 || IsBadReadPtr(b, size)) { Log("script: peek: bad address %s", arg(0).c_str());  return true; }
+    std::string hex;
+    char buf[4];
+    for (int k = 0; k < size; ++k) { snprintf(buf, sizeof buf, "%02x", b[k]);  hex += (k ? " " : "") + std::string(buf); }
+    Log("script: peek %s: %s", arg(0).c_str(), hex.c_str());
     return true;
   }
   if (v == "tech") {  // tech <player> <techID>: _Player::MarkResearchComplete (0x477510), as a mission DLL grants one
