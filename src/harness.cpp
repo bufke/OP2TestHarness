@@ -486,6 +486,22 @@ void WriteTraceFx(FILE* f) {
 
 int g_lastTraceTick = -1;
 
+// The object index ring's mask, from the allocator scan's `and ebx, imm32` (81 E3 at 0x439AA0): 0x3FF on disk, 0x7FF
+// as OPU patches it. Anything else there (another patch) falls back to 0x3FF, logged once.
+int RingMask() {
+  static int mask = 0;
+  if (mask) return mask;
+  const uint8_t* op = reinterpret_cast<const uint8_t*>(0x439AA0);
+  const int m = *reinterpret_cast<const int*>(0x439AA2);
+  if (op[0] == 0x81 && op[1] == 0xE3 && m > 0 && m <= 0x7FF && ((m + 1) & m) == 0) {
+    mask = m;
+  } else {
+    mask = 0x3FF;
+    Log("trace: unexpected allocator scan at 0x439AA0 (%02x %02x, imm %#x); the alloc ring is walked with 0x3FF", op[0], op[1], m);
+  }
+  return mask;
+}
+
 void WriteTrace(int tick) {
   FILE* f = g_trace;
   if (!f || tick == g_lastTraceTick) return;
@@ -516,7 +532,8 @@ void WriteTrace(int tick) {
   // object there (+0x4 not -1; its +0x8 is a list pointer) is written [index, 4294967295, 0].
   {
     const int last = *reinterpret_cast<const int*>(0x54F838), head = *reinterpret_cast<const int*>(0x54F840),
-              tail = *reinterpret_cast<const int*>(0x54F83C), mask = *reinterpret_cast<const int*>(0x439AA2);
+              tail = *reinterpret_cast<const int*>(0x54F83C);
+    const int mask = RingMask();
     const uint8_t* const* ring = *reinterpret_cast<const uint8_t* const* const*>(0x54F844);
     fprintf(f, ",\"alloc\":[%d,[", last);
     for (int k = head, n = 0; k != tail && n <= mask; k = (k + 1) & mask, ++n) {
@@ -1261,7 +1278,8 @@ bool RunEcoCmd(const ScriptCmd& c, int tick) {
   if (v == "peek") {  // peek <address> <bytes>: log game memory as hex, e.g. code as patched in memory (OPU, op2ext)
     const uint8_t* b = reinterpret_cast<const uint8_t*>(uintptr_t(strtoul(arg(0).c_str(), nullptr, 0)));
     const int size = std::min(num(1), 256);
-    if (size <= 0 || IsBadReadPtr(b, size)) { Log("script: peek: bad address %s", arg(0).c_str());  return true; }
+    if (size <= 0) { Log("script: peek: needs a size of 1-256 bytes (got '%s')", arg(1).c_str());  return true; }
+    if (IsBadReadPtr(b, size)) { Log("script: peek: bad address %s", arg(0).c_str());  return true; }
     std::string hex;
     char buf[4];
     for (int k = 0; k < size; ++k) { snprintf(buf, sizeof buf, "%02x", b[k]);  hex += (k ? " " : "") + std::string(buf); }
