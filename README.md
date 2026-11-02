@@ -245,7 +245,7 @@ required workers/scientists, scientists working as workers, food production/cons
 capacities, morale inputs) and `pi`, every dword of PlayerImpl 0x00..0x1EF; and to each unit `flags` (MapObject +0x44),
 `act`/`timer` (action and its timer), `busy`, `w24` (the cargo/researchTimer word) and `raw` (bytes 0x48..0x7F), plus
 `truck` [cargo type, amount] for Cargo Trucks and, for buildings, `hive`: the counters of its hive (+0x38) as
-[+0x8, Command Centers, one enabled, enabled DIRTs, members], which DoDamage reads live (0x430050). Each `--eco` telemetry line also has a top-level `beacons` array:
+[+0x8 owner, Command Centers, one enabled, enabled DIRTs, members, slot] (the slot: its index in HiveManager's hive array, which tells hives apart), which DoDamage reads live (0x430050). Each `--eco` telemetry line also has a top-level `beacons` array:
 `x`/`y` in the same internal tile coordinates as units, plus `ore`, `bar` (yield) and `variant` for every live mining
 beacon. `gamedata.json` gets `morale` (levels and modifiers as loaded), `mines`
 (the yield table) and `typeExtra` ([mapId, resource priority, research topic]). Scenarios may also set
