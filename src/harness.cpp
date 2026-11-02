@@ -1330,6 +1330,15 @@ bool RunEcoCmd(const ScriptCmd& c, int tick) {
     Log("%s at (%s,%s): unit %d", v.c_str(), arg(0).c_str(), arg(1).c_str(), d.GetID());
     return true;
   }
+  if (v == "empmissile") {
+    // TethysGame::SetEMPMissile (0x478420): an EMP missile of `owner` from a tile to a tile, as a mission launches
+    // one (e12's FireEMP1).   empmissile launchX launchY owner targetX targetY
+    using SetEMPMissileFn = void(__fastcall*)(int launchX, int launchY, int owner, int targetX, int targetY);
+    const Location from = loc(0), to = loc(3);
+    reinterpret_cast<SetEMPMissileFn>(0x478420)(from.x, from.y, num(2), to.x, to.y);
+    Log("empmissile from (%s,%s) owner %d to (%s,%s)", arg(0).c_str(), arg(1).c_str(), num(2), arg(3).c_str(), arg(4).c_str());
+    return true;
+  }
   if (v == "blight") {
     // Game::CreateBlight: the speed (BlightManager::SetSpreadSpeed), then GameMap::SetVirusUL (0x476EA0), which takes
     // its flag in ecx and the Location on the stack (MinGW's fastcall passes TethysAPI's (Location, ibool) otherwise).

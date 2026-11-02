@@ -340,6 +340,7 @@ Script verbs that schedule a disaster the way a mission does (the TethysGame::Se
 5  lightning 20 20 10 60 30         # x1 y1 duration x2 y2
 5  tornado   20 20 16 60 30 now     # x1 y1 duration x2 y2
 5  blight    40 40 [speed]          # GameMap::SetVirusUL; lavaspeed n; lavapossible x1 y1 x2 y2 0|1
+5  empmissile 0 0 1 60 50           # TethysGame::SetEMPMissile: from x y, owner, to x y (an EMP missile, e12's FireEMP1)
 ```
 
 ## Group verbs
