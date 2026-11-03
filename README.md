@@ -51,6 +51,10 @@ When run from Claude Code, `run.sh` and `make check` need `dangerouslyDisableSan
 | `--size WxH` | 1024x768 | requested client size. The game rounds it (1024x768 gives 1032x766) |
 | `--timeout S` | 600 | wall-clock limit. On timeout the X screen is saved to `timeout_screen.png` and the game is killed |
 | `--display :N` | private Xvfb | use an existing X display instead, e.g. to watch a run |
+| `--record` | | record a person playing (see "Recording your own play"): real time, real mouse and keys, sound on, no tick limit or timeout |
+| `--desktop WxH` | | run the game in a Wine virtual desktop of that size (dialogs stay inside it; for gamescope) |
+| `--silent` | | with `--record`: sound and music off, no audio device |
+| `--fast` | | with `--record`, for tests of recording: turbo on a private Xvfb, nobody playing (`savegame`/`loadgame` lines stand in for the dialogs) |
 
 The exit status is 0 when the run reached its tick limit or the mission ended.
 
@@ -138,6 +142,8 @@ or `@N` for the unit made by the Nth `spawn` command, or a name (`$NAME`, "Unit 
      stop <id> | selfdestruct <id> | research <labId> <techId> <scientists> | shot | telemetry | trace | quit
      guard <id> <id> | attackground <id> x y | lights <id> 0|1 | scatter <id> <id>...   # scatter: one ctMoScatter
      movewp <id> x,y[,r] ... | standground <id> x,y[,r] ... | patrol <id> <loop> x,y[,r] ...   # waypoints, range r
+1236 packet    2 012b0001003007a300    # a recorded UI packet (type, data hex), run inside the cycle starting at 1236
+     savegame <file> | loadgame <file>  # TApp::SaveGame/LoadGame on OPU/saves/<file>, once each (recording tests)
 ```
 
 The last group builds the packets the UI sends (Guard, Attack on a tile, LightToggle, Move/Stand Ground/Patrol with up
@@ -365,6 +371,75 @@ the telemetry of a run with `--state` is byte-identical to one without (measured
 
 Learned while building it: wreckage is scavenged by a Cargo Truck driving onto it only once it has been discovered,
 and a Scout discovers it by coming near (e06: tanks next to it for 3000 ticks didn't).
+
+## Recording your own play (`--record`)
+
+David plays a mission of the original by hand and his game becomes a harness script: a win script, an oracle run and,
+later, an op2-rs comparison.
+
+```sh
+make -C missions record MISSION=p12.dll         # CAMPAIGN= defaults to harness/oracle/missions/p12_campaign.txt
+# -> harness/recordings/p12/recording.txt (gitignored), plus telemetry.jsonl and harness.log of the session
+```
+
+- **How it starts.** `run.py --record` loads the harness as for any scripted run (same `StartMissionHook`: seed 1,
+  normal difficulty, `--campaign` carry-over, player name, start info), in **prefix-harness, never prefix/** (David's
+  own play prefix isn't touched; mission DLLs are mirrored from it as for every run). The game runs in real time with
+  the frame limiter, sound and music as prefix-harness's ini has them (`--silent` turns them off), the real mouse and
+  keys (no virtual cursor, no forced focus), the game's own questions answered by the player (the message box isn't
+  intercepted), and no tick limit or timeout. The make target runs it under gamescope in a Wine virtual desktop
+  (`--desktop`, default 1088x816 around the 1024x768 game; `REC_SIZE`, `REC_W`, `REC_H`, `REC_OUT` change it). An
+  optional `--script` is a setup script (it runs as in any run and is copied to the top of the recording).
+- **What is captured** (harness.cpp "Recording a player's own game"). The UI never runs an order: each command writes its
+  packet into the local player's pending slot of the command queue (0x490810), and `GameImpl::ProcessGameCycle`
+  hands each player's slot to `PlayerImpl::ProcessCommandPacket` (0x40E300) at 0x489FF5 on every 4th tick, before the
+  units act. The harness hooks that call: every packet of the local player that takes effect is logged with its tick,
+  after any overwrite in the slot. ctNop and ctMachineSettings (machine speed, memory and window size, which the frame
+  sends itself every 32 ticks and only a debug line reads) are left out. Selection, scrolling, the pane's pages and
+  other UI that sends nothing don't change the game and aren't recorded.
+- **The script.** One line per packet, `T packet TYPE HEX  # comment`: the command type and its data bytes, run by the
+  replay in the cycle that starts at tick T (a multiple of 4): the `packet` verb puts those bytes into the slot just as
+  `ProcessCommandPacket` reads it, so the same bytes run at the same point of the same cycle. The comment says what it
+  does with the units as `id(TYPE@x,y)` (file tiles, when it ran): `= verb ...` when a harness verb builds the same
+  bytes (one unit, tile centres), `~ verb ...` for the nearest verb (the UI's Move carries the clicked pixel, not the
+  tile's centre, and a selection gives one packet for every unit), else a description (`GameOpt 20 = 40` for a game
+  speed change). Unit ids are the game's own; they replay because the history is the same. Quitting (ctQuit) is kept as
+  a comment only. The header has the replay command line; the last line says how the session ended.
+- **Saves and loads.** Save as often as you like: TApp::SaveGame (0x4877E0) and TApp::LoadGame (0x4878F0) are hooked.
+  A save writes a sidecar folder beside the save, `OPU/saves/SGAMEn.OP2.rec/` in prefix-harness (packets.txt, the
+  telemetry so far, meta.txt with the tick and the session's identity: mission, seed, difficulty, carry-over, setup
+  script). A load puts them back, so recording.txt is always the one linear history that led to the loaded game, and the
+  abandoned branch is gone (`# load ...` header lines say what each load rolled back; harness.log has every packet that
+  ran, abandoned ones included). Slots save the pending orders too: an order clicked just before a save runs after the
+  load and is recorded then. Loading a save made outside a recording session, or for another start, marks the recording
+  `# BROKEN: ...` (it no longer replays). A new session in the same `REC_OUT` keeps the previous files as
+  `recording-<time>.txt`; loading a save from an earlier session resumes that history.
+- **Turning it into a win script and an oracle run** (coordinator). Copy recording.txt to
+  `harness/oracle/missions/<m>.txt`, write the header (what the mission asks, the plan as played; keep the packet lines),
+  then replay it: `harness/run.sh --mission <m>.dll --campaign <carry-over> --script harness/oracle/missions/<m>.txt
+  --ticks 0 --out /tmp/<m>` must end as the session did (MissionAccomplished at the recorded tick), and its
+  telemetry.jsonl must equal the session's (same `--telemetry-every`: 100 by default) line for line. Then add `[runs.<m>_win]` to
+  accuracy/recordings.toml, `tools/agent/record <m>_win`, and `op2-inspect game_carry_over` for the next mission's
+  carry-over. To play on from the recording's end through op2-inspect (a partial game), `game_start mission=<m>
+  script=<recording> tick=<end>` takes it as the session's base script.
+- **Check:** `python3 harness/test/record_check.py --out DIR` (about a minute; Xvfb, real X input through shell.py's
+  `X`): plays e01 with clicks, SAVE GAME, two more orders, LOAD GAME and a different order, then replays the recording
+  and requires the same executed packets, byte-identical telemetry and an identical trace (frame/anim aside), the
+  abandoned packets gone, and op2-inspect's game_start to start from the recording at its end with the same units.
+  `--script WIN --loads S:L,...` (with `--mission`, `--campaign`, `--ticks`) instead plays a win script in a
+  `--record --fast` session that saves at tick S and loads that save at tick L (script verbs `savegame NAME` /
+  `loadgame NAME`, which run once each, after the cycle's samples, and stay comments in the recording), and compares
+  its `--eco` telemetry with the plain replay: whether saving and loading are faithful for that mission.
+- **Limits.** op2-missionhost (op2-sim) doesn't read `packet` lines yet, so the op2-rs comparison needs them translated
+  (a `~ move` isn't byte-exact: the UI's click pixel). Only the local player's packets are recorded (single player).
+  A load restores the game as the save holds it; across the p08, e05, e10, p12 and e01 scripts a loaded game went on
+  exactly as the saved one would have (the plain telemetry byte for byte, the win at the same tick) except for two
+  internal values in `--eco` telemetry: a structure hive's slot number in HiveManager's array, and every unit's
+  MapObject +0x7C, a heap address (0x06xxxxxx, 0x78 apart from unit to unit) that a loaded game allocates 2 MB away.
+  `record_check.py` masks those two. Sound on during a recording hasn't been tested for
+  determinism (the checks run silent; replays are always silent): compare the first real recording's replay with its
+  telemetry. Agents' harness runs share prefix-harness's wineserver and can take the foreground (input runs do): don't
+  run input-verb runs while David records. Mission dialogs from a DLL are suppressed as in every run.
 
 ## Disasters
 

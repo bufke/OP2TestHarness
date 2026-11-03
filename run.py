@@ -9,6 +9,7 @@ Example:
 Outputs in --out: telemetry.jsonl, trace.jsonl, gamedata.json, shot_<tick>.png, harness.log, wine.log, summary.json.
 """
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -190,6 +191,20 @@ def convert_shots(out: Path, keep_bmp: bool) -> int:
     return n
 
 
+def keep_previous_recording(out: Path) -> None:
+    """A new recording session starts over in OUT: the previous session's recording and telemetry are kept beside it
+    as recording-<time>.txt and telemetry-<time>.jsonl (a session resumed by loading a save gets its history back from
+    the save's sidecar anyway)."""
+    rec = out / "recording.txt"
+    if not rec.exists():
+        return
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(rec.stat().st_mtime))
+    for name in ("recording.txt", "telemetry.jsonl", "harness.log"):
+        f = out / name
+        if f.exists():
+            f.rename(out / f"{f.stem}-{stamp}{f.suffix}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mission", help="mission DLL file name, e.g. cHello.dll (searched like the game does)")
@@ -241,10 +256,33 @@ def main() -> int:
     ap.add_argument("--timeout", type=float, default=600, help="wall-clock seconds before the game is killed")
     ap.add_argument("--keep-bmp", action="store_true", help="keep raw BMP screenshots next to the PNGs")
     ap.add_argument("--display", help="use this X display instead of starting a private Xvfb (e.g. to watch)")
+    ap.add_argument("--record", action="store_true",
+                    help="record a person playing (README \"Recording your own play\"): real time, the real mouse and "
+                         "keys, sound on, no tick limit or timeout; every order goes to OUT/recording.txt, a replayable "
+                         "script; saves keep the recording beside them. Needs --display or $DISPLAY")
+    ap.add_argument("--desktop", metavar="WxH",
+                    help="run the game in a Wine virtual desktop of this size (dialogs stay inside it, for gamescope)")
+    ap.add_argument("--silent", action="store_true", help="with --record: sound and music off, no audio device")
+    ap.add_argument("--fast", action="store_true",
+                    help="with --record, for tests of the recording itself: turbo on a private Xvfb, nobody playing "
+                         "(the script's `savegame`/`loadgame` lines stand in for the dialogs)")
     args = ap.parse_args()
     scn = json.loads(args.scenario.read_text()) if args.scenario else None
     if bool(args.mission) == bool(scn):
         ap.error("give exactly one of --mission and --scenario")
+    if args.record:
+        if scn:
+            ap.error("--record plays a mission, not a scenario")
+        if not args.fast:
+            args.display = args.display or os.environ.get("DISPLAY")
+            if not args.display:
+                ap.error("--record needs a display to play on: --display :N, or $DISPLAY (gamescope sets it)")
+            args.no_turbo = True
+        args.ticks = 0 if args.ticks is None else args.ticks
+        if args.fast:
+            args.silent = True
+        elif args.timeout == 600:
+            args.timeout = 0
     if args.ticks is None:
         args.ticks = scn.get("ticks", 3000) if scn else 3000
     if args.seed is None:
@@ -265,6 +303,21 @@ def main() -> int:
     width, height = (int(v) for v in args.size.lower().split("x"))
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
+    saves_lock = None  # Held (open) until the run ends.
+    if args.record:
+        keep_previous_recording(out)
+        signal.signal(signal.SIGTERM, lambda signum, _frame: sys.exit(128 + signum))
+    # The saves (and their recordings) stay put while David plays: shell.py --clean-saves moves the folder aside, under
+    # this lock (harness/test/record_check.py holds it itself and says so).
+    if args.record and not os.environ.get("OP2H_SAVES_LOCK_HELD"):
+        saves = OPU_DIR / "saves"
+        saves.mkdir(parents=True, exist_ok=True)
+        saves_lock = open(saves.parent / "saves.harness-lock", "w")
+        try:
+            fcntl.flock(saves_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("run.py: waiting for a shell run with --clean-saves to finish ...", file=sys.stderr)
+            fcntl.flock(saves_lock, fcntl.LOCK_EX)
     for old in [*out.glob("shot_*.bmp"), *out.glob("shot_*.png"), out / "telemetry.jsonl", out / "harness.log",
                 out / "timeout_screen.png", out / "summary.json", out / "trace.jsonl", out / "gamedata.json", out / "audio.jsonl",
                 out / "scenario_script.txt", out / "state.json", out / "events.jsonl", out / "present.log"]:
@@ -310,6 +363,14 @@ def main() -> int:
                OP2H_PLAYERS=str(args.players),
                OP2H_WIDTH=str(width),
                OP2H_HEIGHT=str(height))
+    if args.record:
+        env["OP2H_RECORD"] = "1"
+        if args.fast:
+            env["OP2H_NOBODY"] = "1"  # Nobody to answer the game's questions: logged and answered OK, as in other runs.
+        if args.silent:
+            env["OP2H_SILENT"] = "1"
+        else:
+            env["WINEDLLOVERRIDES"] = "winedbg.exe=d"  # Sound on: the person playing hears the game.
     if args.script:
         env["OP2H_SCRIPT"] = win_path(args.script.resolve())
     if args.bot:
@@ -320,11 +381,27 @@ def main() -> int:
 
     start = time.monotonic()
     timed_out = False
+    command = ["wine", "Outpost2.exe", "/OPU"]
+    if args.desktop:
+        # The program needs its full Windows path: `explorer /desktop=... Outpost2.exe` silently starts nothing.
+        exe = "C:\\" + str((GAME_DIR / "Outpost2.exe").relative_to(PREFIX / "drive_c")).replace("/", "\\")
+        command = ["wine", "explorer", f"/desktop=op2h{os.getpid()},{args.desktop}", exe, "/OPU"]
     with open(out / "wine.log", "w") as log:
-        game = subprocess.Popen(["wine", "Outpost2.exe", "/OPU"], cwd=GAME_DIR, env=env,
+        game = subprocess.Popen(command, cwd=GAME_DIR, env=env,
                                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
-            code = game.wait(timeout=args.timeout)
+            code = game.wait(timeout=args.timeout or None)
+            if args.desktop:  # explorer can outlive the game: end the rest of the session's processes too.
+                try:
+                    os.killpg(game.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        except (KeyboardInterrupt, SystemExit):  # A recording's terminal closed (Ctrl+C, SIGTERM): end the game too.
+            try:
+                os.killpg(game.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            raise
         except subprocess.TimeoutExpired:
             timed_out = True
             grab_screen(display, out / "timeout_screen.png")  # Usually shows the modal dialog that hung the game.

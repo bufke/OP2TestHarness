@@ -54,6 +54,7 @@ int EnvInt(const char* name, int def) { const auto s = Env(name);  return s.empt
 
 FILE* g_log   = nullptr;
 FILE* g_telem = nullptr;
+FILE* g_recFile = nullptr;  // A recording's recording.txt (OP2H_RECORD), appended packet by packet.
 
 void Log(const char* fmt, ...) {
   if (!g_log) return;
@@ -669,7 +670,7 @@ void WriteGameData(const char* path) {
 //   view <x> <y>                                             (centre player 0's view on a tile, for screenshots)
 // A <unit> is an internal unit ID as telemetry reports it, or @N for the unit spawned by the Nth spawn command.
 
-struct ScriptCmd { int tick;  std::string verb;  std::vector<std::string> args;  bool fileCoords;  int line = 0; };
+struct ScriptCmd { int tick;  std::string verb;  std::vector<std::string> args;  bool fileCoords;  int line = 0;  bool ran = false; };
 std::vector<ScriptCmd> g_script;
 size_t g_scriptPos = 0;
 
@@ -678,7 +679,7 @@ bool IsInputVerb(const std::string& v);
 void LoadScript(const std::string& path) {
   FILE* f = fopen(path.c_str(), "r");
   if (!f) { Log("script: cannot open %s", path.c_str());  return; }
-  char line[512];
+  char line[4096];  // A recording's `packet` lines carry up to 198 hex digits and a comment.
   bool fileCoords = false;
   int lineNo = 0;
   while (fgets(line, sizeof(line), f)) {
@@ -1035,27 +1036,31 @@ void PressKey(const KeySpec& k) {
 // multiplayer-safe version would have to queue packets through the network layer instead).
 // Unit::DoMove() goes through MapObject::CmdMove() (the ScGroup/AI path), which crashed the renderer when used on a
 // human player's unit, so build the same Move packet that clicking produces.
-void IssueMove(Unit u, Location where, CommandType type = CommandType::Move) {
-  if (!u.IsLive()) return;
+// The packet builders are also what a recording's comments compare a recorded packet with (DescribePacket).
+CommandPacket MovePacket(int id, Location where, CommandType type) {
   CommandPacket packet = { type, sizeof(MoveCommand) };
   packet.data.move.numUnits     = 1;
-  packet.data.move.unitID[0]    = uint16(u.GetID());
+  packet.data.move.unitID[0]    = uint16(id);
   packet.data.move.numWaypoints = 1;
   packet.data.move.waypoint[0]  = where.AsWaypoint();
-  g_gameImpl.GetPlayer(u.GetOwner())->ProcessCommandPacket(packet);
+  return packet;
+}
+
+void IssueMove(Unit u, Location where, CommandType type = CommandType::Move) {
+  if (!u.IsLive()) return;
+  g_gameImpl.GetPlayer(u.GetOwner())->ProcessCommandPacket(MovePacket(u.GetID(), where, type));
 }
 
 // Unit orders with more than a Move's arguments, built the way PlayerImpl::ProcessCommandPacket (0x40E300) parses
 // them: Move/Dock/StandGround/Patrol at 0x40E3B0, Attack/Guard at 0x40FAB7. `waypoints` are tiles, each with a range
 // in the waypoint's top 3 bits (how near counts as reached, 0x44BFD0; the UI uses 2 for Ctrl+click waypoints and 3 for
 // patrol points); Patrol appends the waypoint index the patrol loops back to (stored at MapObject +0x5E).
-void IssueWaypoints(Unit u, CommandType type, const std::vector<Location>& waypoints, const std::vector<int>& ranges,
-                    int patrolLoop = -1) {
-  if (!u.IsLive() || waypoints.empty() || waypoints.size() > 8) return;
+CommandPacket WaypointPacket(int id, CommandType type, const std::vector<Location>& waypoints, const std::vector<int>& ranges,
+                             int patrolLoop) {
   CommandPacket packet = { type, 0 };
   auto& m = packet.data.move;
   m.numUnits     = 1;
-  m.unitID[0]    = uint16(u.GetID());
+  m.unitID[0]    = uint16(id);
   m.numWaypoints = uint16(waypoints.size());
   Waypoint* wp = m.waypoint;
   for (size_t i = 0; i < waypoints.size(); ++i) {
@@ -1069,18 +1074,28 @@ void IssueWaypoints(Unit u, CommandType type, const std::vector<Location>& waypo
     size += 2;
   }
   packet.dataLength = uint16(size);
-  g_gameImpl.GetPlayer(u.GetOwner())->ProcessCommandPacket(packet);
+  return packet;
+}
+
+void IssueWaypoints(Unit u, CommandType type, const std::vector<Location>& waypoints, const std::vector<int>& ranges,
+                    int patrolLoop = -1) {
+  if (!u.IsLive() || waypoints.empty() || waypoints.size() > 8) return;
+  g_gameImpl.GetPlayer(u.GetOwner())->ProcessCommandPacket(WaypointPacket(u.GetID(), type, waypoints, ranges, patrolLoop));
 }
 
 // Attack or Guard on a unit (`tile` false: x = unit id) or on a tile.
-void IssueTargeted(Unit u, CommandType type, int x, int y, bool tile) {
-  if (!u.IsLive()) return;
+CommandPacket TargetedPacket(int id, CommandType type, int x, int y, bool tile) {
   CommandPacket packet = { type, sizeof(AttackCommand) };
   packet.data.attack.numUnits  = 1;
-  packet.data.attack.unitID[0] = uint16(u.GetID());
+  packet.data.attack.unitID[0] = uint16(id);
   packet.data.attack.unknown   = 0;
   packet.data.attack.target    = { uint16(x), uint16(tile ? y : 0xFFFF) };
-  g_gameImpl.GetPlayer(u.GetOwner())->ProcessCommandPacket(packet);
+  return packet;
+}
+
+void IssueTargeted(Unit u, CommandType type, int x, int y, bool tile) {
+  if (!u.IsLive()) return;
+  g_gameImpl.GetPlayer(u.GetOwner())->ProcessCommandPacket(TargetedPacket(u.GetID(), type, x, y, tile));
 }
 
 MapID TypeByName(const std::string& name) {
@@ -1804,6 +1819,9 @@ std::string OrderText(const ScriptCmd& c) {
   return t;
 }
 
+void QueuePacket(const ScriptCmd& c, int tick);
+void SaveLoadVerb(const ScriptCmd& c, int tick);
+
 void RunScriptCmd(const ScriptCmd& orig, int tick) {
   ScriptCmd c = orig;  // Names resolve into ids in this copy.
   g_scriptFileCoords = c.fileCoords;
@@ -1960,6 +1978,8 @@ void RunScriptCmd(const ScriptCmd& orig, int tick) {
   }
   else if (IsInputVerb(c.verb))      RunInputCmd(c, tick);
   else if (c.verb == "group")        RunGroupCmd(c);
+  else if (c.verb == "packet")       QueuePacket(c, tick);
+  else if (c.verb == "savegame" || c.verb == "loadgame") SaveLoadVerb(c, tick);
   else if (c.verb == "setcell") {
     const int pad = c.fileCoords ? PadTiles() : 0;
     for (int y = num(1); y <= num(3); ++y)
@@ -2767,6 +2787,7 @@ void Quit(const char* why) {
   WriteTrace(g_gameImpl.tick_);
   if (cfg.shotEvery > 0) TakeShot(g_gameImpl.tick_);
   WriteSessionState(g_gameImpl.tick_);
+  if (g_recFile) { fprintf(g_recFile, "# end of the recording: tick %d, %s\n", g_gameImpl.tick_, why);  fclose(g_recFile); }
   ClosePresents();
   if (g_events) fclose(g_events);
   if (g_telem) fclose(g_telem);
@@ -2814,6 +2835,507 @@ void ParkCursor() {
   }
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Recording a player's own game (OP2H_RECORD, `run.sh --record`, README "Recording your own play") and replaying it
+// (the `packet` verb).
+//
+// The UI never runs an order itself. Each command handler asks for the local player's pending slot (0x490810: slot
+// (((tick + interval - 1) >> log2 interval) + delay) & 15 of the 16 113-byte packets at PlayerImpl +0x4C8; it stamps
+// +6 = 0x80000000 and +0xA = 0) and writes its packet there, over whatever the slot held. GameFrame::OnIdle also writes
+// a ctMachineSettings packet there itself (0x49CC30, from 0x49C55C) after each cycle whose interval number is 7 mod 8.
+// On ticks that are a multiple of the interval (4), GameImpl::ProcessGameCycle (0x489EA0) hands every player's slot
+// (tick >> log2 interval) & 15 to PlayerImpl::ProcessCommandPacket (0x40E300) at 0x489FF5, before the units act
+// (0x43AD30), and at the end of the cycle resets the local player's newest slot to ctNop (0x48A035). So the packets
+// that reach 0x489FF5 are the player's orders that took effect, after any overwrite, at the tick they took effect: the
+// recorder logs the local player's there.
+//
+// The replay can't write the slot the way the UI did: the script runs before OnIdle's ctMachineSettings write, which
+// would overwrite it on some ticks. `T packet TYPE HEX` instead puts the packet into the slot as ProcessCommandPacket is
+// about to read it, in the cycle that starts at tick T, so the same bytes run at the same point of the same cycle.
+// ctNop and ctMachineSettings (the machine's speed, memory and window size, read only for a debug line, 0x467CB0) are
+// not recorded; the replay's game sends its own.
+//
+// Saves and loads: TApp::SaveGame (0x4877E0, called at 0x487269; GameImpl::SaveGame's result at 0x48786B) and
+// TApp::LoadGame (0x4878F0, called at 0x4865F2, 0x487394, 0x48754D, 0x488F55) are hooked. A save writes a sidecar
+// folder `<save file>.rec` with the recording so far (packets.txt), the telemetry so far and meta.txt (tick, the
+// session's identity); a load puts them back, so the recording is the one history that led to the loaded game. Every
+// packet the save's history ran had run before the save's tick, and the slots pending at that tick are in the save
+// (they run again after the load, and are recorded then).
+
+constexpr uintptr_t CallSlotPacket       = 0x489FF5;  // GameImpl::ProcessGameCycle: PlayerImpl::ProcessCommandPacket(slot)
+constexpr uintptr_t CallTAppSaveGame     = 0x487269;  // TApp::SaveGame(name, dialog) (0x4877E0)
+constexpr uintptr_t CallGameImplSaveGame = 0x48786B;  // in TApp::SaveGame: GameImpl::SaveGame(stream, dialog), 0 = failed
+constexpr uintptr_t CallsTAppLoadGame[]  = { 0x4865F2, 0x487394, 0x48754D, 0x488F55 };  // TApp::LoadGame(name) (0x4878F0)
+
+struct RawPacket { int type = 0;  std::vector<uint8_t> data; };
+using SlotPacketFn = ibool(__thiscall*)(PlayerImpl*, CommandPacket*);
+using TAppSaveFn   = void(__thiscall*)(void*, const char*, void*);
+using GameSaveFn   = ibool(__thiscall*)(GameImpl*, void*, void*);
+using TAppLoadFn   = int(__thiscall*)(void*, const char*);
+SlotPacketFn g_origSlotPacket = nullptr;
+TAppSaveFn   g_origTAppSave   = nullptr;
+GameSaveFn   g_origGameSave   = nullptr;
+TAppLoadFn   g_origTAppLoad   = nullptr;
+std::map<int, RawPacket> g_packetDue;   // `packet` lines: the tick of the cycle that runs it -> the packet
+bool g_record = false;                  // OP2H_RECORD
+std::vector<std::string> g_recLines;    // its packet lines (the history that led here)
+std::vector<std::string> g_recLoads;    // header lines: each load and what it rolled back
+std::string g_recSetup;                 // the setup script (--script), copied to the top of the recording
+std::string g_recBroken;                // why the recording no longer replays, if it doesn't
+int g_saveResult = -1;
+
+std::string HexStr(const uint8_t* p, size_t n) {
+  static const char digits[] = "0123456789abcdef";
+  std::string s;
+  for (size_t i = 0; i < n; ++i) { s += digits[p[i] >> 4];  s += digits[p[i] & 15]; }
+  return s;
+}
+
+// A unit as a recording's comments name it: `id(TYPE@x,y)` in file tiles, as it is when its order runs.
+std::string UnitWord(int id) {
+  const Unit u(id);
+  if (!Exists(u)) return std::to_string(id);
+  const Location l = u.GetLocation();
+  char b[96];
+  snprintf(b, sizeof b, "%d(%s@%d,%d)", id, TypeName(u.GetType()), l.x - PadTiles(), l.y);
+  return b;
+}
+
+// What a recorded packet does, for the comment after its line: `= verb ...` when the harness verb builds the same bytes
+// (one unit, tile centres: MovePacket, WaypointPacket, TargetedPacket), else `~ verb ...`, the nearest verb or a
+// description (several units, a pixel that isn't a tile's centre, a packet no verb sends). Tiles are file tiles.
+std::string DescribePacket(const CommandPacket& p) {
+  const uint8_t* d = p.data.buffer;
+  const size_t n = std::min<size_t>(p.dataLength, CommandPacketDataSize);
+  size_t i = 0;
+  bool ok = true;
+  auto u8  = [&]() -> int { if (i + 1 > n) { ok = false;  return 0; }  return d[i++]; };
+  auto u16 = [&]() -> int { if (i + 2 > n) { ok = false;  return 0; }  const int v = d[i] | d[i + 1] << 8;  i += 2;  return v; };
+  auto u32 = [&]() -> uint32_t { const uint32_t lo = u16();  return lo | uint32_t(u16()) << 16; };
+  std::vector<int> ids;
+  auto units = [&]() { const int k = int8_t(u8());  if (k <= 0) ok = false;  for (int j = 0; j < k && ok; ++j) ids.push_back(u16()); };
+  auto unitList = [&]() { std::string s;  for (int id : ids) s += (s.empty() ? "" : " ") + UnitWord(id);  return s; };
+  auto same = [&](const CommandPacket& q) {
+    return q.type == p.type && q.dataLength == p.dataLength && memcmp(q.data.buffer, d, n) == 0;
+  };
+  const int pad = PadTiles();
+  auto tile = [&](int x, int y) { return std::to_string(x - pad) + " " + std::to_string(y); };
+  auto item = [](int id) { return std::string(TypeName(MapID(id))); };
+  const CommandType type = p.type;
+  const std::string name = CommandName(int(type));
+  std::string out;
+  switch (type) {
+  case CommandType::Move: case CommandType::Dock: case CommandType::DockEG: case CommandType::StandGround:
+  case CommandType::Patrol: {
+    units();
+    const int nw = u16();
+    std::vector<Location> locs;
+    std::vector<int> ranges;
+    std::string words;
+    bool centred = true;
+    for (int k = 0; k < nw && ok; ++k) {
+      const uint32_t w = u32();
+      const int px = w & 0x7FFF, py = (w >> 15) & 0x3FFF, r = int(w >> 29);
+      centred &= px % 32 == 16 && py % 32 == 16;
+      locs.push_back(Location(px / 32, py / 32));
+      ranges.push_back(r);
+      words += " " + std::to_string(px / 32 - pad) + "," + std::to_string(py / 32) + (r ? "," + std::to_string(r) : "");
+    }
+    const int loop = type == CommandType::Patrol ? u16() : -1;
+    if (!ok || nw < 1 || nw > 8) break;
+    const bool simple = nw == 1 && ranges[0] == 0 && type != CommandType::StandGround && type != CommandType::Patrol;
+    const char* verb = type == CommandType::Dock ? "dock" : type == CommandType::DockEG ? "dockeg"
+                     : type == CommandType::StandGround ? "standground" : type == CommandType::Patrol ? "patrol"
+                     : simple ? "move" : "movewp";
+    std::string args = simple ? " " + tile(locs[0].x, locs[0].y) : (loop >= 0 ? " " + std::to_string(loop) : "") + words;
+    if (ids.size() == 1) {
+      const CommandPacket q = simple ? MovePacket(ids[0], locs[0], type) : WaypointPacket(ids[0], type, locs, ranges, loop);
+      if (same(q)) return "= " + std::string(verb) + " " + std::to_string(ids[0]) + args + "  " + UnitWord(ids[0]);
+    }
+    return "~ " + std::string(verb) + " " + unitList() + args + (centred ? "" : " (not tile centres)");
+  }
+  case CommandType::Attack: case CommandType::Guard: {
+    units();
+    u16();
+    const int x = u16(), y = u16();
+    if (!ok) break;
+    const bool onTile = y != 0xFFFF;
+    const std::string verb = onTile ? "attackground" : type == CommandType::Guard ? "guard" : "attack";
+    const std::string args = onTile ? tile(x, y) : UnitWord(x);
+    if (ids.size() == 1 && same(TargetedPacket(ids[0], type, x, y, onTile)))
+      return "= " + verb + " " + std::to_string(ids[0]) + " " + (onTile ? tile(x, y) : std::to_string(x)) + "  " +
+             UnitWord(ids[0]) + (onTile ? "" : " -> " + args);
+    return "~ " + verb + " " + unitList() + " -> " + args;
+  }
+  case CommandType::Stop: case CommandType::SelfDestruct: case CommandType::Scatter: {
+    units();
+    if (!ok) break;
+    return "~ " + std::string(type == CommandType::Stop ? "stop" : type == CommandType::Scatter ? "scatter" : "selfdestruct") +
+           " " + unitList();
+  }
+  case CommandType::LightToggle: {
+    units();
+    const int on = u16();
+    if (!ok) break;
+    return "~ lights " + unitList() + " " + std::to_string(on);
+  }
+  case CommandType::Doze: case CommandType::BuildWall: case CommandType::Build: case CommandType::RemoveWall: {
+    units();
+    if (type == CommandType::Build || type == CommandType::RemoveWall) { const int nw = u16();  for (int k = 0; k < nw && ok; ++k) u32(); }
+    const int x1 = u16(), y1 = u16(), x2 = u16(), y2 = u16();
+    const int wall = type == CommandType::BuildWall ? u16() : 0;
+    if (!ok || ids.empty()) break;
+    if (type == CommandType::Doze) return "~ doze " + unitList() + " " + tile(x1, y1) + " " + tile(x2, y2);
+    if (type == CommandType::RemoveWall) return "~ removewall " + unitList() + " " + tile(x1, y1);
+    if (type == CommandType::BuildWall)  // the packet's bottom-right is exclusive, the verb's inclusive
+      return "~ buildwall " + unitList() + " " + tile(x1, y1) + " " + tile(x2 - 1, y2 - 1) + " " + item(wall);
+    const Unit cv(ids[0]);
+    return "~ build " + unitList() + " " + tile(x2, y2) + (Exists(cv) ? " (kit " + item(int(cv.GetMapObject()->cargo_)) + ")" : "");
+  }
+  case CommandType::CargoRoute: {
+    units();
+    const int nw = u16();
+    for (int k = 0; k < nw && ok; ++k) u32();
+    u16(), u16();
+    const int mine = u16(), smelter = u16();
+    if (!ok) break;
+    return "~ route " + unitList() + " " + UnitWord(mine) + " " + UnitWord(smelter);
+  }
+  case CommandType::RepairObj: case CommandType::Reprogram: case CommandType::Dismantle: {
+    units();
+    u16();
+    const int target = u16();
+    if (!ok || ids.empty()) break;
+    const std::string verb = type == CommandType::RepairObj ? "repairobj" : type == CommandType::Reprogram ? "reprogram" : "dismantle";
+    std::string more;
+    for (size_t k = 1; k < ids.size(); ++k) more += " " + UnitWord(ids[k]);
+    return "~ " + verb + " " + UnitWord(ids[0]) + " " + (target ? UnitWord(target) : "none") + more;
+  }
+  case CommandType::Produce: {
+    const int f = u16(), what = u16(), weapon = u16();
+    if (!ok) break;
+    return "~ produce " + UnitWord(f) + " " + item(what) + (weapon && weapon != 0xFFFF ? " " + item(weapon) : "");
+  }
+  case CommandType::Research: {
+    const int lab = u16(), num = u16(), sci = u16();
+    if (!ok) break;
+    const int id = num < g_research.numTechs_ ? g_research.ppTechInfos_[num]->techID : -1;
+    return "~ research " + UnitWord(lab) + " " + std::to_string(id) + " " + std::to_string(sci);
+  }
+  case CommandType::TrainScientists: { const int u = u16(), k = u16();  if (!ok) break;  return "~ train " + UnitWord(u) + " " + std::to_string(k); }
+  case CommandType::TransferCargo: {
+    const int u = u16(), bay = u16(), second = u16();
+    if (!ok) break;
+    return "~ transfercargo " + UnitWord(u) + " " + std::to_string(bay) + (second ? " " + std::to_string(second) : "");
+  }
+  case CommandType::Launch: {
+    const int u = u16(), x = u16(), y = u16();
+    if (!ok) break;
+    return "~ launch " + UnitWord(u) + (x || y ? " " + std::to_string(x) + " " + std::to_string(y) : "");
+  }
+  case CommandType::LoadCargo: case CommandType::UnloadCargo: case CommandType::Idle: case CommandType::Unidle: {
+    const int u = u16();
+    if (!ok) break;
+    const char* verb = type == CommandType::LoadCargo ? "load" : type == CommandType::UnloadCargo ? "unload"
+                     : type == CommandType::Idle ? "idle" : "unidle";
+    return "~ " + std::string(verb) + " " + UnitWord(u);
+  }
+  case CommandType::GameOpt: {
+    u16();
+    const int var = u16(), value = u16(), player = u16();
+    if (!ok) break;
+    char b[96];
+    snprintf(b, sizeof b, "GameOpt %d = %d, player %d%s", var, value, player, var == 0x14 ? " (game speed x4)" : "");
+    return b;
+  }
+  case CommandType::Chat: return "Chat \"" + std::string(reinterpret_cast<const char*>(d) + 2, strnlen(reinterpret_cast<const char*>(d) + 2, n > 2 ? n - 2 : 0)) + "\"";
+  default: break;
+  }
+  if (!ids.empty()) return name + " " + unitList();
+  return name;
+}
+
+// The recording file: header, setup script, then one line per packet. Rewritten whole on a load; appended to otherwise.
+std::string UnixPath(std::string p) {
+  if (p.size() > 2 && (p[0] == 'Z' || p[0] == 'z') && p[1] == ':') p = p.substr(2);
+  for (auto& ch : p) if (ch == '\\') ch = '/';
+  return p;
+}
+
+void WriteRecording() {
+  if (g_recFile) fclose(g_recFile);
+  g_recFile = fopen((cfg.out + "\\recording.txt").c_str(), "w");
+  if (!g_recFile) { Log("record: cannot write recording.txt");  return; }
+  FILE* f = g_recFile;
+  fprintf(f, "# Recorded play of %s (harness/run.sh --record; harness/README.md \"Recording your own play\").\n", cfg.mission.c_str());
+  fprintf(f, "# seed %d, difficulty %d, campaign %s\n", cfg.seed, cfg.difficulty,
+          cfg.campaign.empty() ? "none" : UnixPath(cfg.campaign).c_str());
+  fprintf(f, "# Replay: harness/run.sh --mission %s%s%s --seed %d --difficulty %d --script <this file> --ticks 0 --out <dir>\n",
+          cfg.mission.c_str(), cfg.campaign.empty() ? "" : " --campaign ", cfg.campaign.empty() ? "" : UnixPath(cfg.campaign).c_str(),
+          cfg.seed, cfg.difficulty);
+  fputs("# `T packet TYPE HEX`: the command packet the player's UI sent, run in the cycle that starts at tick T. After it,\n"
+        "# `= verb ...` is the harness verb that sends the same bytes (between cycles, not inside one), `~ verb ...` the\n"
+        "# nearest verb or what the packet does. Units are `id(TYPE@x,y)` when the packet ran; tiles are file tiles (the\n"
+        "# verbs need `0 coords file` before them).\n", f);
+  for (const auto& l : g_recLoads) fprintf(f, "# %s\n", l.c_str());
+  if (!g_recBroken.empty()) fprintf(f, "# BROKEN: %s\n", g_recBroken.c_str());
+  if (!g_recSetup.empty()) {
+    fputs("# --- setup script (--script) ---\n", f);
+    // Its `savegame` and `loadgame` lines made the session's history; the replay is that history, without them.
+    std::istringstream in(g_recSetup);
+    for (std::string line; std::getline(in, line);) {
+      std::istringstream words(line);
+      std::string tick, verb;
+      words >> tick >> verb;
+      fprintf(f, "%s%s\n", verb == "savegame" || verb == "loadgame" ? "# (the recorded session only) " : "", line.c_str());
+    }
+    fputs("# --- recorded play ---\n", f);
+  }
+  for (const auto& l : g_recLines) fprintf(f, "%s\n", l.c_str());
+  fflush(f);
+}
+
+void RecordPacket(int tick, const CommandPacket& p) {
+  const size_t n = std::min<size_t>(p.dataLength, CommandPacketDataSize);
+  std::string line = std::to_string(tick) + " packet " + std::to_string(int(p.type)) + " " + (n ? HexStr(p.data.buffer, n) : "-");
+  // Quitting is the session's end, not part of the game: kept as a comment.
+  if (p.type == CommandType::Quit) line = "# " + line + "  (not replayed)";
+  line += "  # " + DescribePacket(p);
+  g_recLines.push_back(line);
+  if (g_recFile) { fprintf(g_recFile, "%s\n", line.c_str());  fflush(g_recFile); }
+}
+
+ibool __fastcall SlotPacketHook(PlayerImpl* self, void*, CommandPacket* p) {
+  if (self == g_gameImpl.GetPlayer(g_gameImpl.localPlayer_)) {
+    const int tick = g_gameImpl.tick_;
+    if (auto it = g_packetDue.find(tick); it != g_packetDue.end()) {
+      p->type = CommandType(it->second.type);
+      p->dataLength = uint16(it->second.data.size());
+      if (!it->second.data.empty()) memcpy(p->data.buffer, it->second.data.data(), it->second.data.size());
+      g_packetDue.erase(it);
+    }
+    if (p->type != CommandType::Nop && p->type != CommandType::MachineSettings) {
+      const size_t n = std::min<size_t>(p->dataLength, CommandPacketDataSize);
+      Log("packet: tick %d %s %d %s", tick, CommandName(int(p->type)), int(p->type), n ? HexStr(p->data.buffer, n).c_str() : "-");
+      if (g_record) RecordPacket(tick, *p);
+    }
+  }
+  return g_origSlotPacket(self, p);
+}
+
+// `T packet TYPE HEX|-`: the local player's packet for the cycle starting at tick T (a multiple of the interval).
+void QueuePacket(const ScriptCmd& c, int tick) {
+  auto warn = [&](const char* why) { Log("script: WARN tick %d line %d: `packet`: %s (skipped)", c.tick, c.line, why); };
+  if (c.args.size() < 2) return warn("needs a type and the data as hex (`-` for none)");
+  RawPacket r;
+  r.type = atoi(c.args[0].c_str());
+  const std::string& hex = c.args[1];
+  if (hex != "-") {
+    if (hex.size() % 2 || hex.size() / 2 > CommandPacketDataSize) return warn("bad hex data");
+    for (size_t k = 0; k < hex.size(); k += 2) {
+      char* end = nullptr;
+      const std::string byte = hex.substr(k, 2);
+      const long v = strtol(byte.c_str(), &end, 16);
+      if (*end || !isxdigit(uint8_t(byte[0]))) return warn("bad hex data");
+      r.data.push_back(uint8_t(v));
+    }
+  }
+  const int interval = g_gameImpl.commandPacketProcessingInterval_;
+  if (interval <= 0 || c.tick % interval) return warn("not a command-processing tick (a multiple of 4)");
+  if (tick > c.tick) return warn("its cycle has run already (the first script tick is 1)");
+  if (g_packetDue.count(c.tick)) Log("script: WARN tick %d line %d: `packet`: a second packet for this cycle replaces the first", c.tick, c.line);
+  g_packetDue[c.tick] = r;
+}
+
+void InstallPacketHook() {
+  if (g_origSlotPacket) return;
+  g_origSlotPacket = reinterpret_cast<SlotPacketFn>(RelinkCall(CallSlotPacket, reinterpret_cast<void*>(&SlotPacketHook)));
+  Log("packet hook: %s", g_origSlotPacket ? "installed" : "FAILED");
+}
+
+uint64_t Fnv(const std::string& s, uint64_t h = 1469598103934665603ull) {
+  for (unsigned char ch : s) { h ^= ch;  h *= 1099511628211ull; }
+  return h;
+}
+
+std::string ReadFile(const std::string& path) {
+  std::ifstream f(path, std::ios::binary);
+  std::ostringstream s;
+  s << f.rdbuf();
+  return s.str();
+}
+
+// What a save's recording must match to be put back: the same start (mission, seed, difficulty, carry-over, setup).
+std::string RecIdentity() {
+  char b[32];
+  const std::string all = cfg.mission + "|" + std::to_string(cfg.seed) + "|" + std::to_string(cfg.difficulty) + "|" +
+                          (cfg.campaign.empty() ? "" : ReadFile(cfg.campaign)) + "|" + g_recSetup;
+  snprintf(b, sizeof b, "%016llx", (unsigned long long)Fnv(all));
+  return b;
+}
+
+std::string SidecarDir(const char* save) {
+  char full[MAX_PATH * 2] = {};
+  if (!GetFullPathNameA(save, sizeof full, full, nullptr)) strncpy(full, save, sizeof full - 1);
+  return std::string(full) + ".rec";
+}
+
+void WriteSidecar(const char* save) {
+  const std::string dir = SidecarDir(save);
+  CreateDirectoryA(dir.c_str(), nullptr);
+  DeleteFileA((dir + "\\meta.txt").c_str());  // Written last: a sidecar without it is incomplete.
+  if (FILE* f = fopen((dir + "\\packets.txt").c_str(), "w")) {
+    for (const auto& l : g_recLines) fprintf(f, "%s\n", l.c_str());
+    fclose(f);
+  }
+  for (FILE* f : { g_telem, g_trace }) if (f) fflush(f);
+  for (const char* name : { "telemetry.jsonl", "trace.jsonl" }) {
+    DeleteFileA((dir + "\\" + name).c_str());
+    CopyFileA((cfg.out + "\\" + name).c_str(), (dir + "\\" + name).c_str(), FALSE);
+  }
+  FILE* f = fopen((dir + "\\meta.txt").c_str(), "w");
+  if (f) {
+    fprintf(f, "tick %d\nidentity %s\nmission %s\nbroken %s\n", g_gameImpl.tick_, RecIdentity().c_str(), cfg.mission.c_str(),
+            g_recBroken.c_str());
+    fclose(f);
+  }
+  Log("record: saved %s at tick %d with %u packets -> %s", save, g_gameImpl.tick_, unsigned(g_recLines.size()),
+      f ? dir.c_str() : "(sidecar FAILED)");
+}
+
+// The harness's own clocks after a load took the game back to `tick`: samples continue from there, and the script
+// lines after it run again (they belong to the history after the save; `savegame` and `loadgame` lines run once only).
+bool g_loaded = false;  // A load happened (RunSaveLoad checks it).
+void AfterLoad(int tick) {
+  if (cfg.telemEvery > 0) g_nextTelem = (tick / cfg.telemEvery + 1) * cfg.telemEvery;
+  if (cfg.traceEvery > 0) g_nextTrace = (tick / cfg.traceEvery + 1) * cfg.traceEvery;
+  g_lastTelemTick = g_lastTraceTick = -1;
+  g_lastTick = tick;
+  g_scriptPos = 0;
+  while (g_scriptPos < g_script.size() && g_script[g_scriptPos].tick <= tick) ++g_scriptPos;
+  g_packetDue.clear();
+  g_loaded = true;
+}
+
+void RestoreSidecar(const char* save, int fromTick) {
+  const int tick = g_gameImpl.tick_;
+  const std::string dir = SidecarDir(save);
+  std::map<std::string, std::string> meta;
+  {
+    std::ifstream f(dir + "\\meta.txt");
+    std::string line;
+    while (std::getline(f, line)) {
+      const size_t sp = line.find(' ');
+      if (sp != std::string::npos) meta[line.substr(0, sp)] = line.substr(sp + 1);
+    }
+  }
+  char what[512];
+  if (meta.empty() || meta["identity"] != RecIdentity()) {
+    snprintf(what, sizeof what, "loaded %s (tick %d), which has %s: the recording does not lead to this game", save, tick,
+             meta.empty() ? "no recording (saved outside a recording session?)" : "the recording of another start (mission, seed, campaign or setup)");
+    g_recBroken = what;
+    Log("record: WARN %s", what);
+    g_recLoads.push_back(what);
+    AfterLoad(tick);
+    WriteRecording();
+    return;
+  }
+  if (atoi(meta["tick"].c_str()) != tick) Log("record: WARN %s: saved at tick %s, loaded at tick %d", save, meta["tick"].c_str(), tick);
+  g_recBroken = meta["broken"];
+  const size_t before = g_recLines.size();
+  g_recLines.clear();
+  {
+    std::ifstream f(dir + "\\packets.txt");
+    std::string line;
+    while (std::getline(f, line)) if (!line.empty()) g_recLines.push_back(line);
+  }
+  // The telemetry (and trace) of the save's history, continued from the save's tick.
+  FILE** files[] = { &g_telem, &g_trace };
+  const char* names[] = { "telemetry.jsonl", "trace.jsonl" };
+  for (int k = 0; k < 2; ++k) {
+    if (!*files[k]) continue;
+    fclose(*files[k]);
+    const std::string mine = cfg.out + "\\" + names[k];
+    if (!CopyFileA((dir + "\\" + names[k]).c_str(), mine.c_str(), FALSE)) DeleteFileA(mine.c_str());
+    *files[k] = fopen(mine.c_str(), "a");
+  }
+  AfterLoad(tick);
+  snprintf(what, sizeof what, "load %s: from tick %d back to its tick %d, %u packets kept, %d of the abandoned history dropped",
+           save, fromTick, tick, unsigned(g_recLines.size()), int(before) - int(g_recLines.size()));
+  g_recLoads.push_back(what);
+  Log("record: %s", what);
+  WriteRecording();
+}
+
+ibool __fastcall GameSaveHook(GameImpl* self, void*, void* stream, void* dialog) {
+  const ibool ok = g_origGameSave(self, stream, dialog);
+  g_saveResult = ok;
+  return ok;
+}
+
+void __fastcall TAppSaveHook(void* self, void*, const char* name, void* dialog) {
+  g_saveResult = -1;
+  g_origTAppSave(self, name, dialog);
+  if (g_saveResult > 0) WriteSidecar(name);
+  else Log("record: saving %s failed (%d): no sidecar", name ? name : "?", g_saveResult);
+}
+
+int __fastcall TAppLoadHook(void* self, void*, const char* name) {
+  const int from = g_gameImpl.tick_;
+  const int ok = g_origTAppLoad(self, name);
+  if (ok) RestoreSidecar(name, from);
+  else Log("record: loading %s failed", name ? name : "?");
+  return ok;
+}
+
+// `savegame NAME` / `loadgame NAME`: TApp::SaveGame / TApp::LoadGame on OPU\saves\NAME (or a path), as the dialogs do, through
+// the recording's hooks in a recording. For testing recordings (a load from the script rolls a recording back like
+// one from the dialog): each runs once, and a recording keeps them as comments.
+// They run after the cycle's samples (telemetry, trace) and session state, as a save or load from the dialog comes
+// after the cycle; RunSaveLoad at the end of GameCycleHook.
+std::vector<std::pair<std::string, std::string>> g_saveLoadDue;  // verb, path
+
+void SaveLoadVerb(const ScriptCmd& c, int tick) {
+  if (c.args.empty()) { Log("script: WARN tick %d line %d: `%s` needs a file name (skipped)", tick, c.line, c.verb.c_str());  return; }
+  const std::string& a = c.args[0];
+  char exe[MAX_PATH] = {};
+  GetModuleFileNameA(nullptr, exe, sizeof exe - 1);
+  std::string dir = exe;
+  dir = dir.substr(0, dir.find_last_of('\\') + 1);  // The game folder, as the dialogs name their files
+  g_saveLoadDue.emplace_back(c.verb, a.find_first_of(":\\/") != std::string::npos ? a : dir + "OPU\\saves\\" + a);
+}
+
+void RunSaveLoad(int tick) {
+  for (size_t k = 0; k < g_saveLoadDue.size(); ++k) {
+    const auto [verb, path] = g_saveLoadDue[k];
+    if (verb == "savegame") {
+      if (g_record) TAppSaveHook(&g_tApp, nullptr, path.c_str(), nullptr);
+      else g_tApp.SaveGame(path);
+      Log("script: save %s at tick %d", path.c_str(), tick);
+      continue;
+    }
+    const int ok = g_record ? TAppLoadHook(&g_tApp, nullptr, path.c_str()) : g_tApp.LoadGame(path);
+    Log("script: load %s at tick %d: %s, now tick %d", path.c_str(), tick, ok ? "ok" : "FAILED", g_gameImpl.tick_);
+    if (ok && !g_record) AfterLoad(g_gameImpl.tick_);
+    if (ok) break;  // Anything after a load in the same tick belonged to the abandoned game.
+  }
+  g_saveLoadDue.clear();
+}
+
+void InstallRecordHooks() {
+  InstallPacketHook();
+  g_origGameSave = reinterpret_cast<GameSaveFn>(RelinkCall(CallGameImplSaveGame, reinterpret_cast<void*>(&GameSaveHook)));
+  g_origTAppSave = reinterpret_cast<TAppSaveFn>(RelinkCall(CallTAppSaveGame, reinterpret_cast<void*>(&TAppSaveHook)));
+  for (uintptr_t at : CallsTAppLoadGame) {
+    void* prev = RelinkCall(at, reinterpret_cast<void*>(&TAppLoadHook));
+    if (!g_origTAppLoad) g_origTAppLoad = reinterpret_cast<TAppLoadFn>(prev);
+    else if (prev != reinterpret_cast<void*>(g_origTAppLoad)) Log("record: WARN the load call at %08x goes to %p, not %p", unsigned(at), prev, (void*)g_origTAppLoad);
+  }
+  Log("record: hooks save %p/%p load %p", (void*)g_origTAppSave, (void*)g_origGameSave, (void*)g_origTAppLoad);
+  if (!cfg.script.empty()) g_recSetup = ReadFile(cfg.script);
+  WriteRecording();
+}
+
 // Whether to render after this cycle: frames are drawn for a few ticks ahead of any capture so the panes are current.
 bool WantDraw(int tick) {
   constexpr int Lead = DrawLead;
@@ -2836,7 +3358,7 @@ void __fastcall GameCycleHook(GameImpl* self, void*) {
   PresentTick(tick);
   if (tick == g_lastTick) return;
   if (g_lastTick < 0) {
-    ParkCursor();
+    if (!g_record) ParkCursor();  // A recording is played with the real mouse and keys.
     g_startTime = Now();
     Log("first game cycle: tick %d, map %dx%d, padding %d tiles", tick, GameMap::GetWidth(), GameMap::GetHeight(),
         PadTiles());
@@ -2857,7 +3379,14 @@ void __fastcall GameCycleHook(GameImpl* self, void*) {
     else ++k;
   }
   NameScan();
-  while (g_scriptPos < g_script.size() && g_script[g_scriptPos].tick <= tick) RunScriptCmd(g_script[g_scriptPos++], tick);
+  while (g_scriptPos < g_script.size() && g_script[g_scriptPos].tick <= tick) {
+    ScriptCmd& c = g_script[g_scriptPos++];
+    if (c.verb == "savegame" || c.verb == "loadgame") {  // Once each: a load rewinds the script to the save's tick.
+      if (c.ran) continue;
+      c.ran = true;
+    }
+    RunScriptCmd(c, tick);
+  }
   if (cfg.turbo) SetDrawing(WantDraw(tick));
   if (g_botTick) g_botTick(tick);
   AudioTick(tick);
@@ -2867,6 +3396,11 @@ void __fastcall GameCycleHook(GameImpl* self, void*) {
   if (cfg.traceEvery > 0 && tick >= g_nextTrace) { WriteTrace(tick);      g_nextTrace = (tick / cfg.traceEvery + 1) * cfg.traceEvery; }
   if (cfg.shotEvery  > 0 && tick >= g_nextShot)  { TakeShot(tick);        g_nextShot  = (tick / cfg.shotEvery  + 1) * cfg.shotEvery;  }
   SessionTick(tick);
+  if (!g_saveLoadDue.empty()) {
+    g_loaded = false;
+    RunSaveLoad(tick);
+    if (g_loaded) return;  // The loaded game's end and tick limit are checked after its next cycle.
+  }
   if (!g_stopReason.empty()) Quit(("stop: " + g_stopReason).c_str());
   if (self->gameTermReasons_ != GameTermReasons::Running) Quit("mission ended");
   if (cfg.ticks > 0 && tick >= cfg.ticks) Quit("tick limit");
@@ -3607,6 +4141,7 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   g_eco          = EnvInt("OP2H_ECO", 0) != 0;
   cfg.width      = EnvInt("OP2H_WIDTH", 1024);
   cfg.height     = EnvInt("OP2H_HEIGHT", 768);
+  g_record       = EnvInt("OP2H_RECORD", 0) != 0;
 
   g_log   = fopen((cfg.out + "\\harness.log").c_str(), "w");
   g_telem = cfg.telemEvery > 0 ? fopen((cfg.out + "\\telemetry.jsonl").c_str(), "w") : nullptr;
@@ -3624,7 +4159,9 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   const std::string ini = cfg.out + "\\outpost2.ini";
   if (CopyFileA(g_configFile.iniPath_, ini.c_str(), FALSE) && ini.size() < sizeof(g_configFile.iniPath_)) {
     strcpy(g_configFile.iniPath_, ini.c_str());
-    for (const char* key : { "Music", "Sound" }) WritePrivateProfileStringA("Game", key, "0", ini.c_str());
+    // A recording keeps the player's sound and music unless asked (OP2H_SILENT).
+    if (!g_record || EnvInt("OP2H_SILENT", 0))
+      for (const char* key : { "Music", "Sound" }) WritePrivateProfileStringA("Game", key, "0", ini.c_str());
     // Window geometry comes from here at creation; resizing later would shift the mission's initial view.
     // The game's frame adds 24x34 px around the client area.
     const std::pair<const char*, int> window[] = {
@@ -3648,15 +4185,21 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   memcpy(g_drawPanesCode, reinterpret_cast<void*>(OnIdleDrawPanes), 2);
   InstallPresentHook();
   InstallRngLog();
-  JumpTo(FnOP2MessageBox, reinterpret_cast<void*>(&MessageBoxHook));
+  // A recording is a person playing: the game's own questions (save over a slot, quit) are theirs to answer, and the
+  // mouse and keys are the real ones.
+  if (!g_record || EnvInt("OP2H_NOBODY", 0)) JumpTo(FnOP2MessageBox, reinterpret_cast<void*>(&MessageBoxHook));
   if (g_audio) InstallAudioHooks();
   else if (g_events) InstallMessageHook();
   SetWindowsHookExA(WH_CBT, &MissionDialogCbt, nullptr, GetCurrentThreadId());
-  g_realGetCursorPos     = reinterpret_cast<GetCursorPosFn>(PatchIat(IatGetCursorPos, reinterpret_cast<void*>(&VirtualGetCursorPos)));
-  g_realGetAsyncKeyState =
-    reinterpret_cast<GetAsyncKeyStateFn>(PatchIat(IatGetAsyncKeyState, reinterpret_cast<void*>(&VirtualGetAsyncKeyState)));
+  if (!g_record) {
+    g_realGetCursorPos     = reinterpret_cast<GetCursorPosFn>(PatchIat(IatGetCursorPos, reinterpret_cast<void*>(&VirtualGetCursorPos)));
+    g_realGetAsyncKeyState =
+      reinterpret_cast<GetAsyncKeyStateFn>(PatchIat(IatGetAsyncKeyState, reinterpret_cast<void*>(&VirtualGetAsyncKeyState)));
+  }
 
   if (!cfg.script.empty()) LoadScript(cfg.script);
+  if (g_record) InstallRecordHooks();
+  else if (std::any_of(g_script.begin(), g_script.end(), [](const ScriptCmd& c) { return c.verb == "packet"; })) InstallPacketHook();
   if (!cfg.bot.empty()) {
     if (HMODULE h = LoadLibraryA(cfg.bot.c_str())) g_botTick = reinterpret_cast<BotTickFn>(GetProcAddress(h, "HarnessBotTick"));
     Log("bot: %s -> %s", cfg.bot.c_str(), g_botTick ? "ok" : "HarnessBotTick not found");

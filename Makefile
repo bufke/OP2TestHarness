@@ -60,7 +60,12 @@ check: install
 	  python3 test/session_check.py; \
 	  status=$$?; rm -rf "$(OPU_DIR)/maps/HarnessTest"; test $$status = 0
 
+# The play-and-record mode (README "Recording your own play"): a short e01 session played with real X input under
+# Xvfb, with a save and a load, replayed and compared (about a minute; not part of `check`: it plays in real time).
+record-check: install
+	python3 test/record_check.py --out build/record_check
+
 clean:
 	rm -rf build
 
-.PHONY: all install uninstall check clean
+.PHONY: all install uninstall check record-check clean
