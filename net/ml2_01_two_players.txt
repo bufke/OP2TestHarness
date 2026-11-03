@@ -1,0 +1,27 @@
+# ml2_01 with orders from both players, for network game tests (docs/multiplayer.md "Stage 1b"): every machine plays
+# this script, and each gives only its own player's lines (net.rs drops the others'), so the game has orders from
+# both sides. Player 0 follows the start of harness/oracle/missions/ml2_01.txt (a mine, the Vehicle Factory, ore
+# routes, research); player 1 (units 45-53, the east base) sends its ConVecs and trucks around and its Robo-Miner to
+# a beacon. Not an oracle script: nothing here was measured on the original.
+#   op2-engine --host --mission ml2_01.dll --script <this file> --until-tick 3000
+#   op2-engine --join HOST --script <this file> --until-tick 3000
+0 coords file
+1      build 35 34 5 MINE
+1      move 33 16 15
+5      move 45 76 20
+9      move 46 70 14
+13     move 47 78 24
+219    transfercargo 25 3
+300    move 48 60 12
+420    move 45 84 10
+500    build 33 22 13
+640    move 46 74 22
+900    move 47 66 18
+1232   route 28 54 23
+1232   route 30 54 23
+1400   move 48 80 16
+1700   move 45 70 26
+2000   move 46 82 12
+2440   research 27 3407 12
+2600   move 47 72 10
+2800   move 48 64 22
