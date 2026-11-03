@@ -636,10 +636,14 @@ tools/target/debug/op2-missionhost netlog /tmp/net --bundle /tmp/net/desync.tar.
   datagram, sent and received), and makes a `--script`'s orders the local player's own commands: their packets go into
   the player's pending slot, as the UI's do, and cross the network. Orders for another player's units are skipped;
   verbs that change the game directly (spawn, setcell, poke, ...) would make the copies differ. One order per player per
-  4-tick turn, and none on turns the frame sends its machine settings ((tick / 4) % 8 == 7). `--turbo` lifts the frame
-  limiter (the turn exchange still keeps the copies in lockstep) and draws the panes 4 ticks in 256.
+  4-tick turn, and none on turns the frame sends its machine settings ((tick / 4) % 8 == 7): harness.log WARNs when an
+  order replaces a pending command or a queued order didn't run. `packet` lines are refused (they would run on one
+  machine only). `--turbo` lifts the frame limiter (the turn exchange still keeps the copies in lockstep) and draws the
+  panes 4 ticks in 256, and every tick from `--draw-from TICK` on (netgame.py passes its `--ticks`, so the closing
+  screenshots are current).
 - OUT/summary.json says whether both copies executed the same orders and kept the same telemetry on every tick both
-  have (they quit a few hundred ticks apart in turbo). Recorded game: `harness/oracle/runs/net_ml2_08`.
+  have (they quit a few hundred ticks apart in turbo). Recorded game: `harness/oracle/runs/net_ml2_08`, a `netgame` run in
+  accuracy/recordings.toml (not re-recordable: runs.py checks its files and refuses to record it).
 
 ## Coordinates
 

@@ -383,6 +383,8 @@ def main() -> int:
     ap.add_argument("--turbo", action="store_true",
                     help="with --net: no frame limiter and the panes drawn 4 ticks in 256 (the game runs as fast as the turn "
                          "exchange lets it)")
+    ap.add_argument("--draw-from", type=int, default=0, metavar="TICK",
+                    help="with --turbo: draw every tick from TICK on (so a screenshot at the end shows current panes)")
     ap.add_argument("--sync", type=Path, help="folder for the `touch` and `waitfile` steps (shared by runs driven together)")
     args = ap.parse_args()
     if args.window and args.window != "max" and not re.fullmatch(r"\d+x\d+", args.window.lower()):
@@ -444,7 +446,7 @@ def session(args, out: Path, w: int, h: int, procs: dict[str, subprocess.Popen])
                WINEDLLOVERRIDES="winepulse.drv=d;winealsa.drv=d;winedbg.exe=d",
                OP2H_SHELL="1", OP2H_OUT=run.win_path(out), OP2H_AUDIO="1" if args.audio else "0",
                OP2H_PRESENTS="1" if args.presents else "0", OP2H_TELEM_EVERY=str(args.telemetry_every),
-               OP2H_NET="1" if args.net else "0", OP2H_TURBO="1" if args.turbo else "0")
+               OP2H_NET="1" if args.net else "0", OP2H_TURBO="1" if args.turbo else "0", OP2H_DRAW_FROM=str(args.draw_from))
     env.pop("WAYLAND_DISPLAY", None)
     env.pop("OP2H_MISSION", None)
     for kv in args.ini:

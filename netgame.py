@@ -15,11 +15,12 @@ start_info.json, packets.jsonl, net.jsonl, telemetry.jsonl and the shell run's f
 two games' telemetry agree, line for line, and where they first differ.
 
 Use a prefix nobody else is running (prefix-net, a copy of prefix-harness: tools that run harness/run.sh share
-prefix-harness, and its wineserver would host both games). Never prefix/.
+prefix-harness, and its wineserver would host both games). It refuses prefix/ and prefix-harness/.
 """
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -130,8 +131,10 @@ def main() -> int:
     if args.ticks % 500:
         ap.error("--ticks must be a multiple of 500 (the shell's `game` tick events)")
     prefix = os.environ.get("OP2_HARNESS_PREFIX", "")
-    if not prefix or Path(prefix).resolve() == (HERE.parent / "prefix").resolve():
-        ap.error("set OP2_HARNESS_PREFIX to a prefix of its own (e.g. prefix-net, a copy of prefix-harness), never prefix/")
+    shared = {(HERE.parent / p).resolve() for p in ("prefix", "prefix-harness")}
+    if not prefix or Path(prefix).resolve() in shared:
+        ap.error("set OP2_HARNESS_PREFIX to a prefix of its own (e.g. prefix-net, a copy of prefix-harness), "
+                 "never prefix/ (David's) or prefix-harness/ (shared by every harness run)")
     out = args.out.resolve()
     sync = out / "sync"
     out.mkdir(parents=True, exist_ok=True)
@@ -146,16 +149,31 @@ def main() -> int:
                "--telemetry-every", str(args.telemetry_every), "--ini", "IntroAVI=0", "--ini", "Music=0", "--ini", "Sound=0",
                "--timeout", str(args.timeout + 200), "--out", str(out / name)]
         if args.turbo:
-            cmd.append("--turbo")
+            cmd += ["--turbo", "--draw-from", str(args.ticks)]
         if script:
             cmd += ["--script", str(script.resolve())]
         return cmd
 
     t0 = time.monotonic()
-    with open(out / "join.log", "w") as jl, open(out / "host.log", "w") as hl:
-        join = subprocess.Popen(shell("join", args.script1), stdout=jl, stderr=subprocess.STDOUT)
-        host = subprocess.Popen(shell("host", args.script0), stdout=hl, stderr=subprocess.STDOUT)
-        rc = {"host": host.wait(), "join": join.wait()}
+    # SIGTERM (`timeout`) raises like Ctrl+C, so the finally stops both shell.py runs, which end their games and Xvfb.
+    signal.signal(signal.SIGTERM, lambda signum, _frame: sys.exit(128 + signum))
+    procs: list[subprocess.Popen] = []
+    try:
+        with open(out / "join.log", "w") as jl, open(out / "host.log", "w") as hl:
+            procs.append(subprocess.Popen(shell("join", args.script1), stdout=jl, stderr=subprocess.STDOUT))
+            procs.append(subprocess.Popen(shell("host", args.script0), stdout=hl, stderr=subprocess.STDOUT))
+            join, host = procs
+            rc = {"host": host.wait(), "join": join.wait()}
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.terminate()  # shell.py's own SIGTERM handling kills its game's process group and Xvfb
+        for p in procs:
+            try:
+                p.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.wait()
     tel = compare(out / "host" / "telemetry.jsonl", out / "join" / "telemetry.jsonl")
     oh, oj = orders(out / "host"), orders(out / "join")
     n = min(len(oh), len(oj))

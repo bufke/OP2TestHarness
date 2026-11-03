@@ -55,6 +55,7 @@ int EnvInt(const char* name, int def) { const auto s = Env(name);  return s.empt
 FILE* g_log   = nullptr;
 FILE* g_telem = nullptr;
 bool g_record = false;  // OP2H_RECORD: a recording of a person's play ("Recording a player's own game").
+bool g_net = false;     // OP2H_NET in shell mode: a network game is logged ("Network games").
 std::string g_recEnd;   // The recording's last line, once the session has ended.
 void WriteRecording();
 // A `packet` line: its type, the data bytes (dataLength) and the slot's bytes after them up to the last nonzero one.
@@ -3160,6 +3161,9 @@ bool ParseHex(const std::string& hex, std::vector<uint8_t>* out) {
 void QueuePacket(const ScriptCmd& c, int tick) {
   auto warn = [&](const char* why) { Log("script: WARN tick %d line %d: `packet`: %s (skipped)", c.tick, c.line, why); };
   if (!g_origSlotPacket) return warn("the packet hook isn't installed (shell mode can't replay packets)");
+  // In a network game the slot hook only logs: a packet put into the local slot as it runs would change this machine's
+  // game alone. Orders go through the verbs, which queue them in the pending slot for every machine.
+  if (g_net) return warn("a network game can't replay `packet` lines (they would run on this machine only); give orders with the verbs");
   if (c.args.size() < 2) return warn("needs a type and the data as hex (`-` for none)");
   RawPacket r;
   char* end = nullptr;
@@ -3421,19 +3425,26 @@ void InstallRecordHooks() {
 // Unit::Do* helpers) is written into the local player's pending slot instead, as the UI's command handlers do (0x490810:
 // the slot for turn (tick + interval - 1) / interval + delay, stamped +6 = 0x80000000, +0xA = 0). The turn exchange then
 // sends it and every copy runs it in the same cycle. A slot holds one command: a later order in the same turn, or the
-// frame's own ctMachineSettings (after cycles whose interval number is 7 mod 8, 0x49C55C), replaces it; packets.jsonl
-// shows what ran. Orders for another player's units are skipped with a WARN, and the script's other verbs that change
-// the game (spawn, setcell, poke, ...) would desync the copies: don't use them in a network game.
+// frame's own ctMachineSettings (after cycles whose interval number is 7 mod 8, 0x49C55C), replaces it: harness.log
+// gets a WARN when an order replaces a pending command and when a queued order didn't run, and packets.jsonl shows what
+// ran. Orders for another player's units are skipped with a WARN; `packet` lines are refused (they would run on one
+// machine only), and the script's other verbs that change the game (spawn, setcell, poke, ...) would desync the copies:
+// don't use them in a network game. start_info.json's slot `active` is playerFlags bit 0x02 (TethysAPI's `isHost`),
+// set on every human slot of a network game, so it isn't the host.
 
 std::string JsonStr(const char* s, size_t max = 400);
 
-bool g_net = false;
 FILE* g_netPackets = nullptr;
 FILE* g_netWire = nullptr;
 CRITICAL_SECTION g_netLock;
 bool g_netScript = false;  // Script lines are running (the game thread): orders go to the pending slot.
 SlotPacketFn g_netProcess = nullptr;  // ProcessCommandPacket's own code (the entry hook's trampoline).
 int64_t g_netT0 = 0;
+int g_netDrawFrom = 0;  // OP2H_DRAW_FROM: with turbo, draw every tick from this one (the driver's last screenshot).
+// The script orders waiting in the local player's ring, by slot index: the command and the tick it was queued, to warn
+// when something else replaces it before it runs.
+struct NetQueued { CommandType type;  int tick; };
+std::map<int, NetQueued> g_netQueued;
 
 using PendingSlotFn = CommandPacket*(__thiscall*)(PlayerImpl*);
 const auto PendingSlot = reinterpret_cast<PendingSlotFn>(0x490810);
@@ -3452,17 +3463,36 @@ ibool __fastcall NetProcessHook(PlayerImpl* self, void*, CommandPacket* p) {
     return 0;
   }
   CommandPacket* slot = PendingSlot(self);
+  const int index = int((reinterpret_cast<uint8_t*>(slot) - reinterpret_cast<uint8_t*>(self) - 0x4C8) / sizeof(CommandPacket));
+  // An earlier script order in this slot that something else (the frame's ctMachineSettings) replaced already.
+  if (auto it = g_netQueued.find(index); it != g_netQueued.end() && it->second.type != slot->type)
+    Log("net order: WARN tick %d: the %s queued at tick %d won't run: the frame replaced it with %s", g_gameImpl.tick_,
+        CommandName(int(it->second.type)), it->second.tick, CommandName(int(slot->type)));
+  if (slot->type != CommandType::Nop)
+    Log("net order: WARN tick %d: %s replaces the pending %s in the local player's slot (one command per turn)",
+        g_gameImpl.tick_, CommandName(int(p->type)), CommandName(int(slot->type)));
   slot->type = p->type;
   slot->dataLength = p->dataLength;
   memcpy(slot->data.buffer, p->data.buffer, CommandPacketDataSize);
-  const int index = int((reinterpret_cast<uint8_t*>(slot) - reinterpret_cast<uint8_t*>(self) - 0x4C8) / sizeof(CommandPacket));
   Log("net order: tick %d %s %s -> slot %d", g_gameImpl.tick_, CommandName(int(p->type)),
       HexStr(p->data.buffer, std::min<size_t>(p->dataLength, CommandPacketDataSize)).c_str(), index);
+  g_netQueued[index] = { p->type, g_gameImpl.tick_ };
   return 1;
 }
 
 ibool __fastcall NetSlotHook(PlayerImpl* self, void*, CommandPacket* p) {
   const size_t n = std::min<size_t>(p->dataLength, CommandPacketDataSize), tail = TailLength(*p);
+  // A script order replaced before it ran (by the frame's ctMachineSettings, or a later order in the same turn).
+  if (PlayerIndex(self) == g_gameImpl.localPlayer_) {
+    const int index = int((reinterpret_cast<uint8_t*>(p) - reinterpret_cast<uint8_t*>(self) - 0x4C8) / sizeof(CommandPacket));
+    if (auto it = g_netQueued.find(index); it != g_netQueued.end()) {
+      if (it->second.type != p->type)
+        Log("net order: WARN tick %d: the %s queued at tick %d didn't run: the slot holds %s", g_gameImpl.tick_,
+            CommandName(int(it->second.type)), it->second.tick, CommandName(int(p->type)));
+      g_netQueued.erase(it);
+    }
+  }
+  if (!g_netPackets) return g_origSlotPacket(self, p);
   fprintf(g_netPackets, "{\"tick\":%d,\"player\":%d,\"type\":%d,\"name\":\"%s\",\"len\":%d,\"stamp\":%d,\"netID\":\"%08x\","
           "\"data\":\"%s\",\"tail\":\"%s\"}\n", g_gameImpl.tick_, PlayerIndex(self), int(p->type), CommandName(int(p->type)),
           int(p->dataLength), p->timeStamp, unsigned(p->netID), HexStr(p->data.buffer, n).c_str(),
@@ -3525,7 +3555,7 @@ void WriteStartInfo(const std::string& path) {
     const auto& p = g.playerFlags[i];
     char name[14] = {};
     memcpy(name, g.playerName[i].str, 13);
-    fprintf(out, "%s\n  {\"slot\":%d,\"host\":%d,\"eden\":%d,\"resources\":%d,\"color\":%d,\"netID\":\"%08x\",\"name\":%s}",
+    fprintf(out, "%s\n  {\"slot\":%d,\"active\":%d,\"eden\":%d,\"resources\":%d,\"color\":%d,\"netID\":\"%08x\",\"name\":%s}",
             i ? "," : "", i, int(p.isHost), int(p.isEden), int(p.resources), int(p.color), unsigned(g.playerNetID[i]),
             JsonStr(name).c_str());
   }
@@ -3548,6 +3578,7 @@ void NetInit() {
   // a few ticks in 256; the turn exchange (0x421110, after the limiter) still holds a cycle until every player's turn
   // is in, so the copies stay in lockstep and only run as fast as the slower one.
   cfg.turbo = EnvInt("OP2H_TURBO", 0) != 0;
+  g_netDrawFrom = EnvInt("OP2H_DRAW_FROM", 0);
   memcpy(g_drawPanesCode, reinterpret_cast<void*>(OnIdleDrawPanes), 2);
   if (cfg.turbo) { const uint8_t jmp = 0xEB;  WriteCode(OnIdleFrameLimiter, &jmp, 1); }
   Log("net: turbo %d, slot hook %s, ProcessCommandPacket hook %s, sendto %p, recvfrom %p", int(cfg.turbo), g_origSlotPacket ? "on" : "FAILED",
@@ -4171,7 +4202,7 @@ void __fastcall ShellCycleHook(GameImpl* self, void*) {
     if (g_net) WriteStartInfo(cfg.out + "\\start_info.json");
   }
   g_shellGameTick = tick;
-  if (g_net && cfg.turbo) SetDrawing(tick % 256 < 4);
+  if (g_net && cfg.turbo) SetDrawing(tick % 256 < 4 || (g_netDrawFrom > 0 && tick >= g_netDrawFrom));
   const bool hadCommands = g_scriptPos < g_script.size();
   NameScan();
   g_netScript = g_net;
