@@ -614,6 +614,33 @@ shell's music loop (close and reopen music1.wav on every notification) floods th
 menu's timers and the driver's input: use `--ini Music=0` (the default ini plays music). Movies play at the right
 speed without a device. Each run uses its own desktop name, so parallel runs on other displays don't share it.
 
+## Network games (`netgame.py`, `shell.py --net`)
+
+Two copies of the original play a two-player LAN game over 127.0.0.1, each logged from inside (docs/multiplayer.md
+"Stage 2a"):
+
+```sh
+cp -a prefix-harness prefix-net && make -C harness install HARNESS_PREFIX=../prefix-net   # once (gitignored)
+OP2_HARNESS_PREFIX=$PWD/prefix-net harness/netgame.py --out /tmp/net --ticks 3000 --turbo \
+  --script0 harness/oracle/net/ml2_08_p0.txt --script1 harness/oracle/net/ml2_08_p1.txt
+tools/target/debug/op2-missionhost netlog /tmp/net --bundle /tmp/net/desync.tar.gz       # replay and compare
+```
+
+- Two shell-mode runs boot the game in their own Xvfb and virtual desktop in **one prefix**: the host creates a TCP/IP
+  game (the lobby's default map, ml2_08.dll), the joiner joins 127.0.0.1 and ticks Ready, the host starts it; the
+  drivers (written into OUT as `host_drive.txt`, `join_drive.txt`) wait for each other with shell.py's `touch` and
+  `waitfile` steps in `--sync DIR`. Use a prefix of its own (`OP2_HARNESS_PREFIX`; netgame.py refuses prefix/), not
+  prefix-harness, whose wineserver other tools share. About a minute per game, most of it the two boots and the lobby.
+- `shell.py --net` (harness.cpp "Network games") writes `start_info.json` (the lobby's GameStartInfo at the first
+  cycle), `packets.jsonl` (every player's command slot as it executes, every 4th tick) and `net.jsonl` (every UDP
+  datagram, sent and received), and makes a `--script`'s orders the local player's own commands: their packets go into
+  the player's pending slot, as the UI's do, and cross the network. Orders for another player's units are skipped;
+  verbs that change the game directly (spawn, setcell, poke, ...) would make the copies differ. One order per player per
+  4-tick turn, and none on turns the frame sends its machine settings ((tick / 4) % 8 == 7). `--turbo` lifts the frame
+  limiter (the turn exchange still keeps the copies in lockstep) and draws the panes 4 ticks in 256.
+- OUT/summary.json says whether both copies executed the same orders and kept the same telemetry on every tick both
+  have (they quit a few hundred ticks apart in turbo). Recorded game: `harness/oracle/runs/net_ml2_08`.
+
 ## Coordinates
 
 - Internal tile x = file tile x + 32 on non-wrapping maps (`GameMap::GetPaddingWidth()`), and + 0 on 512-wide world

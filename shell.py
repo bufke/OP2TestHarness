@@ -30,6 +30,9 @@ Driver script, one step per line ('#' starts a comment). Times are wall-clock se
                                                               after the request, so it counts ticks, not wall time;
                                                               paused: at once (no cycle runs, nothing moves)
     mark <text>                                               a marker in driver.jsonl
+    touch <name>                                              create the file <name> in --sync DIR (another run's
+                                                              `waitfile` sees it: two games driven in step, netgame.py)
+    waitfile <name> [timeout=S]                               until <name> exists in --sync DIR (default 60 s)
     quit                                                      end the run (also the end of the script)
 """
 import argparse
@@ -374,6 +377,13 @@ def main() -> int:
                     help="run with an empty OPU/saves (the saved games SGAME*.OP2), putting the old ones back after")
     ap.add_argument("--window", metavar="WxH|max",
                     help="the shell window's size ([GAME_WINDOW] H_SIZE/V_SIZE; max: MAXIMIZED=1, the desktop's size)")
+    ap.add_argument("--net", action="store_true",
+                    help="network game logs: start_info.json, packets.jsonl, net.jsonl; script orders go through the network "
+                         "(harness.cpp \"Network games\")")
+    ap.add_argument("--turbo", action="store_true",
+                    help="with --net: no frame limiter and the panes drawn 4 ticks in 256 (the game runs as fast as the turn "
+                         "exchange lets it)")
+    ap.add_argument("--sync", type=Path, help="folder for the `touch` and `waitfile` steps (shared by runs driven together)")
     args = ap.parse_args()
     if args.window and args.window != "max" and not re.fullmatch(r"\d+x\d+", args.window.lower()):
         ap.error("--window takes WxH or max")
@@ -383,7 +393,8 @@ def main() -> int:
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     for old in [*out.glob("shot_*.png"), *(out / n for n in ("shell.jsonl", "driver.jsonl", "summary.json", "harness.log",
-                                                              "audio.jsonl", "telemetry.jsonl", "present.log", "ctl.txt"))]:
+                                                              "audio.jsonl", "telemetry.jsonl", "present.log", "ctl.txt",
+                                                              "start_info.json", "packets.jsonl", "net.jsonl"))]:
         old.unlink(missing_ok=True)
     w, h = (int(v) for v in args.desktop.lower().split("x"))
     # The ini and the saves go back however the run ends: SIGTERM (`timeout`) raises like Ctrl+C, so the finally runs.
@@ -432,7 +443,8 @@ def session(args, out: Path, w: int, h: int, procs: dict[str, subprocess.Popen])
     env = dict(os.environ, DISPLAY=display, WINEPREFIX=str(run.PREFIX), WINEDEBUG="-all",
                WINEDLLOVERRIDES="winepulse.drv=d;winealsa.drv=d;winedbg.exe=d",
                OP2H_SHELL="1", OP2H_OUT=run.win_path(out), OP2H_AUDIO="1" if args.audio else "0",
-               OP2H_PRESENTS="1" if args.presents else "0", OP2H_TELEM_EVERY=str(args.telemetry_every))
+               OP2H_PRESENTS="1" if args.presents else "0", OP2H_TELEM_EVERY=str(args.telemetry_every),
+               OP2H_NET="1" if args.net else "0", OP2H_TURBO="1" if args.turbo else "0")
     env.pop("WAYLAND_DISPLAY", None)
     env.pop("OP2H_MISSION", None)
     for kv in args.ini:
@@ -475,6 +487,12 @@ def session(args, out: Path, w: int, h: int, procs: dict[str, subprocess.Popen])
     def state(tag: str, after: int) -> dict | None:
         control(f"state {tag} {after}")
         return events.wait("state", [("tag", tag)], 10 + after / 10, alive)
+
+    def sync_dir() -> Path:
+        if not args.sync:
+            raise ValueError("touch and waitfile need --sync DIR")
+        args.sync.mkdir(parents=True, exist_ok=True)
+        return args.sync
 
     def steps() -> tuple[bool, str | None]:
         n_dump = 0
@@ -547,6 +565,18 @@ def session(args, out: Path, w: int, h: int, procs: dict[str, subprocess.Popen])
                 record("state", tag=tag, **{k: e.get(k) for k in ("tick", "paused", "pauseCount", "active", "iconic", "cursor", "selected", "cmds", "view")})
             elif verb == "mark":
                 record("mark", text=" ".join(a))
+            elif verb == "touch":
+                (sync_dir() / a[0]).touch()
+                record("touch", name=a[0])
+            elif verb == "waitfile":
+                timeout = float(next((v[8:] for v in a[1:] if v.startswith("timeout=")), "60"))
+                end = time.monotonic() + timeout
+                while not (sync_dir() / a[0]).exists():
+                    if not alive() or time.monotonic() > end:
+                        record("waitfile", name=a[0], found=False)
+                        return False, f"line {lineno}: timed out: {line}"
+                    time.sleep(0.2)
+                record("waitfile", name=a[0], found=True)
             elif verb == "quit":
                 break
             else:

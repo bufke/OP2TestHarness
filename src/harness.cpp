@@ -3406,6 +3406,154 @@ void InstallRecordHooks() {
   WriteRecording();
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Network games (shell mode with OP2H_NET=1; harness/netgame.py plays a LAN game between two copies of the game and
+// docs/multiplayer.md "Stage 2a" says what was measured). Each copy logs, in its output folder:
+//   start_info.json  at the game's first cycle: the GameStartInfo the lobby agreed on (seed, map DLL, flags, slots),
+//                    raw and decoded, the local player and the turn constants (CPPI, its log2, the command delay)
+//   packets.jsonl    every player's command slot as ProcessGameCycle hands it to PlayerImpl::ProcessCommandPacket
+//                    (0x489FF5, every 4th tick, before the units act): tick, player, type, dataLength, the slot's
+//                    +6 (timeStamp) and +0xA (netID) words, the data and the slot's tail (what `packet` lines carry)
+//   net.jsonl        every UDP datagram the game sends or receives (WSOCK32 sendto / recvfrom, ordinals 20 and 17,
+//                    through their import slots), with the time, the tick, the peer and the bytes
+// and a tick script's orders become the local player's own commands: while script lines run, a call to
+// ProcessCommandPacket (0x40E300) that would execute an order on this machine alone (the verbs' packets and TethysAPI's
+// Unit::Do* helpers) is written into the local player's pending slot instead, as the UI's command handlers do (0x490810:
+// the slot for turn (tick + interval - 1) / interval + delay, stamped +6 = 0x80000000, +0xA = 0). The turn exchange then
+// sends it and every copy runs it in the same cycle. A slot holds one command: a later order in the same turn, or the
+// frame's own ctMachineSettings (after cycles whose interval number is 7 mod 8, 0x49C55C), replaces it; packets.jsonl
+// shows what ran. Orders for another player's units are skipped with a WARN, and the script's other verbs that change
+// the game (spawn, setcell, poke, ...) would desync the copies: don't use them in a network game.
+
+std::string JsonStr(const char* s, size_t max = 400);
+
+bool g_net = false;
+FILE* g_netPackets = nullptr;
+FILE* g_netWire = nullptr;
+CRITICAL_SECTION g_netLock;
+bool g_netScript = false;  // Script lines are running (the game thread): orders go to the pending slot.
+SlotPacketFn g_netProcess = nullptr;  // ProcessCommandPacket's own code (the entry hook's trampoline).
+int64_t g_netT0 = 0;
+
+using PendingSlotFn = CommandPacket*(__thiscall*)(PlayerImpl*);
+const auto PendingSlot = reinterpret_cast<PendingSlotFn>(0x490810);
+
+int PlayerIndex(const PlayerImpl* p) {
+  for (int i = 0; i < 7; ++i) if (g_gameImpl.GetPlayer(i) == p) return i;
+  return -1;
+}
+
+ibool __fastcall NetProcessHook(PlayerImpl* self, void*, CommandPacket* p) {
+  if (!g_netScript) return g_netProcess(self, p);
+  const int player = PlayerIndex(self);
+  if (player != g_gameImpl.localPlayer_) {
+    Log("net order: WARN tick %d: %s for player %d, not the local player %d (skipped)", g_gameImpl.tick_,
+        CommandName(int(p->type)), player, g_gameImpl.localPlayer_);
+    return 0;
+  }
+  CommandPacket* slot = PendingSlot(self);
+  slot->type = p->type;
+  slot->dataLength = p->dataLength;
+  memcpy(slot->data.buffer, p->data.buffer, CommandPacketDataSize);
+  const int index = int((reinterpret_cast<uint8_t*>(slot) - reinterpret_cast<uint8_t*>(self) - 0x4C8) / sizeof(CommandPacket));
+  Log("net order: tick %d %s %s -> slot %d", g_gameImpl.tick_, CommandName(int(p->type)),
+      HexStr(p->data.buffer, std::min<size_t>(p->dataLength, CommandPacketDataSize)).c_str(), index);
+  return 1;
+}
+
+ibool __fastcall NetSlotHook(PlayerImpl* self, void*, CommandPacket* p) {
+  const size_t n = std::min<size_t>(p->dataLength, CommandPacketDataSize), tail = TailLength(*p);
+  fprintf(g_netPackets, "{\"tick\":%d,\"player\":%d,\"type\":%d,\"name\":\"%s\",\"len\":%d,\"stamp\":%d,\"netID\":\"%08x\","
+          "\"data\":\"%s\",\"tail\":\"%s\"}\n", g_gameImpl.tick_, PlayerIndex(self), int(p->type), CommandName(int(p->type)),
+          int(p->dataLength), p->timeStamp, unsigned(p->netID), HexStr(p->data.buffer, n).c_str(),
+          HexStr(p->data.buffer + n, tail).c_str());
+  fflush(g_netPackets);
+  return g_origSlotPacket(self, p);
+}
+
+using SendToFn   = int(WINAPI*)(uintptr_t, const char*, int, int, const sockaddr*, int);
+using RecvFromFn = int(WINAPI*)(uintptr_t, char*, int, int, sockaddr*, int*);
+SendToFn   g_sendTo   = nullptr;
+RecvFromFn g_recvFrom = nullptr;
+
+void WireEvent(const char* dir, uintptr_t s, const sockaddr* a, const char* buf, int n) {
+  if (n <= 0 || !g_netWire) return;
+  char peer[32] = "?";
+  if (a && a->sa_family == AF_INET) {
+    const auto* in = reinterpret_cast<const sockaddr_in*>(a);
+    const uint8_t* ip = reinterpret_cast<const uint8_t*>(&in->sin_addr);
+    snprintf(peer, sizeof peer, "%u.%u.%u.%u:%u", ip[0], ip[1], ip[2], ip[3], (unsigned(in->sin_port) >> 8 | unsigned(in->sin_port) << 8) & 0xFFFF);
+  }
+  const std::string hex = HexStr(reinterpret_cast<const uint8_t*>(buf), size_t(n));
+  EnterCriticalSection(&g_netLock);
+  fprintf(g_netWire, "{\"ms\":%.1f,\"tick\":%d,\"dir\":\"%s\",\"sock\":%u,\"peer\":\"%s\",\"hex\":\"%s\"}\n",
+          (Now() - g_netT0) * 1000.0 / Frequency(), g_gameImpl.tick_, dir, unsigned(s), peer, hex.c_str());
+  fflush(g_netWire);
+  LeaveCriticalSection(&g_netLock);
+}
+
+int WINAPI SendToHook(uintptr_t s, const char* buf, int len, int flags, const sockaddr* to, int tolen) {
+  const int r = g_sendTo(s, buf, len, flags, to, tolen);
+  WireEvent("send", s, to, buf, r > 0 ? len : 0);
+  return r;
+}
+
+int WINAPI RecvFromHook(uintptr_t s, char* buf, int len, int flags, sockaddr* from, int* fromlen) {
+  const int r = g_recvFrom(s, buf, len, flags, from, fromlen);
+  WireEvent("recv", s, from, buf, r);
+  return r;
+}
+
+// The lobby's GameStartInfo as the game started with it (GameImpl +gameStartInfo_), raw and decoded.
+void WriteStartInfo(const std::string& path) {
+  const GameStartInfo& g = g_gameImpl.gameStartInfo_;
+  const auto& f = g.startupFlags;
+  FILE* out = fopen(path.c_str(), "w");
+  if (!out) return;
+  fprintf(out, "{\"hex\":\"%s\",\n \"script\":%s,\"missionType\":%d,\"maxPlayers\":%d,\"numPlayers\":%d,\"multiplayer\":%d,"
+          "\"disasters\":%d,\"dayNight\":%d,\"moraleSteady\":%d,\"cheats\":%d,\"initialVehicles\":%d,\"version\":\"%08x\","
+          "\"gameSpeed\":%d,\"seed\":%u,\"checksum\":\"%08x\",\n \"localPlayer\":%d,\"gamePlayers\":%d,\"humanPlayers\":%d,"
+          "\"cppi\":%d,\"log2cppi\":%d,\"delay\":%d,\n \"slots\":[",
+          HexStr(reinterpret_cast<const uint8_t*>(&g), sizeof g).c_str(), JsonStr(g.scriptName).c_str(),
+          int(f.missionType) - (f.missionType & 0x10 ? 32 : 0), int(f.maxPlayers), int(g.gameFlags.numPlayers),
+          int(f.isMultiplayer), int(f.disastersEnabled), int(f.dayNightEnabled), int(f.moraleSteady), int(f.cheatsEnabled),
+          int(f.numInitialVehicles), unsigned(g.version), g.gameSpeed, unsigned(g.randomNumberSeed), unsigned(g.checksum),
+          g_gameImpl.localPlayer_, g_gameImpl.numPlayers_, g_gameImpl.numHumanPlayers_,
+          g_gameImpl.commandPacketProcessingInterval_, g_gameImpl.log2CommandPacketProcessingInterval_,
+          g_gameImpl.commandPacketProcessingDelay_);
+  for (int i = 0; i < 6; ++i) {
+    const auto& p = g.playerFlags[i];
+    char name[14] = {};
+    memcpy(name, g.playerName[i].str, 13);
+    fprintf(out, "%s\n  {\"slot\":%d,\"host\":%d,\"eden\":%d,\"resources\":%d,\"color\":%d,\"netID\":\"%08x\",\"name\":%s}",
+            i ? "," : "", i, int(p.isHost), int(p.isEden), int(p.resources), int(p.color), unsigned(g.playerNetID[i]),
+            JsonStr(name).c_str());
+  }
+  fprintf(out, "]}\n");
+  fclose(out);
+}
+
+void NetInit() {
+  InitializeCriticalSection(&g_netLock);
+  g_netT0 = Now();
+  g_netPackets = fopen((cfg.out + "\\packets.jsonl").c_str(), "w");
+  g_netWire = fopen((cfg.out + "\\net.jsonl").c_str(), "w");
+  g_origSlotPacket = reinterpret_cast<SlotPacketFn>(RelinkCall(CallSlotPacket, reinterpret_cast<void*>(&NetSlotHook)));
+  static const uint8_t prologue[] = { 0x81, 0xEC, 0x18, 0x01, 0x00, 0x00 };  // sub esp,118h
+  g_netProcess = reinterpret_cast<SlotPacketFn>(HookEntry(0x40E300, prologue, 6, reinterpret_cast<void*>(&NetProcessHook)));
+  // WSOCK32's sendto and recvfrom, imported by ordinal (20, 17): the import slots at 0x58391C and 0x58392C.
+  g_sendTo   = reinterpret_cast<SendToFn>(PatchIat(0x58391C, reinterpret_cast<void*>(&SendToHook)));
+  g_recvFrom = reinterpret_cast<RecvFromFn>(PatchIat(0x58392C, reinterpret_cast<void*>(&RecvFromHook)));
+  // Turbo (OP2H_TURBO, netgame.py): the frame limiter lets a cycle run on every idle loop and the panes are drawn only
+  // a few ticks in 256; the turn exchange (0x421110, after the limiter) still holds a cycle until every player's turn
+  // is in, so the copies stay in lockstep and only run as fast as the slower one.
+  cfg.turbo = EnvInt("OP2H_TURBO", 0) != 0;
+  memcpy(g_drawPanesCode, reinterpret_cast<void*>(OnIdleDrawPanes), 2);
+  if (cfg.turbo) { const uint8_t jmp = 0xEB;  WriteCode(OnIdleFrameLimiter, &jmp, 1); }
+  Log("net: turbo %d, slot hook %s, ProcessCommandPacket hook %s, sendto %p, recvfrom %p", int(cfg.turbo), g_origSlotPacket ? "on" : "FAILED",
+      g_netProcess ? "on" : "FAILED", reinterpret_cast<void*>(g_sendTo), reinterpret_cast<void*>(g_recvFrom));
+}
+
 // Whether to render after this cycle: frames are drawn for a few ticks ahead of any capture so the panes are current.
 bool WantDraw(int tick) {
   constexpr int Lead = DrawLead;
@@ -3690,7 +3838,7 @@ int64_t g_shellT0 = 0;
 CRITICAL_SECTION g_shellLock;
 DWORD   g_mainThread = 0;
 
-std::string JsonStr(const char* s, size_t max = 400) {
+std::string JsonStr(const char* s, size_t max) {
   std::string out = "\"";
   for (size_t i = 0; s && s[i] && i < max; ++i) {
     const unsigned char c = s[i];
@@ -4020,11 +4168,15 @@ void __fastcall ShellCycleHook(GameImpl* self, void*) {
     ShellEvent("\"ev\":\"game\",\"what\":\"first_cycle\",\"tick\":%d,\"map\":[%d,%d],\"frame\":[%ld,%ld,%ld,%ld]", tick,
                GameMap::GetWidth(), GameMap::GetHeight(), r.left, r.top, r.right - r.left, r.bottom - r.top);
     LogMusic("start");
+    if (g_net) WriteStartInfo(cfg.out + "\\start_info.json");
   }
   g_shellGameTick = tick;
+  if (g_net && cfg.turbo) SetDrawing(tick % 256 < 4);
   const bool hadCommands = g_scriptPos < g_script.size();
   NameScan();
+  g_netScript = g_net;
   while (g_scriptPos < g_script.size() && g_script[g_scriptPos].tick <= tick) RunScriptCmd(g_script[g_scriptPos++], tick);
+  g_netScript = false;
   if (hadCommands && g_scriptPos == g_script.size()) ShellEvent("\"ev\":\"script\",\"what\":\"done\",\"tick\":%d", tick);
   AudioTick(tick);
   if (cfg.telemEvery > 0 && tick >= g_nextTelem) { WriteTelemetry(tick);  g_nextTelem = (tick / cfg.telemEvery + 1) * cfg.telemEvery; }
@@ -4191,6 +4343,7 @@ void ShellInit() {
   SetWindowsHookExA(WH_CALLWNDPROCRET, &ShellCallWndRet, nullptr, g_mainThread);
   SetWindowsHookExA(WH_GETMESSAGE, &ShellGetMsg, nullptr, g_mainThread);
   if (!cfg.script.empty()) LoadScript(cfg.script);
+  if (EnvInt("OP2H_NET", 0)) { g_net = true;  NetInit(); }
   CreateThread(nullptr, 0, &ShellControlThread, nullptr, 0, nullptr);
   ShellEvent("\"ev\":\"init\",\"screen\":[%d,%d]", GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
 }
