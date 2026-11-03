@@ -54,7 +54,12 @@ int EnvInt(const char* name, int def) { const auto s = Env(name);  return s.empt
 
 FILE* g_log   = nullptr;
 FILE* g_telem = nullptr;
-FILE* g_recFile = nullptr;  // A recording's recording.txt (OP2H_RECORD), appended packet by packet.
+bool g_record = false;  // OP2H_RECORD: a recording of a person's play ("Recording a player's own game").
+std::string g_recEnd;   // The recording's last line, once the session has ended.
+void WriteRecording();
+// A `packet` line: its type, the data bytes (dataLength) and the slot's bytes after them up to the last nonzero one.
+struct RawPacket { int type = 0;  std::vector<uint8_t> data, tail; };
+std::map<int, RawPacket> g_packetDue;  // `packet` lines: the tick of the cycle that runs it -> the packet
 
 void Log(const char* fmt, ...) {
   if (!g_log) return;
@@ -2787,7 +2792,16 @@ void Quit(const char* why) {
   WriteTrace(g_gameImpl.tick_);
   if (cfg.shotEvery > 0) TakeShot(g_gameImpl.tick_);
   WriteSessionState(g_gameImpl.tick_);
-  if (g_recFile) { fprintf(g_recFile, "# end of the recording: tick %d, %s\n", g_gameImpl.tick_, why);  fclose(g_recFile); }
+  if (g_record) {
+    g_recEnd = "# end of the recording: tick " + std::to_string(g_gameImpl.tick_) + ", " + why;
+    WriteRecording();
+  }
+  if (!g_packetDue.empty()) {
+    std::string ticks;
+    for (const auto& [t, p] : g_packetDue) ticks += " " + std::to_string(t);
+    Log("script: WARN %u `packet` lines never ran (their cycles didn't hand the local player's slot to ProcessCommandPacket):%s",
+        unsigned(g_packetDue.size()), ticks.c_str());
+  }
   ClosePresents();
   if (g_events) fclose(g_events);
   if (g_telem) fclose(g_telem);
@@ -2867,7 +2881,6 @@ constexpr uintptr_t CallTAppSaveGame     = 0x487269;  // TApp::SaveGame(name, di
 constexpr uintptr_t CallGameImplSaveGame = 0x48786B;  // in TApp::SaveGame: GameImpl::SaveGame(stream, dialog), 0 = failed
 constexpr uintptr_t CallsTAppLoadGame[]  = { 0x4865F2, 0x487394, 0x48754D, 0x488F55 };  // TApp::LoadGame(name) (0x4878F0)
 
-struct RawPacket { int type = 0;  std::vector<uint8_t> data; };
 using SlotPacketFn = ibool(__thiscall*)(PlayerImpl*, CommandPacket*);
 using TAppSaveFn   = void(__thiscall*)(void*, const char*, void*);
 using GameSaveFn   = ibool(__thiscall*)(GameImpl*, void*, void*);
@@ -2876,8 +2889,6 @@ SlotPacketFn g_origSlotPacket = nullptr;
 TAppSaveFn   g_origTAppSave   = nullptr;
 GameSaveFn   g_origGameSave   = nullptr;
 TAppLoadFn   g_origTAppLoad   = nullptr;
-std::map<int, RawPacket> g_packetDue;   // `packet` lines: the tick of the cycle that runs it -> the packet
-bool g_record = false;                  // OP2H_RECORD
 std::vector<std::string> g_recLines;    // its packet lines (the history that led here)
 std::vector<std::string> g_recLoads;    // header lines: each load and what it rolled back
 std::string g_recSetup;                 // the setup script (--script), copied to the top of the recording
@@ -3062,11 +3073,11 @@ std::string UnixPath(std::string p) {
   return p;
 }
 
+// Rewritten whole after every change, to a temporary file renamed over it: a crash never leaves half a recording.
 void WriteRecording() {
-  if (g_recFile) fclose(g_recFile);
-  g_recFile = fopen((cfg.out + "\\recording.txt").c_str(), "w");
-  if (!g_recFile) { Log("record: cannot write recording.txt");  return; }
-  FILE* f = g_recFile;
+  const std::string path = cfg.out + "\\recording.txt", tmp = path + ".tmp";
+  FILE* f = fopen(tmp.c_str(), "w");
+  if (!f) { Log("record: WARN cannot write %s", tmp.c_str());  return; }
   fprintf(f, "# Recorded play of %s (harness/run.sh --record; harness/README.md \"Recording your own play\").\n", cfg.mission.c_str());
   fprintf(f, "# seed %d, difficulty %d, campaign %s\n", cfg.seed, cfg.difficulty,
           cfg.campaign.empty() ? "none" : UnixPath(cfg.campaign).c_str());
@@ -3092,54 +3103,79 @@ void WriteRecording() {
     fputs("# --- recorded play ---\n", f);
   }
   for (const auto& l : g_recLines) fprintf(f, "%s\n", l.c_str());
-  fflush(f);
+  if (!g_recEnd.empty()) fprintf(f, "%s\n", g_recEnd.c_str());
+  const bool ok = !ferror(f);
+  if (fclose(f) != 0 || !ok || !MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING))
+    Log("record: WARN writing %s failed (error %lu)", path.c_str(), GetLastError());
+}
+
+// The bytes of the slot after dataLength up to its last nonzero byte: whatever earlier packets left there. Handlers read
+// by their own counts, not by dataLength, so the recording keeps them and the replay puts them back.
+size_t TailLength(const CommandPacket& p) {
+  size_t end = CommandPacketDataSize;
+  while (end > p.dataLength && p.data.buffer[end - 1] == 0) --end;
+  return end > p.dataLength ? end - p.dataLength : 0;
 }
 
 void RecordPacket(int tick, const CommandPacket& p) {
-  const size_t n = std::min<size_t>(p.dataLength, CommandPacketDataSize);
+  const size_t n = std::min<size_t>(p.dataLength, CommandPacketDataSize), tail = TailLength(p);
   std::string line = std::to_string(tick) + " packet " + std::to_string(int(p.type)) + " " + (n ? HexStr(p.data.buffer, n) : "-");
+  if (tail) line += " +" + HexStr(p.data.buffer + n, tail);
   // Quitting is the session's end, not part of the game: kept as a comment.
   if (p.type == CommandType::Quit) line = "# " + line + "  (not replayed)";
-  line += "  # " + DescribePacket(p);
-  g_recLines.push_back(line);
-  if (g_recFile) { fprintf(g_recFile, "%s\n", line.c_str());  fflush(g_recFile); }
+  std::string what = DescribePacket(p);
+  for (auto& ch : what) if (uint8_t(ch) < 0x20) ch = ' ';  // A chat line's newline mustn't end the comment.
+  g_recLines.push_back(line + "  # " + what);
+  WriteRecording();
 }
 
 ibool __fastcall SlotPacketHook(PlayerImpl* self, void*, CommandPacket* p) {
   if (self == g_gameImpl.GetPlayer(g_gameImpl.localPlayer_)) {
     const int tick = g_gameImpl.tick_;
+    bool injected = false;
     if (auto it = g_packetDue.find(tick); it != g_packetDue.end()) {
-      p->type = CommandType(it->second.type);
-      p->dataLength = uint16(it->second.data.size());
-      if (!it->second.data.empty()) memcpy(p->data.buffer, it->second.data.data(), it->second.data.size());
+      const RawPacket& r = it->second;
+      p->type = CommandType(r.type);
+      p->dataLength = uint16(r.data.size());
+      memset(p->data.buffer, 0, CommandPacketDataSize);
+      if (!r.data.empty()) memcpy(p->data.buffer, r.data.data(), r.data.size());
+      if (!r.tail.empty()) memcpy(p->data.buffer + r.data.size(), r.tail.data(), r.tail.size());
       g_packetDue.erase(it);
+      injected = true;
     }
     if (p->type != CommandType::Nop && p->type != CommandType::MachineSettings) {
       const size_t n = std::min<size_t>(p->dataLength, CommandPacketDataSize);
-      Log("packet: tick %d %s %d %s", tick, CommandName(int(p->type)), int(p->type), n ? HexStr(p->data.buffer, n).c_str() : "-");
-      if (g_record) RecordPacket(tick, *p);
+      Log("packet: tick %d %s %d %s%s", tick, CommandName(int(p->type)), int(p->type), n ? HexStr(p->data.buffer, n).c_str() : "-",
+          injected ? " (a `packet` line)" : "");
+      // A `packet` line of the setup script (a recording played on) is already in the recording, as part of the setup.
+      if (g_record && !injected) RecordPacket(tick, *p);
     }
   }
   return g_origSlotPacket(self, p);
 }
 
-// `T packet TYPE HEX|-`: the local player's packet for the cycle starting at tick T (a multiple of the interval).
+bool ParseHex(const std::string& hex, std::vector<uint8_t>* out) {
+  if (hex.size() % 2) return false;
+  for (size_t k = 0; k < hex.size(); k += 2) {
+    if (!isxdigit(uint8_t(hex[k])) || !isxdigit(uint8_t(hex[k + 1]))) return false;
+    out->push_back(uint8_t(strtol(hex.substr(k, 2).c_str(), nullptr, 16)));
+  }
+  return true;
+}
+
+// `T packet TYPE HEX|- [+TAIL]`: the local player's packet for the cycle starting at tick T (a multiple of the
+// interval), with the slot's bytes after the data (TAIL; the rest of the slot's 99 data bytes are zero).
 void QueuePacket(const ScriptCmd& c, int tick) {
   auto warn = [&](const char* why) { Log("script: WARN tick %d line %d: `packet`: %s (skipped)", c.tick, c.line, why); };
+  if (!g_origSlotPacket) return warn("the packet hook isn't installed (shell mode can't replay packets)");
   if (c.args.size() < 2) return warn("needs a type and the data as hex (`-` for none)");
   RawPacket r;
-  r.type = atoi(c.args[0].c_str());
-  const std::string& hex = c.args[1];
-  if (hex != "-") {
-    if (hex.size() % 2 || hex.size() / 2 > CommandPacketDataSize) return warn("bad hex data");
-    for (size_t k = 0; k < hex.size(); k += 2) {
-      char* end = nullptr;
-      const std::string byte = hex.substr(k, 2);
-      const long v = strtol(byte.c_str(), &end, 16);
-      if (*end || !isxdigit(uint8_t(byte[0]))) return warn("bad hex data");
-      r.data.push_back(uint8_t(v));
-    }
-  }
+  char* end = nullptr;
+  r.type = int(strtol(c.args[0].c_str(), &end, 10));
+  if (*end || r.type <= 0 || r.type >= int(CommandType::Count)) return warn("the type isn't a command type (1-53)");
+  if (c.args[1] != "-" && !ParseHex(c.args[1], &r.data)) return warn("bad hex data");
+  if (c.args.size() > 2 && (c.args[2][0] != '+' || !ParseHex(c.args[2].substr(1), &r.tail))) return warn("bad +tail hex");
+  if (r.data.size() + r.tail.size() > CommandPacketDataSize) return warn("more than the slot's 99 data bytes");
   const int interval = g_gameImpl.commandPacketProcessingInterval_;
   if (interval <= 0 || c.tick % interval) return warn("not a command-processing tick (a multiple of 4)");
   if (tick > c.tick) return warn("its cycle has run already (the first script tick is 1)");
@@ -3166,10 +3202,19 @@ std::string ReadFile(const std::string& path) {
 }
 
 // What a save's recording must match to be put back: the same start (mission, seed, difficulty, carry-over, setup).
+// The setup's `savegame`/`loadgame` lines aren't part of the history (the recording keeps them as comments).
 std::string RecIdentity() {
   char b[32];
+  std::string setup;
+  std::istringstream in(g_recSetup);
+  for (std::string line; std::getline(in, line);) {
+    std::istringstream words(line);
+    std::string tick, verb;
+    words >> tick >> verb;
+    if (verb != "savegame" && verb != "loadgame") setup += line + "\n";
+  }
   const std::string all = cfg.mission + "|" + std::to_string(cfg.seed) + "|" + std::to_string(cfg.difficulty) + "|" +
-                          (cfg.campaign.empty() ? "" : ReadFile(cfg.campaign)) + "|" + g_recSetup;
+                          (cfg.campaign.empty() ? "" : ReadFile(cfg.campaign)) + "|" + setup;
   snprintf(b, sizeof b, "%016llx", (unsigned long long)Fnv(all));
   return b;
 }
@@ -3180,27 +3225,51 @@ std::string SidecarDir(const char* save) {
   return std::string(full) + ".rec";
 }
 
+// The save file itself, as its recording names it: its size and an FNV hash of its bytes. A slot saved over without
+// the hook (a run that isn't a recording, the shell, plain play in prefix-harness) keeps an old sidecar; this tells.
+std::string SaveFingerprint(const char* save) {
+  const std::string bytes = ReadFile(save);
+  char b[64];
+  snprintf(b, sizeof b, "%u %016llx", unsigned(bytes.size()), (unsigned long long)Fnv(bytes));
+  return b;
+}
+
+// Removes a save's sidecar (its files, then the folder), so a load of that save is a recording's BROKEN, not a
+// wrong history.
+void DeleteSidecar(const char* save) {
+  const std::string dir = SidecarDir(save);
+  for (const char* name : { "meta.txt", "packets.txt", "telemetry.jsonl", "trace.jsonl" }) DeleteFileA((dir + "\\" + name).c_str());
+  if (RemoveDirectoryA(dir.c_str())) Log("record: removed the sidecar %s", dir.c_str());
+}
+
 void WriteSidecar(const char* save) {
   const std::string dir = SidecarDir(save);
-  CreateDirectoryA(dir.c_str(), nullptr);
-  DeleteFileA((dir + "\\meta.txt").c_str());  // Written last: a sidecar without it is incomplete.
-  if (FILE* f = fopen((dir + "\\packets.txt").c_str(), "w")) {
+  DeleteSidecar(save);
+  bool ok = CreateDirectoryA(dir.c_str(), nullptr) != 0;
+  if (FILE* f = ok ? fopen((dir + "\\packets.txt").c_str(), "w") : nullptr) {
     for (const auto& l : g_recLines) fprintf(f, "%s\n", l.c_str());
-    fclose(f);
-  }
+    ok = !ferror(f);
+    ok = fclose(f) == 0 && ok;
+  } else ok = false;
   for (FILE* f : { g_telem, g_trace }) if (f) fflush(f);
   for (const char* name : { "telemetry.jsonl", "trace.jsonl" }) {
-    DeleteFileA((dir + "\\" + name).c_str());
-    CopyFileA((cfg.out + "\\" + name).c_str(), (dir + "\\" + name).c_str(), FALSE);
+    const std::string mine = cfg.out + "\\" + name;
+    if (ok && GetFileAttributesA(mine.c_str()) != INVALID_FILE_ATTRIBUTES) ok = CopyFileA(mine.c_str(), (dir + "\\" + name).c_str(), FALSE) != 0;
   }
-  FILE* f = fopen((dir + "\\meta.txt").c_str(), "w");
-  if (f) {
-    fprintf(f, "tick %d\nidentity %s\nmission %s\nbroken %s\n", g_gameImpl.tick_, RecIdentity().c_str(), cfg.mission.c_str(),
-            g_recBroken.c_str());
-    fclose(f);
+  // meta.txt last, and only when everything else is there: a sidecar without it counts as none.
+  if (FILE* f = ok ? fopen((dir + "\\meta.txt").c_str(), "w") : nullptr) {
+    fprintf(f, "tick %d\nidentity %s\nsave %s\nmission %s\nbroken %s\n", g_gameImpl.tick_, RecIdentity().c_str(),
+            SaveFingerprint(save).c_str(), cfg.mission.c_str(), g_recBroken.c_str());
+    ok = !ferror(f);
+    ok = fclose(f) == 0 && ok;
+  } else ok = false;
+  if (!ok) {
+    Log("record: WARN the sidecar of %s couldn't be written (error %lu): loading this save will mark the recording BROKEN",
+        save, GetLastError());
+    DeleteSidecar(save);
+    return;
   }
-  Log("record: saved %s at tick %d with %u packets -> %s", save, g_gameImpl.tick_, unsigned(g_recLines.size()),
-      f ? dir.c_str() : "(sidecar FAILED)");
+  Log("record: saved %s at tick %d with %u packets -> %s", save, g_gameImpl.tick_, unsigned(g_recLines.size()), dir.c_str());
 }
 
 // The harness's own clocks after a load took the game back to `tick`: samples continue from there, and the script
@@ -3229,10 +3298,14 @@ void RestoreSidecar(const char* save, int fromTick) {
       if (sp != std::string::npos) meta[line.substr(0, sp)] = line.substr(sp + 1);
     }
   }
-  char what[512];
-  if (meta.empty() || meta["identity"] != RecIdentity()) {
-    snprintf(what, sizeof what, "loaded %s (tick %d), which has %s: the recording does not lead to this game", save, tick,
-             meta.empty() ? "no recording (saved outside a recording session?)" : "the recording of another start (mission, seed, campaign or setup)");
+  char what[640];
+  const char* why = meta.empty() ? "no recording (saved outside a recording session?)"
+                  : meta["identity"] != RecIdentity() ? "the recording of another start (mission, seed, campaign or setup)"
+                  : meta["save"] != SaveFingerprint(save) ? "a recording of another game (the file was saved over without one)"
+                  : atoi(meta["tick"].c_str()) != tick ? "a recording made at another tick"
+                  : nullptr;
+  if (why) {
+    snprintf(what, sizeof what, "loaded %s (tick %d), which has %s: the recording does not lead to this game", save, tick, why);
     g_recBroken = what;
     Log("record: WARN %s", what);
     g_recLoads.push_back(what);
@@ -3240,7 +3313,6 @@ void RestoreSidecar(const char* save, int fromTick) {
     WriteRecording();
     return;
   }
-  if (atoi(meta["tick"].c_str()) != tick) Log("record: WARN %s: saved at tick %s, loaded at tick %d", save, meta["tick"].c_str(), tick);
   g_recBroken = meta["broken"];
   const size_t before = g_recLines.size();
   g_recLines.clear();
@@ -3277,7 +3349,10 @@ void __fastcall TAppSaveHook(void* self, void*, const char* name, void* dialog) 
   g_saveResult = -1;
   g_origTAppSave(self, name, dialog);
   if (g_saveResult > 0) WriteSidecar(name);
-  else Log("record: saving %s failed (%d): no sidecar", name ? name : "?", g_saveResult);
+  else if (name) {
+    Log("record: saving %s failed (%d): no sidecar", name, g_saveResult);
+    DeleteSidecar(name);  // The file may be half written: no history may claim it.
+  }
 }
 
 int __fastcall TAppLoadHook(void* self, void*, const char* name) {
@@ -3310,7 +3385,10 @@ void RunSaveLoad(int tick) {
     const auto [verb, path] = g_saveLoadDue[k];
     if (verb == "savegame") {
       if (g_record) TAppSaveHook(&g_tApp, nullptr, path.c_str(), nullptr);
-      else g_tApp.SaveGame(path);
+      else {
+        g_tApp.SaveGame(path);
+        DeleteSidecar(path.c_str());  // Saved without a recording: an older recording's sidecar no longer matches it.
+      }
       Log("script: save %s at tick %d", path.c_str(), tick);
       continue;
     }
@@ -3358,7 +3436,8 @@ void __fastcall GameCycleHook(GameImpl* self, void*) {
   PresentTick(tick);
   if (tick == g_lastTick) return;
   if (g_lastTick < 0) {
-    if (!g_record) ParkCursor();  // A recording is played with the real mouse and keys.
+    // A recording is played with the real mouse and keys, unless its setup script has input verbs to run first.
+    if (!g_record || g_inputUsed) ParkCursor();
     g_startTime = Now();
     Log("first game cycle: tick %d, map %dx%d, padding %d tiles", tick, GameMap::GetWidth(), GameMap::GetHeight(),
         PadTiles());
@@ -3368,8 +3447,14 @@ void __fastcall GameCycleHook(GameImpl* self, void*) {
   g_lastTick = tick;
   // Parallel runs share one wineserver, so they take the foreground from each other, and an inactive game ignores keys
   // and edge/arrow scrolling (TApp::OnActivateApp 0x4862F0). Keep it active: this runs before the frame is drawn.
-  if (g_inputUsed && !g_tApp.AppActive()) g_tApp.OnActivateApp(1);
+  if (g_inputUsed && (!g_record || g_in.active) && !g_tApp.AppActive()) g_tApp.OnActivateApp(1);
 
+  // A `packet` whose cycle ran without handing the local player's slot to ProcessCommandPacket (a paused or playback
+  // cycle, [GameImpl+0x9C] at 0x489F03, 0x4864A0 at 0x489FE0, the player's +0x4AC flag) never ran: say so.
+  while (!g_packetDue.empty() && g_packetDue.begin()->first < tick) {
+    Log("script: WARN tick %d: a `packet` for the cycle starting at tick %d never ran (dropped)", tick, g_packetDue.begin()->first);
+    g_packetDue.erase(g_packetDue.begin());
+  }
   for (size_t k = 0; k < g_deferred.size();) {
     if (g_deferred[k].tick <= tick) { const ScriptCmd d = g_deferred[k];  g_deferred.erase(g_deferred.begin() + k);  RunInputCmd(d, tick); }
     else ++k;
@@ -3386,6 +3471,14 @@ void __fastcall GameCycleHook(GameImpl* self, void*) {
       c.ran = true;
     }
     RunScriptCmd(c, tick);
+  }
+  if (g_record && g_inputUsed) {
+    // The virtual cursor and keys stand in for the real ones while the setup's input verbs (and their button releases)
+    // are still to run, as in a replay; then the player's real mouse and keys take over.
+    bool more = !g_deferred.empty();
+    for (size_t i = g_scriptPos; i < g_script.size() && !more; ++i) more = IsInputVerb(g_script[i].verb);
+    if (g_in.active != more) Log("input: tick %d: %s", tick, more ? "the setup's input verbs again (virtual cursor and keys)" : "the setup's input verbs are done; the real mouse and keys from now");
+    g_in.active = more;
   }
   if (cfg.turbo) SetDrawing(WantDraw(tick));
   if (g_botTick) g_botTick(tick);
@@ -4191,11 +4284,11 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   if (g_audio) InstallAudioHooks();
   else if (g_events) InstallMessageHook();
   SetWindowsHookExA(WH_CBT, &MissionDialogCbt, nullptr, GetCurrentThreadId());
-  if (!g_record) {
-    g_realGetCursorPos     = reinterpret_cast<GetCursorPosFn>(PatchIat(IatGetCursorPos, reinterpret_cast<void*>(&VirtualGetCursorPos)));
-    g_realGetAsyncKeyState =
-      reinterpret_cast<GetAsyncKeyStateFn>(PatchIat(IatGetAsyncKeyState, reinterpret_cast<void*>(&VirtualGetAsyncKeyState)));
-  }
+  // In a recording the virtual cursor and keys are active only while a setup script's input verbs run (GameCycleHook);
+  // otherwise they pass the real ones through.
+  g_realGetCursorPos     = reinterpret_cast<GetCursorPosFn>(PatchIat(IatGetCursorPos, reinterpret_cast<void*>(&VirtualGetCursorPos)));
+  g_realGetAsyncKeyState =
+    reinterpret_cast<GetAsyncKeyStateFn>(PatchIat(IatGetAsyncKeyState, reinterpret_cast<void*>(&VirtualGetAsyncKeyState)));
 
   if (!cfg.script.empty()) LoadScript(cfg.script);
   if (g_record) InstallRecordHooks();

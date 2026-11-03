@@ -387,9 +387,14 @@ make -C missions record MISSION=p12.dll         # CAMPAIGN= defaults to harness/
   own play prefix isn't touched; mission DLLs are mirrored from it as for every run). The game runs in real time with
   the frame limiter, sound and music as prefix-harness's ini has them (`--silent` turns them off), the real mouse and
   keys (no virtual cursor, no forced focus), the game's own questions answered by the player (the message box isn't
-  intercepted), and no tick limit or timeout. The make target runs it under gamescope in a Wine virtual desktop
+  intercepted), and no tick limit or timeout. It refuses to run when the prefix resolves to prefix/ (no prefix-harness,
+  or `OP2_HARNESS_PREFIX` pointing there). It holds OPU/saves's lock for the session (`shell.py --clean-saves` waits for
+  it, saying who holds it; the lock file `OPU/saves.harness-lock` names the holder). The make target runs it under gamescope in a Wine virtual desktop
   (`--desktop`, default 1088x816 around the 1024x768 game; `REC_SIZE`, `REC_W`, `REC_H`, `REC_OUT` change it). An
-  optional `--script` is a setup script (it runs as in any run and is copied to the top of the recording).
+  optional `--script` is a setup script (it runs as in any run and is copied to the top of the recording); its input
+  verbs run through the harness's virtual cursor and keys, as in a replay, and the real mouse and keys take over once
+  the last of them has run (telemetry then has the player's own `view` and `selected`, which a replay doesn't share).
+  A recording played on as a setup isn't recorded twice: packets the `packet` verb injected are left out.
 - **What is captured** (harness.cpp "Recording a player's own game"). The UI never runs an order: each command writes its
   packet into the local player's pending slot of the command queue (0x490810), and `GameImpl::ProcessGameCycle`
   hands each player's slot to `PlayerImpl::ProcessCommandPacket` (0x40E300) at 0x489FF5 on every 4th tick, before the
@@ -397,9 +402,13 @@ make -C missions record MISSION=p12.dll         # CAMPAIGN= defaults to harness/
   after any overwrite in the slot. ctNop and ctMachineSettings (machine speed, memory and window size, which the frame
   sends itself every 32 ticks and only a debug line reads) are left out. Selection, scrolling, the pane's pages and
   other UI that sends nothing don't change the game and aren't recorded.
-- **The script.** One line per packet, `T packet TYPE HEX  # comment`: the command type and its data bytes, run by the
-  replay in the cycle that starts at tick T (a multiple of 4): the `packet` verb puts those bytes into the slot just as
-  `ProcessCommandPacket` reads it, so the same bytes run at the same point of the same cycle. The comment says what it
+- **The script.** One line per packet, `T packet TYPE HEX [+TAIL]  # comment`: the command type (1-53) and its
+  `dataLength` data bytes, and TAIL, the slot's bytes after them up to its last nonzero one (what earlier packets left
+  there; handlers read by their own counts, so the slot's whole 99 data bytes are kept), run by the replay in the cycle
+  that starts at tick T (a multiple of 4): the `packet` verb puts those bytes into the slot (the rest zero) just as
+  `ProcessCommandPacket` reads it, so the same bytes run at the same point of the same cycle. A `packet` whose cycle
+  doesn't hand the slot over (a cycle that skips packet processing) is dropped with a WARN, and shell mode refuses
+  `packet` lines (no hook there). The comment says what it
   does with the units as `id(TYPE@x,y)` (file tiles, when it ran): `= verb ...` when a harness verb builds the same
   bytes (one unit, tile centres), `~ verb ...` for the nearest verb (the UI's Move carries the clicked pixel, not the
   tile's centre, and a selection gives one packet for every unit), else a description (`GameOpt 20 = 40` for a game
@@ -407,12 +416,15 @@ make -C missions record MISSION=p12.dll         # CAMPAIGN= defaults to harness/
   a comment only. The header has the replay command line; the last line says how the session ended.
 - **Saves and loads.** Save as often as you like: TApp::SaveGame (0x4877E0) and TApp::LoadGame (0x4878F0) are hooked.
   A save writes a sidecar folder beside the save, `OPU/saves/SGAMEn.OP2.rec/` in prefix-harness (packets.txt, the
-  telemetry so far, meta.txt with the tick and the session's identity: mission, seed, difficulty, carry-over, setup
-  script). A load puts them back, so recording.txt is always the one linear history that led to the loaded game, and the
+  telemetry so far, meta.txt with the tick, the save file's size and FNV hash, and the session's identity: mission,
+  seed, difficulty, carry-over, setup script without its `savegame`/`loadgame` lines; written last, only when the rest
+  was written). A load puts them back, so recording.txt is always the one linear history that led to the loaded game, and the
   abandoned branch is gone (`# load ...` header lines say what each load rolled back; harness.log has every packet that
   ran, abandoned ones included). Slots save the pending orders too: an order clicked just before a save runs after the
-  load and is recorded then. Loading a save made outside a recording session, or for another start, marks the recording
-  `# BROKEN: ...` (it no longer replays). A new session in the same `REC_OUT` keeps the previous files as
+  load and is recorded then. Loading a save whose sidecar is missing, of another start, of another file (the slot saved
+  over without a recording: the shell, plain play, a run that isn't a recording) or of another tick marks the recording
+  `# BROKEN: ...` (it no longer replays). A failed save, and a `savegame` in a run that isn't a recording, delete the
+  slot's sidecar. recording.txt is rewritten whole after every change (a temporary file renamed over it). A new session in the same `REC_OUT` keeps the previous files as
   `recording-<time>.txt`; loading a save from an earlier session resumes that history.
 - **Turning it into a win script and an oracle run** (coordinator). Copy recording.txt to
   `harness/oracle/missions/<m>.txt`, write the header (what the mission asks, the plan as played; keep the packet lines),
@@ -429,14 +441,16 @@ make -C missions record MISSION=p12.dll         # CAMPAIGN= defaults to harness/
   `--script WIN --loads S:L,...` (with `--mission`, `--campaign`, `--ticks`) instead plays a win script in a
   `--record --fast` session that saves at tick S and loads that save at tick L (script verbs `savegame NAME` /
   `loadgame NAME`, which run once each, after the cycle's samples, and stay comments in the recording), and compares
-  its `--eco` telemetry with the plain replay: whether saving and loading are faithful for that mission.
+  its `--eco` telemetry with the plain replay: whether saving and loading are faithful for that mission (MapObject +0x7C
+  masked, the hive slot numbers reported apart). `--input` checks a setup script with input verbs in a recording.
 - **Limits.** op2-missionhost (op2-sim) doesn't read `packet` lines yet, so the op2-rs comparison needs them translated
   (a `~ move` isn't byte-exact: the UI's click pixel). Only the local player's packets are recorded (single player).
   A load restores the game as the save holds it; across the p08, e05, e10, p12 and e01 scripts a loaded game went on
-  exactly as the saved one would have (the plain telemetry byte for byte, the win at the same tick) except for two
-  internal values in `--eco` telemetry: a structure hive's slot number in HiveManager's array, and every unit's
-  MapObject +0x7C, a heap address (0x06xxxxxx, 0x78 apart from unit to unit) that a loaded game allocates 2 MB away.
-  `record_check.py` masks those two. Sound on during a recording hasn't been tested for
+  as the saved one would have (the plain telemetry byte for byte, the win at the same tick) apart from internal values
+  in `--eco` telemetry: every unit's MapObject +0x7C, a heap address (0x06xxxxxx, 0x78 apart from unit to unit) that a
+  loaded game allocates 2 MB away, and the structure hives' slot numbers in HiveManager's array, which stay different to
+  the end without anything else differing; and in p12, Eden's hive counters read 0 for up to ~140 ticks after a load.
+  The measured scope is in notes/uncertain-claims.md ("a load replays like continuing"). Sound on during a recording hasn't been tested for
   determinism (the checks run silent; replays are always silent): compare the first real recording's replay with its
   telemetry. Agents' harness runs share prefix-harness's wineserver and can take the foreground (input runs do): don't
   run input-verb runs while David records. Mission dialogs from a DLL are suppressed as in every run.

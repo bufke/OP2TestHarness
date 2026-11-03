@@ -175,6 +175,7 @@ def main() -> int:
     ap.add_argument("--campaign", type=Path)
     ap.add_argument("--ticks", type=int, default=700, help="the recorded session ends at this tick (0: the mission's end)")
     ap.add_argument("--steps", type=Path, help="other driver steps (explore: no replay or checks)")
+    ap.add_argument("--input", action="store_true", help="check a setup script with input verbs in a recording instead")
     ap.add_argument("--desktop", metavar="WxH", help="play in a Wine virtual desktop, as `make -C missions record` does")
     ap.add_argument("--script", type=Path, help="fast mode: a win script played by a `--record --fast` session ...")
     ap.add_argument("--loads", metavar="S:L,...", help="... that saves at tick S and loads that save at tick L (pairs "
@@ -183,6 +184,8 @@ def main() -> int:
     out = args.out.resolve()
     if args.script:
         return fast_check(args, out)
+    if args.input:
+        return input_check(out)
     rec = out / "rec"
     steps = args.steps.read_text() if args.steps else STEPS
     code = record(args, rec, steps)
@@ -193,14 +196,46 @@ def main() -> int:
     return check(args, out, rec)
 
 
-def first_difference(a: Path, b: Path) -> str:
-    for la, lb in zip(a.read_text().splitlines(), b.read_text().splitlines()):
-        if la != lb:
-            ja, jb = json.loads(la), json.loads(lb)
-            for k in ja:
-                if ja[k] != jb.get(k):
-                    return f"tick {ja['tick']}: `{k}` differs"
-    return "line counts differ"
+INPUT_SETUP = """0 coords file
+20 select 43          # an Evacuation Transport (e01's ids)
+30 click tile 25 10   # moves it: the UI's Move packet, through the harness's virtual cursor
+"""
+
+
+def strip_input_state(path: Path) -> list:
+    """Telemetry without `view` and `selected`: after a recording's setup input the player's own view and selection."""
+    lines = []
+    for line in path.read_text().splitlines():
+        t = json.loads(line)
+        t.pop("view", None)
+        t.pop("selected", None)
+        lines.append(t)
+    return lines
+
+
+def input_check(out: Path) -> int:
+    """A setup script with input verbs in a `--record --fast` session runs as in a plain run (the virtual cursor and
+    keys are active while they run): the same telemetry, the UI's packet recorded once, and the recording replays."""
+    out.mkdir(parents=True, exist_ok=True)
+    setup = out / "input_setup.txt"
+    setup.write_text(INPUT_SETUP)
+    common = ["--mission", "e01.dll", "--ticks", "300", "--telemetry-every", "10", "--trace-every", "4"]
+    runs = {}
+    for name, extra in (("rec", ["--record", "--fast", "--script", str(setup)]), ("plain", ["--script", str(setup)])):
+        p = subprocess.run([str(HERE / "run.sh"), *extra, *common, "--out", str(out / name)], capture_output=True, text=True)
+        assert p.returncode == 0, p.stdout + p.stderr
+        runs[name] = out / name
+    recorded = [line for line in (runs["rec"] / "recording.txt").read_text().splitlines() if re.match(r"^\d+ packet ", line)]
+    assert len(recorded) == 1, ("the setup's click should give one Move packet", recorded)
+    assert strip_input_state(runs["rec"] / "telemetry.jsonl") == strip_input_state(runs["plain"] / "telemetry.jsonl"), \
+        "the recording session's setup input didn't play as in a plain run"
+    p = subprocess.run([str(HERE / "run.sh"), "--script", str(runs["rec"] / "recording.txt"), *common, "--out", str(out / "replay")],
+                       capture_output=True, text=True)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert strip_input_state(out / "replay" / "telemetry.jsonl") == strip_input_state(runs["rec"] / "telemetry.jsonl"), "replay differs"
+    print(f"input check: the setup's click recorded once ({recorded[0].split('#')[0].strip()}); session = plain run = replay "
+          "(telemetry without view and selection)")
+    return 0
 
 
 def fast_check(args, out: Path) -> int:
@@ -236,38 +271,42 @@ def fast_check(args, out: Path) -> int:
     assert p.returncode == 0, p.stdout + p.stderr
     a, b = rec / "telemetry.jsonl", replay / "telemetry.jsonl"
     end = json.loads(a.read_text().splitlines()[-1])
-    masked = {"hive slot": 0, "the address at +0x7C": 0}
-
-    def unmasked(path: Path) -> list:
-        # Two things a load renumbers without changing the game (measured on p08, e05, e10, p12, e01): the slot of a
-        # structure's hive in HiveManager's array (`hive`'s last value), and every unit's MapObject +0x7C, a heap address
-        # (0x06xxxxxx, 0x78 apart from unit to unit: a per-unit record) that a loaded game allocates elsewhere.
-        lines = []
-        for line in path.read_text().splitlines():
-            t = json.loads(line)
+    # Every unit's MapObject +0x7C is a heap address (0x06xxxxxx, 0x78 apart from unit to unit: a per-unit record) that a
+    # loaded game allocates elsewhere: masked. Everything else is compared; a structure hive's slot number in
+    # HiveManager's array (`hive`'s last value) is reported on its own, with the ticks it differs over, since a
+    # different slot is a sign that the loaded game isn't the continued one, even when nothing else ever differs.
+    ta, tb = a.read_text().splitlines(), b.read_text().splitlines()
+    slot_ticks, other = [], None
+    for la, lb in zip(ta, tb):
+        if la == lb:
+            continue
+        ja, jb = json.loads(la), json.loads(lb)
+        for t in (ja, jb):
             for u in t["units"]:
-                if "hive" in u:
-                    u["hive"] = u["hive"][:5]
                 if "raw" in u:
                     raw = bytearray.fromhex(u["raw"])
                     raw[0x7C - 0x48:0x80 - 0x48] = bytes(4)
                     u["raw"] = raw.hex()
-            lines.append(t)
-        return lines
-    ta, tb = a.read_text().splitlines(), b.read_text().splitlines()
-    for la, lb in zip(ta, tb):
-        if la != lb:
-            ua = {u["id"]: u for u in json.loads(la)["units"]}
-            ub = {u["id"]: u for u in json.loads(lb)["units"]}
-            for i in set(ua) & set(ub):
-                masked["hive slot"] += ua[i].get("hive") != ub[i].get("hive")
-                masked["the address at +0x7C"] += ua[i].get("raw") != ub[i].get("raw")
-    same = unmasked(a) == unmasked(b)
+        ua = {u["id"]: u for u in ja["units"]}
+        ub = {u["id"]: u for u in jb["units"]}
+        if any("hive" in u and ub.get(i, {}).get("hive", [None])[-1:] != u["hive"][-1:] for i, u in ua.items()):
+            slot_ticks.append(ja["tick"])
+        for t in (ja, jb):
+            for u in t["units"]:
+                if "hive" in u:
+                    u["hive"] = u["hive"][:-1]
+        if ja != jb and other is None:
+            other = ja["tick"]
+            diff = [f"unit {i} {k}: {u.get(k)} / {ub.get(i, {}).get(k)}" for i, u in ua.items() for k in u
+                    if u.get(k) != ub.get(i, {}).get(k)][:3] or [k for k in ja if ja[k] != jb.get(k)][:3]
+            other = f"tick {ja['tick']}: {'; '.join(map(str, diff))}"
+    if len(ta) != len(tb) and other is None:
+        other = f"{len(ta)} lines against {len(tb)}"
+    slots = f"; the hive slot numbers differ at {len(slot_ticks)} samples, ticks {slot_ticks[0]}-{slot_ticks[-1]}" if slot_ticks else ""
     print(f"{args.mission}: {len(names)} loads ({'; '.join(l.split(': ', 1)[1].split(',')[0] for l in loads)}); the session ended at "
-          f"tick {end['tick']} (end {end['end']}); telemetry (--eco, every 10 ticks, {len(ta)} lines) "
-          f"{'IDENTICAL' if same else 'DIFFERS: ' + first_difference(a, b)} to the replay's"
-          f"{'' if a.read_bytes() == b.read_bytes() else ' apart from ' + ', '.join(f'{k} ({n} unit samples)' for k, n in masked.items() if n)}")
-    return 0 if same else 1
+          f"tick {end['tick']} (end {end['end']}); telemetry (--eco, every 10 ticks, {len(ta)} lines, +0x7C masked) "
+          f"{'DIFFERS at ' + other if other else 'IDENTICAL'} to the replay's{slots}")
+    return 1 if other else 0
 
 
 def packet_lines(log: Path) -> list[str]:
@@ -283,7 +322,7 @@ def packet_lines(log: Path) -> list[str]:
 def check(args, out: Path, rec: Path) -> int:
     recording = rec / "recording.txt"
     text = recording.read_text()
-    recorded = [" ".join(line.split("#")[0].split()[:4]).replace(" packet", "") for line in text.splitlines()
+    recorded = [" ".join(line.split("#")[0].split()[:4:]).replace(" packet", "").split(" +")[0] for line in text.splitlines()
                 if re.match(r"^\d+ packet ", line)]
     session = packet_lines(rec / "harness.log")
     assert "# load " in text and "BROKEN" not in text, "the session's load isn't in the recording"

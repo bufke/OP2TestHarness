@@ -297,10 +297,9 @@ class SavesAside:
     <out>/saves."""
 
     def __init__(self, saves: Path, out: Path):
-        import fcntl
-        # Runs with --clean-saves take turns (two at once moved each other's folders: `record --jobs 2`).
-        self.lock = open(saves.parent / "saves.harness-lock", "w")
-        fcntl.flock(self.lock, fcntl.LOCK_EX)
+        # Runs with --clean-saves take turns (two at once moved each other's folders: `record --jobs 2`), and wait for a
+        # recording session (`run.py --record`, which holds the lock while David plays); the wait says who holds it.
+        self.lock = run.lock_saves(f"shell.py --clean-saves --out {out}")
         self.saves, self.out = saves, out
         self.aside = saves.parent / f"saves.harness-aside-{os.getpid()}"
         saves.mkdir(parents=True, exist_ok=True)

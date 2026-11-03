@@ -191,6 +191,49 @@ def convert_shots(out: Path, keep_bmp: bool) -> int:
     return n
 
 
+def lock_saves(holder: str):
+    """Takes OPU/saves's lock (shell.py --clean-saves moves the folder aside under it), saying who holds it while it
+    waits, and writes `holder` into it for the next one. Returns the open lock file: the lock lasts until it closes."""
+    saves = OPU_DIR / "saves"
+    saves.mkdir(parents=True, exist_ok=True)
+    f = open(saves.parent / "saves.harness-lock", "a+")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        f.seek(0)
+        print(f"waiting for the saves folder's lock, held by: {f.read().strip() or 'an older harness run'}", file=sys.stderr)
+        fcntl.flock(f, fcntl.LOCK_EX)
+    f.seek(0)
+    f.truncate()
+    f.write(f"pid {os.getpid()} since {time.strftime('%H:%M:%S')}: {holder}\n")
+    f.flush()
+    return f
+
+
+def end_game(game: subprocess.Popen, out_win: str, desktop: bool) -> None:
+    """Kills what is left of a run's game: its process group while it is alive (prefix-harness's wineserver and its
+    services run in their own sessions, so they aren't in it), and with a virtual desktop also this run's Outpost2.exe
+    and desktop explorer, which Wine starts outside the group (found by the run's OP2H_OUT in their environment)."""
+    if game.poll() is None:
+        try:
+            os.killpg(game.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    if not desktop:
+        return
+    marker = f"OP2H_OUT={out_win}".encode()
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            cmd = (proc / "cmdline").read_bytes()
+            if b"Outpost2.exe" not in cmd or b"wineserver" in cmd or marker not in (proc / "environ").read_bytes().split(b"\0"):
+                continue
+            os.kill(int(proc.name), signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            continue
+
+
 def keep_previous_recording(out: Path) -> None:
     """A new recording session starts over in OUT: the previous session's recording and telemetry are kept beside it
     as recording-<time>.txt and telemetry-<time>.jsonl (a session resumed by loading a save gets its history back from
@@ -273,6 +316,9 @@ def main() -> int:
     if args.record:
         if scn:
             ap.error("--record plays a mission, not a scenario")
+        if PREFIX.resolve() == PLAY_PREFIX.resolve():
+            ap.error(f"--record only runs in the harness's own prefix, and {PREFIX} is David's play prefix "
+                     "(create prefix-harness/, a copy of prefix/, or point OP2_HARNESS_PREFIX at another copy)")
         if not args.fast:
             args.display = args.display or os.environ.get("DISPLAY")
             if not args.display:
@@ -306,18 +352,13 @@ def main() -> int:
     saves_lock = None  # Held (open) until the run ends.
     if args.record:
         keep_previous_recording(out)
-        signal.signal(signal.SIGTERM, lambda signum, _frame: sys.exit(128 + signum))
+        # The terminal or gamescope going away (SIGTERM, SIGHUP) ends the game too (the `except` around the wait).
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, lambda signum, _frame: sys.exit(128 + signum))
     # The saves (and their recordings) stay put while David plays: shell.py --clean-saves moves the folder aside, under
     # this lock (harness/test/record_check.py holds it itself and says so).
     if args.record and not os.environ.get("OP2H_SAVES_LOCK_HELD"):
-        saves = OPU_DIR / "saves"
-        saves.mkdir(parents=True, exist_ok=True)
-        saves_lock = open(saves.parent / "saves.harness-lock", "w")
-        try:
-            fcntl.flock(saves_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print("run.py: waiting for a shell run with --clean-saves to finish ...", file=sys.stderr)
-            fcntl.flock(saves_lock, fcntl.LOCK_EX)
+        saves_lock = lock_saves(f"run.py --record --mission {args.mission} --out {out}")
     for old in [*out.glob("shot_*.bmp"), *out.glob("shot_*.png"), out / "telemetry.jsonl", out / "harness.log",
                 out / "timeout_screen.png", out / "summary.json", out / "trace.jsonl", out / "gamedata.json", out / "audio.jsonl",
                 out / "scenario_script.txt", out / "state.json", out / "events.jsonl", out / "present.log"]:
@@ -391,22 +432,16 @@ def main() -> int:
                                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             code = game.wait(timeout=args.timeout or None)
-            if args.desktop:  # explorer can outlive the game: end the rest of the session's processes too.
-                try:
-                    os.killpg(game.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-        except (KeyboardInterrupt, SystemExit):  # A recording's terminal closed (Ctrl+C, SIGTERM): end the game too.
-            try:
-                os.killpg(game.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        except (KeyboardInterrupt, SystemExit):  # A recording's terminal closed (Ctrl+C, SIGTERM, SIGHUP).
+            end_game(game, env["OP2H_OUT"], args.desktop)
             raise
         except subprocess.TimeoutExpired:
             timed_out = True
             grab_screen(display, out / "timeout_screen.png")  # Usually shows the modal dialog that hung the game.
-            os.killpg(game.pid, signal.SIGKILL)
+            end_game(game, env["OP2H_OUT"], args.desktop)
             code = game.wait()
+        if args.desktop:  # The game and the desktop's explorer can outlive `wine explorer`'s start.exe.
+            end_game(game, env["OP2H_OUT"], True)
     elapsed = time.monotonic() - start
     if xvfb:
         xvfb.terminate()
