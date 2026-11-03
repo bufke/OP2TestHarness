@@ -232,7 +232,8 @@ Script verbs for colony experiments (oracle scenarios `eco_*`, spec in `oracle/E
 5    kit      @5 TOKAMAK            # put a structure kit in a ConVec; `build <convec> <x> <y>` (the margin's bottom-right tile)
 5    bay      @4 0 TOKAMAK          # fill a factory bay; `transfercargo <factory> <bay> [1]` (1: a Spaceport's bay
                                     # into the rocket on its pad); `launch <spaceport> [x y]` launches that rocket
-5    cargo    @3 2 1000             # set a truck's cargo (CargoType, amount); `load`/`unload <truck>`
+5    cargo    @3 2 1000             # set a truck's cargo (CargoType, amount); `load`/`unload <building>`: the
+                                    # building whose dock holds the truck (Load/UnloadCargoTruck 0x424090/0x424240)
 5    poke     @2 0x1e 2 1200        # write a MapObject field (offset, size 1/2/4, value), e.g. damage
 1    peek     0x439A10 64           # log game memory as hex (up to 256 bytes): code as OPU patches it in memory
 10   tech     0 5317                # _Player::MarkResearchComplete(techID) for player 0, as a mission grants a topic
