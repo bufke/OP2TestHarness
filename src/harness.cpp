@@ -251,6 +251,15 @@ void WritePlayerEco(FILE* f, const PlayerImpl* p) {
   fputc(']', f);
 }
 
+// Every player's structures, then vehicles, player by player (the order telemetry, traces and the unit
+// scans have always used).
+template <class F> void ForEachPlayerUnit(F&& visit) {
+  for (int p = 0; p < g_gameImpl.numPlayers_; ++p) {
+    for (Unit u : PlayerBuildingEnum(p)) visit(u);
+    for (Unit u : PlayerVehicleEnum(p))  visit(u);
+  }
+}
+
 int g_lastTelemTick = -1;
 bool g_inputUsed = false;  // The script has input verbs: telemetry adds the selection and the view.
 void WriteInputState(FILE* f);
@@ -282,10 +291,7 @@ void WriteTelemetry(int tick) {
   }
   fputs("],\"units\":[", f);
   bool first = true;
-  for (int i = 0; i < game.numPlayers_; ++i) {
-    for (Unit u : PlayerBuildingEnum(i)) WriteUnit(f, first, u);
-    for (Unit u : PlayerVehicleEnum(i))  WriteUnit(f, first, u);
-  }
+  ForEachPlayerUnit([&](Unit u) { WriteUnit(f, first, u); });
   fputc(']', f);
   if (g_eco) {
     fputs(",\"beacons\":[", f);
@@ -1136,11 +1142,14 @@ std::string UpperName(std::string s) {
   return s;
 }
 
+// Whether an object index is inside the object table: reading the table past its end crashes the game.
+bool InObjectTable(int id) { return id >= 0 && size_t(id) < MapImpl::GetInstance()->MaxNumUnits(); }
+
 // Whether the unit's object index is in range and holds a live object. Unit::IsLive alone reads the object table
 // at any index, so an id past its end (a script from another army history) crashes the game.
 bool Exists(Unit u) {
   const int id = u.GetID();
-  return id > 0 && size_t(id) < MapImpl::GetInstance()->MaxNumUnits() && u.IsLive();
+  return id > 0 && InObjectTable(id) && u.IsLive();
 }
 
 bool ValidName(const std::string& n) {
@@ -1182,38 +1191,34 @@ void NameScan(bool baseline = false) {
   const size_t n = MapImpl::GetInstance()->MaxNumUnits();
   if (g_nameSeen.size() < n) g_nameSeen.resize(n, -1);
   std::vector<uint8_t> now(g_nameSeen.size(), 0);
-  for (int p = 0; p < g_gameImpl.numPlayers_; ++p) {
-    auto visit = [&](Unit u) {
-      if (!u.IsLive()) return;
-      const int id = u.GetID(), type = int(u.GetType());
-      if (id <= 0 || size_t(id) >= g_nameSeen.size()) return;
-      now[id] = 1;
-      if (g_nameSeen[id] == type) return;
-      g_nameSeen[id] = type;
-      const Location at = u.GetLocation();
-      // The pending name that fits best: a structure inside its rectangle, a vehicle of the type nearest its factory
-      // (within NameFactoryTiles; ties go to the earlier order).
-      int best = -1, bestDist = INT_MAX;
-      for (size_t k = 0; k < g_pendingNames.size(); ++k) {
-        const PendingName& w = g_pendingNames[k];
-        if (w.owner != u.GetOwner() || w.structure != u.IsBuilding()) continue;
-        int dist = 0;
-        if (w.structure) {
-          if (at.x < w.x1 || at.x > w.x2 || at.y < w.y1 || at.y > w.y2) continue;
-        } else {
-          dist = std::max(abs(at.x - w.fx), abs(at.y - w.fy));
-          if (type != w.type || dist > NameFactoryTiles) continue;
-        }
-        if (dist < bestDist) best = int(k), bestDist = dist;
+  ForEachPlayerUnit([&](Unit u) {
+    if (!u.IsLive()) return;
+    const int id = u.GetID(), type = int(u.GetType());
+    if (id <= 0 || size_t(id) >= g_nameSeen.size()) return;
+    now[id] = 1;
+    if (g_nameSeen[id] == type) return;
+    g_nameSeen[id] = type;
+    const Location at = u.GetLocation();
+    // The pending name that fits best: a structure inside its rectangle, a vehicle of the type nearest its factory
+    // (within NameFactoryTiles; ties go to the earlier order).
+    int best = -1, bestDist = INT_MAX;
+    for (size_t k = 0; k < g_pendingNames.size(); ++k) {
+      const PendingName& w = g_pendingNames[k];
+      if (w.owner != u.GetOwner() || w.structure != u.IsBuilding()) continue;
+      int dist = 0;
+      if (w.structure) {
+        if (at.x < w.x1 || at.x > w.x2 || at.y < w.y1 || at.y > w.y2) continue;
+      } else {
+        dist = std::max(abs(at.x - w.fx), abs(at.y - w.fy));
+        if (type != w.type || dist > NameFactoryTiles) continue;
       }
-      if (best >= 0) {
-        BindName(g_pendingNames[best].name, u);
-        g_pendingNames.erase(g_pendingNames.begin() + best);
-      }
-    };
-    for (Unit u : PlayerBuildingEnum(p)) visit(u);
-    for (Unit u : PlayerVehicleEnum(p))  visit(u);
-  }
+      if (dist < bestDist) best = int(k), bestDist = dist;
+    }
+    if (best >= 0) {
+      BindName(g_pendingNames[best].name, u);
+      g_pendingNames.erase(g_pendingNames.begin() + best);
+    }
+  });
   for (size_t id = 1; id < g_nameSeen.size(); ++id) if (!now[id]) g_nameSeen[id] = -1;
 }
 
@@ -1222,11 +1227,12 @@ Unit ResolveDollar(const std::string& word, std::string* why) {
   const std::string body = word.substr(1);
   const size_t at = body.find('@');
   if (at == std::string::npos) {
-    const auto it = g_names.find(UpperName(body));
+    const std::string key = UpperName(body);
+    const auto it = g_names.find(key);
     if (it == g_names.end()) {
       bool waiting = false;
-      for (const auto& w : g_pendingNames) waiting |= w.name == UpperName(body);
-      const auto gone = g_goneNames.find(UpperName(body));
+      for (const auto& w : g_pendingNames) waiting |= w.name == key;
+      const auto gone = g_goneNames.find(key);
       if (why) *why = waiting ? "name " + body + " is bound to nothing yet (its unit hasn't appeared)"
                     : gone != g_goneNames.end() ? "the unit named " + body + " (id " + std::to_string(gone->second) + ") is gone"
                     : "no name " + body;
@@ -1247,16 +1253,12 @@ Unit ResolveDollar(const std::string& word, std::string* why) {
   }
   x += g_scriptFileCoords ? PadTiles() : 0;
   int best = INT_MAX, bestId = 0;
-  for (int p = 0; p < g_gameImpl.numPlayers_; ++p) {
-    auto visit = [&](Unit u) {
-      if (!u.IsLive() || u.GetType() != type) return;
-      const Location l = u.GetLocation();
-      const int d = std::max(abs(l.x - x), abs(l.y - y));
-      if (d <= NameNearTiles && d < best) best = d, bestId = u.GetID();
-    };
-    for (Unit u : PlayerBuildingEnum(p)) visit(u);
-    for (Unit u : PlayerVehicleEnum(p))  visit(u);
-  }
+  ForEachPlayerUnit([&](Unit u) {
+    if (!u.IsLive() || u.GetType() != type) return;
+    const Location l = u.GetLocation();
+    const int d = std::max(abs(l.x - x), abs(l.y - y));
+    if (d <= NameNearTiles && d < best) best = d, bestId = u.GetID();
+  });
   if (!bestId && why) *why = "no live " + body.substr(0, at) + " within " + std::to_string(NameNearTiles) + " tiles of " + body.substr(at + 1);
   return Unit(bestId);
 }
@@ -1265,15 +1267,12 @@ Unit ScriptUnit(const std::string& s, std::string* why = nullptr) {
   if (!s.empty() && s[0] == '@') { const size_t n = atoi(s.c_str() + 1);  return Unit(n < g_spawned.size() ? g_spawned[n] : 0); }
   if (!s.empty() && s[0] == '$') return ResolveDollar(s, why);
   const int id = atoi(s.c_str());
-  if (id < 0 || size_t(id) >= MapImpl::GetInstance()->MaxNumUnits()) return Unit();  // Past the object table: reading it crashes.
-  return Unit(id);
+  return InObjectTable(id) ? Unit(id) : Unit();
 }
 
 // A plain numeric unit word whose object index is past the table (the case that used to crash the game).
 bool IdOutOfRange(const std::string& s) {
-  if (s.empty() || s[0] == '@' || s[0] == '$') return false;
-  const int id = atoi(s.c_str());
-  return id < 0 || size_t(id) >= MapImpl::GetInstance()->MaxNumUnits();
+  return !s.empty() && s[0] != '@' && s[0] != '$' && !InObjectTable(atoi(s.c_str()));
 }
 
 bool IsInputVerb(const std::string& v) {
@@ -2362,47 +2361,43 @@ void SessionTick(int tick) {
   if (g_seen.size() < MapImpl::GetInstance()->MaxNumUnits()) g_seen.resize(MapImpl::GetInstance()->MaxNumUnits());
   std::vector<uint8_t>& now = g_seenNow;
   now.assign(g_seen.size(), 0);
-  for (int p = 0; p < g_gameImpl.numPlayers_; ++p) {
-    auto visit = [&](Unit u) {
-      if (!u.IsLive()) return;
-      const MapObject* mo = u.GetMapObject();
-      const int id = u.GetID();
-      if (id <= 0 || size_t(id) >= g_seen.size()) return;
-      now[id] = 1;
-      SeenUnit& s = g_seen[id];
-      const Location at = u.GetLocation();
-      const int type = int(u.GetType()), owner = u.GetOwner(), x = at.x - pad, y = at.y;
-      if (!s.live || s.type != type || s.owner != owner) {
-        if (s.live && !baseline) EventUnit("gone", id, s.type, s.owner, s.x, s.y);
-        if (!baseline) EventUnit("new", id, type, owner, x, y);
-        s = SeenUnit{ type, owner, mo->command_, mo->damage_, x, y, true };
-        return;
-      }
-      if (mo->damage_ > s.damage && !baseline) {
-        char extra[64];
-        snprintf(extra, sizeof(extra), ",\"dmg\":%d,\"hp\":%d", mo->damage_ - s.damage, u.GetMaxHitpoints() - mo->damage_);
-        EventUnit("hit", id, type, owner, x, y, extra);
-      }
-      const int cmd = mo->command_;
-      if (owner == 0 && cmd == int(CommandType::Nop) && s.cmd != cmd && s.cmd != int(CommandType::Idle) && !baseline) {
-        // Where it was going (a vehicle stopped short, e.g. by an EMP, isn't "arrived"), and whether it is EMPed.
-        char extra[96];
-        snprintf(extra, sizeof(extra), ",\"was\":\"%s\",\"dest\":[%d,%d],\"emp\":%d", CommandName(s.cmd), s.destX, s.destY,
-                 (mo->flags_ & MoFlagEMPed) ? 1 : 0);
-        EventUnit("idle", id, type, owner, x, y, extra);
-      }
-      if (u.IsVehicle() && cmd != int(CommandType::Nop)) {
-        const PathContext* pc = mo->pPathContext_;
-        if (pc != s.path) s.path = (pc && !IsBadReadPtr(pc, sizeof(PathContext))) ? pc : nullptr;
-        if (s.path) s.destX = pc->dstTileX - pad, s.destY = pc->dstTileY;
-      } else if (cmd == int(CommandType::Nop)) {
-        s.destX = s.destY = -1;
-      }
-      s.cmd = cmd, s.damage = mo->damage_, s.x = x, s.y = y;
-    };
-    for (Unit u : PlayerBuildingEnum(p)) visit(u);
-    for (Unit u : PlayerVehicleEnum(p))  visit(u);
-  }
+  ForEachPlayerUnit([&](Unit u) {
+    if (!u.IsLive()) return;
+    const MapObject* mo = u.GetMapObject();
+    const int id = u.GetID();
+    if (id <= 0 || size_t(id) >= g_seen.size()) return;
+    now[id] = 1;
+    SeenUnit& s = g_seen[id];
+    const Location at = u.GetLocation();
+    const int type = int(u.GetType()), owner = u.GetOwner(), x = at.x - pad, y = at.y;
+    if (!s.live || s.type != type || s.owner != owner) {
+      if (s.live && !baseline) EventUnit("gone", id, s.type, s.owner, s.x, s.y);
+      if (!baseline) EventUnit("new", id, type, owner, x, y);
+      s = SeenUnit{ type, owner, mo->command_, mo->damage_, x, y, true };
+      return;
+    }
+    if (mo->damage_ > s.damage && !baseline) {
+      char extra[64];
+      snprintf(extra, sizeof(extra), ",\"dmg\":%d,\"hp\":%d", mo->damage_ - s.damage, u.GetMaxHitpoints() - mo->damage_);
+      EventUnit("hit", id, type, owner, x, y, extra);
+    }
+    const int cmd = mo->command_;
+    if (owner == 0 && cmd == int(CommandType::Nop) && s.cmd != cmd && s.cmd != int(CommandType::Idle) && !baseline) {
+      // Where it was going (a vehicle stopped short, e.g. by an EMP, isn't "arrived"), and whether it is EMPed.
+      char extra[96];
+      snprintf(extra, sizeof(extra), ",\"was\":\"%s\",\"dest\":[%d,%d],\"emp\":%d", CommandName(s.cmd), s.destX, s.destY,
+               (mo->flags_ & MoFlagEMPed) ? 1 : 0);
+      EventUnit("idle", id, type, owner, x, y, extra);
+    }
+    if (u.IsVehicle() && cmd != int(CommandType::Nop)) {
+      const PathContext* pc = mo->pPathContext_;
+      if (pc != s.path) s.path = (pc && !IsBadReadPtr(pc, sizeof(PathContext))) ? pc : nullptr;
+      if (s.path) s.destX = pc->dstTileX - pad, s.destY = pc->dstTileY;
+    } else if (cmd == int(CommandType::Nop)) {
+      s.destX = s.destY = -1;
+    }
+    s.cmd = cmd, s.damage = mo->damage_, s.x = x, s.y = y;
+  });
   for (size_t id = 1; id < g_seen.size(); ++id)
     if (g_seen[id].live && !now[id]) {
       if (!baseline) EventUnit("gone", int(id), g_seen[id].type, g_seen[id].owner, g_seen[id].x, g_seen[id].y);
@@ -2585,10 +2580,7 @@ void WriteSessionState(int tick) {
   });
   fputs("],\n\"units\":[\n", f);
   first = true;
-  for (int i = 0; i < game.numPlayers_; ++i) {
-    for (Unit u : PlayerBuildingEnum(i)) WriteStateUnit(f, first, u);
-    for (Unit u : PlayerVehicleEnum(i))  WriteStateUnit(f, first, u);
-  }
+  ForEachPlayerUnit([&](Unit u) { WriteStateUnit(f, first, u); });
   // Gaia: beacons (ore 0 common / 1 rare; bar 0 = 3-bar, 1 = 2-bar, 2 = 1-bar; surveyed by player 0), vents,
   // fumaroles, wreckage (its tech) and disasters.
   fputs("],\n\"gaia\":[", f);
