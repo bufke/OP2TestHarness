@@ -443,8 +443,24 @@ make -C missions record MISSION=p12.dll         # CAMPAIGN= defaults to harness/
   `loadgame NAME`, which run once each, after the cycle's samples, and stay comments in the recording), and compares
   its `--eco` telemetry with the plain replay: whether saving and loading are faithful for that mission (MapObject +0x7C
   masked, the hive slot numbers reported apart). `--input` checks a setup script with input verbs in a recording.
-- **Limits.** op2-missionhost (op2-sim) doesn't read `packet` lines yet, so the op2-rs comparison needs them translated
-  (a `~ move` isn't byte-exact: the UI's click pixel). Only the local player's packets are recorded (single player).
+- **Comparing a recording with op2-rs.** op2-missionhost reads `packet` lines: `op2-missionhost play e01.dll --script
+  recording.txt --compare DIR` (DIR: the session's own folder, or a replay of it with `--telemetry-every 10 --trace-every 4`)
+  decodes each packet's bytes (`op2_sim::original_packet`: unit ids, internal pixels to file tiles, map ids to unit kinds,
+  the research index to a tech id) into the op2-sim command a UI click makes, queues it for the cycle that starts at the
+  line's tick and plays the mission on, so the compare tools (`op2-inspect compare_run`, `game_verify missionhost=true`,
+  `tools/agent/missioncompare`) work on a recording as on a win script. A packet op2-sim has no equivalent for (Transfer,
+  Ally, GoAI, Guard on a tile, most GameOpt cheats, a stored-group selection) is listed in the summary as `unsupported
+  packet: tick T ...` and not run; chat, machine settings and packets for units that no longer exist are left out
+  silently. Packets only reach a cycle that is a multiple of 4 (a `packet` line at another tick is dropped with a note,
+  as the harness does). Run `e01_ui_packets` is such a recording (three UI Moves at click pixels) and replays exactly.
+  A verb script can stand in for a recording: `python3 harness/tools/packetize.py SCRIPT [--gamedata RUN/gamedata.json]
+  [--max-delay N] [--keep VERBS]` rewrites its orders as `packet` lines (each at the first free command cycle after the
+  verb's tick); runs `e01_packets`, `e02_packets`, `e03_packets`, `e04_packets`, `e05_packets`, `p02_lose_packets` and
+  `p03_packets` are such scripts played in the original and in op2-missionhost, all exact (Move, Dock, LoadCargo,
+  TransferCargo, Produce, Research, Train, Idle, Unidle, BuildWall, Attack, ...). Packetized e10, e11 and p10 (with
+  their Attack orders) were not exact and aren't kept as runs: leads in notes/findings-commands-audio.md.
+- **Limits.** Only the local player's packets are recorded (single player). The `= verb` and `~ verb` comments of a
+  recording are for reading; op2-missionhost reads the hex.
   A load restores the game as the save holds it; across the p08, e05, e10, p12 and e01 scripts a loaded game went on
   as the saved one would have (the plain telemetry byte for byte, the win at the same tick) apart from internal values
   in `--eco` telemetry: every unit's MapObject +0x7C, a heap address (0x06xxxxxx, 0x78 apart from unit to unit) that a
