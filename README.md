@@ -144,7 +144,7 @@ or `@N` for the unit made by the Nth `spawn` command, or a name (`$NAME`, "Unit 
      movewp <id> x,y[,r] ... | standground <id> x,y[,r] ... | patrol <id> <loop> x,y[,r] ...   # waypoints, range r
 1236 packet    2 012b0001003007a300    # a recorded UI packet (type, data hex), run inside the cycle starting at 1236
      savegame <file> | loadgame <file>  # TApp::SaveGame/LoadGame on OPU/saves/<file>, once each (recording tests)
-     gamespeed <1-10>   # what the in-game Game Speed buttons queue: ctGameOpt 0x14 = speed x 4 (0x4231C0), run 2 turns on
+     gamespeed <1-10>   # what the in-game Game Speed buttons queue: ctGameOpt 0x14 = speed x 4 (0x4231C0), which runs 2 turns later
 ```
 
 The last group builds the packets the UI sends (Guard, Attack on a tile, LightToggle, Move/Stand Ground/Patrol with up

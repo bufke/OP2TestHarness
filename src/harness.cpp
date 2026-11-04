@@ -3690,6 +3690,12 @@ void __fastcall GameCycleHook(GameImpl* self, void*) {
   if (cfg.turbo) SetDrawing(WantDraw(tick));
   if (g_botTick) g_botTick(tick);
   AudioTick(tick);
+  // GameImpl's speed (x 4) whenever it changes, for the `gamespeed` verb's timing in single player (harness.log).
+  static int missionSpeed = -1;
+  if (g_gameImpl.gameSpeed_ != missionSpeed) {
+    Log("speed: tick %d GameImpl speed %d (was %d)", tick, g_gameImpl.gameSpeed_, missionSpeed);
+    missionSpeed = g_gameImpl.gameSpeed_;
+  }
 
   // Sample at tick 1 (telemetry) / the first fully drawn frame (screenshot), then at multiples of the interval.
   if (cfg.telemEvery > 0 && tick >= g_nextTelem) { WriteTelemetry(tick);  g_nextTelem = (tick / cfg.telemEvery + 1) * cfg.telemEvery; }
@@ -4172,6 +4178,7 @@ int __fastcall DoModelessHook(void* self, void*, const char* res, HINSTANCE inst
 using ActivateShellFn = int(__thiscall*)(void*, int, MissionResults*);
 ActivateShellFn g_activateShell = nullptr;
 int g_shellGameTick = -1, g_shellEnd = 0;  // The shell's current game's tick; -1 outside a game.
+int g_shellSpeed = -1;  // GameImpl's speed last written as a `speed` event (-1: none yet in this game).
 
 int __fastcall ActivateShellHook(void* self, void*, int reason, MissionResults* r) {
   g_shellGameTick = -1;  // The game's panes and units go now: `state` probes stop reading them.
@@ -4248,6 +4255,7 @@ void __fastcall ShellCycleHook(GameImpl* self, void*) {
     g_scriptPos = 0;
     g_names.clear(), g_goneNames.clear(), g_pendingNames.clear(), g_nameSeen.clear();
     g_shellEnd = 0;
+    g_shellSpeed = -1;
     g_nextTelem = 0;
     RECT r = {};
     GetWindowRect(g_gameFrame.hWnd_, &r);
@@ -4270,9 +4278,10 @@ void __fastcall ShellCycleHook(GameImpl* self, void*) {
   if (tick % 500 == 0) ShellEvent("\"ev\":\"game\",\"what\":\"tick\",\"tick\":%d", tick);
   // GameImpl::gameSpeed_, the frame limiter's ticks per second (set at the start from GameStartInfo +0xAE, 0x4893CD;
   // by a ctGameOpt 0x14 on every machine, 0x422DBE).
-  static int lastSpeed = -1;
-  if (tick == 0 || g_gameImpl.gameSpeed_ != lastSpeed)
-    ShellEvent("\"ev\":\"game\",\"what\":\"speed\",\"tick\":%d,\"speed\":%d", tick, lastSpeed = g_gameImpl.gameSpeed_);
+  // The first cycle of each game (the new-game block above resets g_shellSpeed: a new game, or a load that goes back
+  // in time) always writes one.
+  if (g_gameImpl.gameSpeed_ != g_shellSpeed)
+    ShellEvent("\"ev\":\"game\",\"what\":\"speed\",\"tick\":%d,\"speed\":%d", tick, g_shellSpeed = g_gameImpl.gameSpeed_);
   const int end = int(self->gameTermReasons_);
   if (end != g_shellEnd) {
     ShellEvent("\"ev\":\"game\",\"what\":\"end\",\"tick\":%d,\"reason\":%d", tick, end);

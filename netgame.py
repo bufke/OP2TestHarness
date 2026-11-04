@@ -139,18 +139,15 @@ def pacing(run: Path) -> list:
     """The copy's game speed (GameImpl::gameSpeed_, shell.jsonl's `speed` events) over the game, each span with the
     ticks per wall second it ran at, from the ticks and times of the datagrams it sent (net.jsonl: one or more a turn).
     A span's first and last 40 ticks are left out (a change takes a turn or two to show in the limiter)."""
-    events = [json.loads(line) for line in (run / "shell.jsonl").read_text().splitlines() if '"speed"' in line] \
-        if (run / "shell.jsonl").exists() else []
-    changes = [(e["tick"], e["speed"]) for e in events if e.get("what") == "speed"]
-    sent = []
-    if (run / "net.jsonl").exists():
-        for line in (run / "net.jsonl").read_text().splitlines():
+    def lines(name: str):
+        """A log's JSON lines, skipping any a killed game left half written."""
+        for line in (run / name).read_text().splitlines() if (run / name).exists() else []:
             try:
-                d = json.loads(line)
+                yield json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if d.get("dir") == "send" and d.get("tick", 0) > 0:
-                sent.append((d["tick"], d["ms"]))
+    changes = [(e["tick"], e["speed"]) for e in lines("shell.jsonl") if e.get("what") == "speed" and "tick" in e]
+    sent = [(d["tick"], d["ms"]) for d in lines("net.jsonl") if d.get("dir") == "send" and d.get("tick", 0) > 0 and "ms" in d]
     spans = []
     for i, (t0, speed) in enumerate(changes):
         t1 = changes[i + 1][0] if i + 1 < len(changes) else (sent[-1][0] if sent else t0)
@@ -160,6 +157,18 @@ def pacing(run: Path) -> list:
             tps = round((inside[-1][0] - inside[0][0]) * 1000 / (inside[-1][1] - inside[0][1]), 2)
         spans.append({"from": t0, "to": t1, "speed": speed, "ticks_per_s": tps})
     return spans
+
+
+def speed_problems(pacing: dict, speeds: list) -> list:
+    """How the copies' game speeds disagree: each copy's (tick, speed) changes must be the host's, and with `--speed`
+    the start must be the host's preference x 4. Empty: one speed for every machine, as the original keeps."""
+    changes = {side: [(s["from"], s["speed"]) for s in spans] for side, spans in pacing.items()}
+    host = changes.get("host", [])
+    bad = [] if host else ["host: no speed events"]
+    bad += [f"{side}: speed changes {c}, the host's {host}" for side, c in changes.items() if side != "host" and c != host]
+    if speeds and host and host[0][1] != 4 * speeds[0]:
+        bad.append(f"the start's speed {host[0][1]} isn't the host's preference {speeds[0]} x 4")
+    return bad
 
 
 def start_problems(out: Path, args, eden: set) -> list:
@@ -207,7 +216,10 @@ def main() -> int:
         ap.error("--ticks must be a multiple of 500 (the shell's `game` tick events)")
     if not 2 <= args.players <= 6:
         ap.error("--players takes 2 to 6")
-    speeds = [int(s) for s in args.speed.split(",")] if args.speed else []
+    try:
+        speeds = [int(s) for s in args.speed.split(",")] if args.speed else []
+    except ValueError:
+        ap.error(f"--speed takes numbers 1-10 separated by commas, not {args.speed!r}")
     if len(speeds) == 1:
         speeds *= args.players
     if speeds and (len(speeds) != args.players or not all(1 <= s <= 10 for s in speeds)):
@@ -304,11 +316,16 @@ def main() -> int:
                "players": args.players, "type": args.type, "mission": args.mission, "seed": args.seed, "eden": sorted(eden), "vehicles": args.vehicles,
                "dll": args.dll, "orders": ords, "telemetry": telemetry, "start": start_problems(out, args, eden),
                "speed": speeds or None, "pacing": {side_name(p): pacing(out / side_name(p)) for p in range(args.players)}}
+    # Every copy's speed changes at the same ticks to the same speeds (the start's is the host's; `speed_problems`).
+    summary["speed_problems"] = speed_problems(summary["pacing"], speeds)
     (out / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
     brief = {j: {k: v for k, v in t.items() if k not in ("host", "other")} for j, t in tel.items()}
     print(json.dumps({"exit": rc, "wall_seconds": summary["wall_seconds"], "orders": ords, "telemetry": brief, "start": summary["start"],
                       "pacing": summary["pacing"]}))
-    ok = all(v == 0 for v in rc.values()) and all(t.get("equal") for t in tel.values()) and same_orders and not summary["start"]
+    if summary["speed_problems"]:
+        print("speed:", "; ".join(summary["speed_problems"]))
+    ok = all(v == 0 for v in rc.values()) and all(t.get("equal") for t in tel.values()) and same_orders and not summary["start"] \
+        and not summary["speed_problems"]
     return 0 if ok else 1
 
 
