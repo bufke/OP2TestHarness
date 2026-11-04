@@ -1,0 +1,12 @@
+# ml2_01's host side against a bot seat (docs/multiplayer.md "Playing against an LLM (basic)"): player 0's lines of
+# harness/net/ml2_01_two_players.txt without its `build ... MINE` line, which names a type: that form acts at once on
+# the machine playing the script, outside the network log (engine script.rs), so it only stays in step when every
+# machine plays the same script, and the bot's machine plays none. Not an oracle script.
+#   python3 -I tools/agent/netpair --script harness/net/ml2_01_host_vs_bot.txt --client-bot harness/net/bot_standin.py
+0 coords file
+1      move 33 16 15
+219    transfercargo 25 3
+500    build 33 22 13
+1232   route 28 54 23
+1232   route 30 54 23
+2440   research 27 3407 12
