@@ -46,6 +46,25 @@ def sync_missions_from_play_prefix():
         shutil.copytree(src, OPU_DIR / "maps", dirs_exist_ok=True)
 
 
+def fit_script_name(mission: str) -> str:
+    """The mission as the game's GameStartInfo.scriptName (char[32]) can hold it. A DLL given by its path in the game
+    folder (OPU/maps/<folder>/<stem>.dll: the multiplayer start reads the descriptor by that path) longer than 31
+    characters is named by Wine's 8.3 short path instead; PrepareGame fails on the truncated name (ml4_42 and 19 other
+    community maps, 2026-11-04)."""
+    if len(mission) <= 31 or not any(s in mission for s in "/\\"):
+        return mission
+    env = dict(os.environ, WINEPREFIX=str(PREFIX), WINEDEBUG="-all")
+    full = "C:\\GOG Games\\Outpost 2\\" + mission.replace("/", "\\")
+    out = subprocess.run(["winepath", "-s", "C:\\GOG Games\\Outpost 2", full], env=env, capture_output=True, text=True,
+                         timeout=60).stdout.split("\n")
+    if len(out) < 2 or not out[1].lower().startswith(out[0].lower() + "\\"):
+        sys.exit(f"run.py: no short path for {mission} (winepath -s: {out})")
+    short = out[1][len(out[0]) + 1:]
+    if len(short) > 31:
+        sys.exit(f"run.py: {mission} doesn't fit the game's 31-character script name even as {short}")
+    return short
+
+
 # GameTermReasons from TethysAPI Game/GameStartInfo.h.
 END_REASONS = {0: "Running", 3: "MissionAccomplished", 4: "MissionFailed", 6: "MissionAborted", 7: "Victory",
                8: "Defeat", 9: "ControlTerminated", 12: "GameOver"}
@@ -369,7 +388,7 @@ def main() -> int:
                 out / "timeout_screen.png", out / "summary.json", out / "trace.jsonl", out / "gamedata.json", out / "audio.jsonl",
                 out / "scenario_script.txt", out / "state.json", out / "events.jsonl", out / "present.log"]:
         old.unlink(missing_ok=True)
-    mission = args.mission
+    mission = fit_script_name(args.mission) if args.mission else None
     if scn:
         mission = scenario_mission(scn.get("map", "cm01.map"), scn.get("techtree", "multitek.txt"))
         extra = args.script.read_text() if args.script else ""  # --script lines run after the scenario's own.
