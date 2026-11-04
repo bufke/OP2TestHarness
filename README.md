@@ -636,7 +636,8 @@ tools/target/debug/op2-missionhost netlog /tmp/net --bundle /tmp/net/desync.tar.
 - The lobby: `--players N` (NEW NETWORK GAME's Max Players), `--type` (its Scenario Type: Last One Standing, Midas,
   Resource Race, Space Race, Land Rush), `--mission` (a regex on GAME SETTINGS' scenario list of that type; default its
   first, 2P LoS 'Ambush Alley', ml2_08.dll), `--vehicles` (Initial Vehicles), `--eden 0,2` (who ticks Eden; the rest
-  play Plymouth). shell.py's `pick` step chooses a combo box entry with the keyboard and checks it (the window dumps
+  play Plymouth), `--dll` (the mission DLL the scenario must be: netgame.py fails when any copy's start_info.json
+  differs from what was asked: seed, DLL, players, Eden boxes, vehicles). shell.py's `pick` step chooses a combo box entry with the keyboard and checks it (the window dumps
   list each combo box's `items` and `sel`). Player k's units are the scenario's slot k; their ids depend on the seed (the
   bases' layout), so write a script for a fixed `--seed` (check the ids with `op2-missionhost play DLL --start-info`).
 - `--seed N`: every copy starts from seed N instead of the lobby's (harness OP2H_NET_SEED; the PrepareGame hook in

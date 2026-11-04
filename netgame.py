@@ -135,6 +135,25 @@ def orders(run: Path) -> list:
     return out
 
 
+def start_problems(out: Path, args, eden: set) -> list:
+    """How each copy's start_info.json differs from what was asked (seed, mission DLL, players, Eden boxes, initial
+    vehicles): a lobby step that missed would otherwise record another game under the same recipe. Empty: as asked."""
+    bad = []
+    for p in range(args.players):
+        f = out / side_name(p) / "start_info.json"
+        if not f.exists():
+            bad.append(f"{side_name(p)}: no start_info.json")
+            continue
+        s = json.loads(f.read_text())
+        want = {"humanPlayers": args.players, "seed": args.seed, "script": args.dll, "initialVehicles": args.vehicles}
+        bad += [f"{side_name(p)}: {k} {s.get(k)!r}, not {v!r}" for k, v in want.items()
+                if v is not None and str(s.get(k)).lower() != str(v).lower()]
+        colonies = [int(slot.get("eden", 0)) for slot in s.get("slots", [])[:args.players]]
+        if colonies != [int(i in eden) for i in range(args.players)]:
+            bad.append(f"{side_name(p)}: Eden slots {colonies}, not {sorted(eden)}")
+    return bad
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", type=Path, required=True)
@@ -148,6 +167,8 @@ def main() -> int:
                                       "(case-insensitive; default: the lobby's own, 2P LoS 'Ambush Alley')")
     ap.add_argument("--eden", default="", help="players who tick Eden in the lobby, e.g. 0,2 (default: all Plymouth)")
     ap.add_argument("--seed", type=int, help="every copy starts from this seed instead of the lobby's")
+    ap.add_argument("--dll", help="the mission DLL the scenario must be (e.g. mm2_07.dll): checked in every copy's "
+                                  "start_info.json with the seed, players, Eden boxes and vehicles")
     ap.add_argument("--vehicles", type=int, help="the lobby's Initial Vehicles (default: its own, 0)")
     ap.add_argument("--telemetry-every", type=int, default=1)
     ap.add_argument("--turbo", action="store_true", help="uncapped game speed (shell.py --turbo)")
@@ -244,11 +265,11 @@ def main() -> int:
     telemetry = tel["join"] if args.players == 2 else tel
     summary = {"exit": rc, "wall_seconds": round(time.monotonic() - t0, 1), "ticks": args.ticks, "turbo": args.turbo,
                "players": args.players, "type": args.type, "mission": args.mission, "seed": args.seed, "eden": sorted(eden), "vehicles": args.vehicles,
-               "orders": ords, "telemetry": telemetry}
+               "dll": args.dll, "orders": ords, "telemetry": telemetry, "start": start_problems(out, args, eden)}
     (out / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
     brief = {j: {k: v for k, v in t.items() if k not in ("host", "other")} for j, t in tel.items()}
-    print(json.dumps({"exit": rc, "wall_seconds": summary["wall_seconds"], "orders": ords, "telemetry": brief}))
-    ok = all(v == 0 for v in rc.values()) and all(t.get("equal") for t in tel.values()) and same_orders
+    print(json.dumps({"exit": rc, "wall_seconds": summary["wall_seconds"], "orders": ords, "telemetry": brief, "start": summary["start"]}))
+    ok = all(v == 0 for v in rc.values()) and all(t.get("equal") for t in tel.values()) and same_orders and not summary["start"]
     return 0 if ok else 1
 
 

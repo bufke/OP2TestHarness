@@ -3589,6 +3589,8 @@ void NetInit() {
     static const uint8_t prepare[] = { 0x81, 0xEC, 0x2C, 0x01, 0x00, 0x00 };  // sub esp,12Ch
     g_netPrepare = reinterpret_cast<PrepareGameFn>(HookEntry(0x4893B0, prepare, 6, reinterpret_cast<void*>(&NetPrepareHook)));
     Log("net: forced seed %u, PrepareGame hook %s", unsigned(g_netSeed), g_netPrepare ? "on" : "FAILED");
+    // A game asked for a seed must not quietly start from the lobby's: it would be another game under the same recipe.
+    if (!g_netPrepare) { if (g_log) fclose(g_log);  TerminateProcess(GetCurrentProcess(), 2); }
   }
   g_netT0 = Now();
   g_netPackets = fopen((cfg.out + "\\packets.jsonl").c_str(), "w");
