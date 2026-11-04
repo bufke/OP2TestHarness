@@ -7,8 +7,9 @@
 # mission used by `run.sh --scenario` (build/zScenario.dll, installed next to harness.dll, not in OPU/maps).
 
 CXX      := i686-w64-mingw32-g++
-# Install into the harness's own prefix when it exists (see run.py), else the shared play prefix.
-HARNESS_PREFIX ?= $(if $(wildcard ../prefix-harness),../prefix-harness,../prefix)
+# Install into the prefix run.py runs in: OP2_HARNESS_PREFIX when set (an absolute path), else the harness's own prefix when it exists,
+# else the shared play prefix. prefix-harness is shared by every checkout's harness runs: an install replaces their DLLs.
+HARNESS_PREFIX ?= $(or $(OP2_HARNESS_PREFIX),$(if $(wildcard ../prefix-harness),../prefix-harness,../prefix))
 GAME_DIR := $(HARNESS_PREFIX)/drive_c/GOG Games/Outpost 2
 OPU_DIR  := $(GAME_DIR)/OPU
 
@@ -38,6 +39,7 @@ build/zScenario.dll: test/Scenario.cpp src/mingw_compat.h
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
 
 install: all
+	@echo "harness: installing into $(HARNESS_PREFIX) (OP2_HARNESS_PREFIX or HARNESS_PREFIX chooses another)"
 	mkdir -p "$(OPU_DIR)/Harness"
 	# Copy then rename: a game that is running from this prefix keeps its mapped copy of the old file intact.
 	for f in harness.dll zScenario.dll; do cp build/$$f "$(OPU_DIR)/Harness/.$$f.new" && \
