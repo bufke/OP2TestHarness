@@ -2109,6 +2109,7 @@ int __fastcall ThrottleHook(void* self, void*, int id, int x, int y) {
 }
 
 void MessageEvent(int x, int y, const char* text);
+void ShellMessage(int x, int y, const char* text, int sound);
 int __fastcall AddMessageHook(void* self, void*, int x, int y, const char* text, int sound) {
   g_throttled = -1;
   void* caller = __builtin_return_address(0);
@@ -2118,6 +2119,7 @@ int __fastcall AddMessageHook(void* self, void*, int x, int y, const char* text,
   snprintf(extra, sizeof(extra), ",\"pass\":%d", g_throttled);
   AudioEvent("msg", sound, x, y, caller, extra);
   MessageEvent(x, y, text);
+  ShellMessage(x, y, text, sound);
   return r;
 }
 
@@ -4178,6 +4180,15 @@ int __fastcall DoModelessHook(void* self, void*, const char* res, HINSTANCE inst
 using ActivateShellFn = int(__thiscall*)(void*, int, MissionResults*);
 ActivateShellFn g_activateShell = nullptr;
 int g_shellGameTick = -1, g_shellEnd = 0;  // The shell's current game's tick; -1 outside a game.
+
+// A status message in a shell-mode game (AddMessage 0x439070): GameImpl's tick, the SoundID, the place (internal pixels;
+// a chat line's is (-2, -1), 0x40FE14) and the text as shown ("NAME: text" for a chat line, 0x40FDFB). op2-missionhost
+// compares a network game's chat lines with these.
+void ShellMessage(int x, int y, const char* text, int sound) {
+  if (!g_shell || g_shellGameTick < 0) return;
+  ShellEvent("\"ev\":\"game\",\"what\":\"msg\",\"tick\":%d,\"sound\":%d,\"x\":%d,\"y\":%d,\"text\":%s", g_gameImpl.tick_, sound, x, y,
+             JsonStr(text ? text : "").c_str());
+}
 int g_shellSpeed = -1;  // GameImpl's speed last written as a `speed` event (-1: none yet in this game).
 
 int __fastcall ActivateShellHook(void* self, void*, int reason, MissionResults* r) {
@@ -4431,7 +4442,9 @@ void ShellInit() {
     Log("config: using %s", ini.c_str());
   }
   JumpTo(FnOP2MessageBox, reinterpret_cast<void*>(&MessageBoxHook));
+  // Shell-mode games log every status message to shell.jsonl (`msg` events: a network game's chat lines, ShellMessage).
   if (g_audio) InstallAudioHooks();
+  else InstallMessageHook();
   g_origGameCycle = reinterpret_cast<GameCycleFn>(RelinkCall(CallProcessGameCycle, reinterpret_cast<void*>(&ShellCycleHook)));
   // Every dialog of the shell and the game goes through IDlgWnd::DoModal/DoModeless in Outpost2.exe.
   static const uint8_t doModal[]    = { 0x83, 0xEC, 0x04, 0xA1, 0xAC, 0xE8, 0x56, 0x00 };  // sub esp,4; mov eax,[56E8ACh]

@@ -105,6 +105,10 @@ def lobby_ids(player: int) -> tuple[int, int]:
     return (40003, 40004) if player == 0 else (40006 + 5 * (player - 1), 40007 + 5 * (player - 1))
 
 
+# Telemetry fields of one machine's interface (the detail view's corner, the selection), not of the game.
+LOCAL_UI = ("view", "selected")
+
+
 def compare(a: Path, b: Path) -> dict:
     """Two games' telemetry over the ticks both have (each quits on its own a few ticks after --ticks), line for
     line: equal, or the first tick that differs and how."""
@@ -117,6 +121,9 @@ def compare(a: Path, b: Path) -> dict:
     for i in range(n):
         if la[i] != lb[i]:
             ja, jb = json.loads(la[i]), json.loads(lb[i])
+            # A script with input verbs (chat: `key enter`, `type`) adds each machine's own view and selection.
+            if {k: v for k, v in ja.items() if k not in LOCAL_UI} == {k: v for k, v in jb.items() if k not in LOCAL_UI}:
+                continue
             return {"equal": False, "lines": [len(la), len(lb)], "first_diff_tick": ja.get("tick"),
                     "host": ja, "other": jb}
     return {"equal": n > 0, "lines": [len(la), len(lb)], "common_to_tick": json.loads(la[n - 1]).get("tick") if n else None}

@@ -645,6 +645,12 @@ tools/target/debug/op2-missionhost netlog /tmp/net --bundle /tmp/net/desync.tar.
   shell-mode game writes a `speed` event to shell.jsonl at its first cycle and whenever GameImpl's speed changes, and
   summary.json's `pacing` gives each copy's speed spans with the ticks per wall second it ran at (from net.jsonl's
   datagram times; meaningful without `--turbo`). Run `net_speed` (docs/multiplayer.md "Game speed").
+- Chat and other input verbs (`key enter`, `type TEXT`, `key enter`) work in the tick scripts as in single player: the
+  chat line's ctChat goes through the turns like an order. Every shell-mode game writes each status message to
+  shell.jsonl (`msg` events: tick, SoundID, place, text; a chat line is "NAME: text" with SoundID 93), which
+  op2-missionhost compares with op2-sim's chat lines per machine. A script with input verbs adds each machine's own
+  `view` and `selected` to its telemetry; netgame.py's comparison of the copies leaves those out. Run `net_chat`
+  (docs/multiplayer.md "Chat").
 - `--seed N`: every copy starts from seed N instead of the lobby's (harness OP2H_NET_SEED; the PrepareGame hook in
   harness.cpp "Network games"), so the game can be recorded again from its arguments: a recordings.toml `netgame` run
   whose `args` hold `--seed` is recorded by runs.py (`OP2_HARNESS_PREFIX=$PWD/prefix-net python3 -I tools/agent/record
