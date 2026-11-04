@@ -163,7 +163,11 @@ nothing when the target isn't live. A command whose first argument is a spawn (`
 generates a random but legal script of these verbs per seed for a template (`oracle/fuzz/*.json`: a scenario plus
 what to generate), plays it here and in op2-sim, compares the traces, and shrinks each diverging script (and each
 crash of the original, by crash site) to a minimal one with ddmin (`DIR/seed-N/minimal.json`). It runs the harness,
-so outside the Claude Code sandbox; tools/crates/op2-inspect/src/fuzz_run.rs.
+so outside the Claude Code sandbox; tools/crates/op2-inspect/src/fuzz_run.rs. A template's `extras` mixes in verb groups
+beyond the orders (`disaster`, `earthwork`, `repair`, `damage`, `scatter`, `eco`; `extra_percent` of the lines) and
+`wrap` (512) lets the area run past a wrapping map's seam. A diverging run whose script names a dead spawn after a
+line's first word (an order that reached whatever took the dead unit's index) is played again without those lines
+(`dropped` in summary.jsonl). Templates: colony, skirmish, seam, choke, warfare, colony_stress, edges.
 
 ## Mouse and keyboard input
 
