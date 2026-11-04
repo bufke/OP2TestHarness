@@ -352,6 +352,9 @@ std::vector<int> g_spawned;   // Spawn index -> unit ID.
 // A spawn that failed (no free object index) is gone from the start.
 std::vector<bool> g_spawnGone;
 std::vector<MapID> g_spawnType;
+// A gone spawn's object index: 0 still held by the dead object, 1 freed (+0x4 == -1), 2 handed out again (the trace's
+// `reused`: an order naming the spawn now reaches another object), 3 never had one (a spawn that failed).
+std::vector<uint8_t> g_spawnSlot;
 
 const char* ActionName(int a) {
   static const char* const names[] = {
@@ -531,7 +534,14 @@ void WriteTrace(int tick) {
     // Gone for good once dead (the flag stays set after the object is freed, until its index is reused) or replaced. A
     // vehicle in a Garage bay is marked dead too, with pNext_ -2 (0x44D000): it isn't listed while it's in there, and
     // is again once it comes out (chaos_garage_full).
-    if (g_spawnGone[i]) continue;  // (a spawn that failed has no object at all)
+    if (g_spawnGone[i]) {  // (a spawn that failed has no object at all)
+      if (g_spawnSlot[i] < 2) {
+        const int held = *reinterpret_cast<const int*>(reinterpret_cast<const uint8_t*>(u.GetMapObject()) + 0x4);
+        if (held == -1) g_spawnSlot[i] = 1;
+        else if (g_spawnSlot[i] == 1 || u.GetType() != g_spawnType[i]) g_spawnSlot[i] = 2;
+      }
+      continue;
+    }
     const MapObject* mo = u.GetMapObject();
     const bool inBay = reinterpret_cast<uintptr_t>(mo->pNext_) == 0xFFFFFFFEu;
     if (((mo->flags_ & MoFlagDead) && !inBay) || u.GetType() != g_spawnType[i]) g_spawnGone[i] = true;
@@ -542,6 +552,14 @@ void WriteTrace(int tick) {
       for (Unit u : PlayerVehicleEnum(p)) WriteTraceUnit(f, first, u, -1);
   }
   fputc(']', f);
+  // Spawns whose object index belongs to another object now (only when there are any).
+  bool anyReused = false;
+  for (size_t i = 0; i < g_spawnSlot.size(); ++i)
+    if (g_spawnSlot[i] == 2) {
+      fprintf(f, "%s%u", anyReused ? "," : ",\"reused\":[", unsigned(i));
+      anyReused = true;
+    }
+  if (anyReused) fputc(']', f);
   WriteTraceFx(f);
   // Object index allocator (0x439A10): highest index handed out so far (0x54F838) and the ring of freed objects
   // (0x54F844, head 0x54F840, tail 0x54F83C) as [index, tick freed, reference count +0x32], every slot from the head to
@@ -1982,6 +2000,7 @@ void RunScriptCmd(const ScriptCmd& orig, int tick) {
     Log("spawn %u: %s -> unit %d", unsigned(g_spawned.size()), arg(0).c_str(), u.GetID());
     g_spawned.push_back(u.GetID());
     g_spawnGone.push_back(!u.IsLive());
+    g_spawnSlot.push_back(u.IsLive() ? 0 : 3);
     // The type the game made: a common ore mine on a rare beacon becomes MINE_ADV (the spawn stays listed).
     g_spawnType.push_back(u.IsLive() ? u.GetType() : type);
   }
