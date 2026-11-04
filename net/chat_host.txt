@@ -1,0 +1,17 @@
+# Chat in a network game between two op2-engines (docs/multiplayer.md "Chat"), the host's side, typed as a player types:
+#   python3 -I tools/agent/netpair --ticks 400 --script harness/net/chat_host.txt --client-script harness/net/chat_client.txt
+# The host's line reaches both machines at the same tick; its allies-only line (Alt+A: the host alone) only itself;
+# the client's line (chat_client.txt) both.
+100 key enter
+101 type Hello from the host!
+102 shot                       # the open line, the host's own
+103 key enter
+130 shot                       # "NAME: Hello from the host!" on the message line
+180 shot                       # the client's line (chat_client.txt), here too
+200 key alt+a
+201 key enter
+202 type allies only
+203 key enter
+230 shot
+300 key alt+e
+330 shot
