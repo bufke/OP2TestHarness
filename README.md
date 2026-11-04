@@ -144,6 +144,7 @@ or `@N` for the unit made by the Nth `spawn` command, or a name (`$NAME`, "Unit 
      movewp <id> x,y[,r] ... | standground <id> x,y[,r] ... | patrol <id> <loop> x,y[,r] ...   # waypoints, range r
 1236 packet    2 012b0001003007a300    # a recorded UI packet (type, data hex), run inside the cycle starting at 1236
      savegame <file> | loadgame <file>  # TApp::SaveGame/LoadGame on OPU/saves/<file>, once each (recording tests)
+     gamespeed <1-10>   # what the in-game Game Speed buttons queue: ctGameOpt 0x14 = speed x 4 (0x4231C0), run 2 turns on
 ```
 
 The last group builds the packets the UI sends (Guard, Attack on a tile, LightToggle, Move/Stand Ground/Patrol with up
@@ -640,6 +641,10 @@ tools/target/debug/op2-missionhost netlog /tmp/net --bundle /tmp/net/desync.tar.
   differs from what was asked: seed, DLL, players, Eden boxes, vehicles). shell.py's `pick` step chooses a combo box entry with the keyboard and checks it (the window dumps
   list each combo box's `items` and `sel`). Player k's units are the scenario's slot k; their ids depend on the seed (the
   bases' layout), so write a script for a fixed `--seed` (check the ids with `op2-missionhost play DLL --start-info`).
+- `--speed 10,3`: each copy's Game Speed preference (its private ini's GameSpeed; one value for every copy). Every
+  shell-mode game writes a `speed` event to shell.jsonl at its first cycle and whenever GameImpl's speed changes, and
+  summary.json's `pacing` gives each copy's speed spans with the ticks per wall second it ran at (from net.jsonl's
+  datagram times; meaningful without `--turbo`). Run `net_speed` (docs/multiplayer.md "Game speed").
 - `--seed N`: every copy starts from seed N instead of the lobby's (harness OP2H_NET_SEED; the PrepareGame hook in
   harness.cpp "Network games"), so the game can be recorded again from its arguments: a recordings.toml `netgame` run
   whose `args` hold `--seed` is recorded by runs.py (`OP2_HARNESS_PREFIX=$PWD/prefix-net python3 -I tools/agent/record

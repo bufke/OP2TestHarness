@@ -135,6 +135,33 @@ def orders(run: Path) -> list:
     return out
 
 
+def pacing(run: Path) -> list:
+    """The copy's game speed (GameImpl::gameSpeed_, shell.jsonl's `speed` events) over the game, each span with the
+    ticks per wall second it ran at, from the ticks and times of the datagrams it sent (net.jsonl: one or more a turn).
+    A span's first and last 40 ticks are left out (a change takes a turn or two to show in the limiter)."""
+    events = [json.loads(line) for line in (run / "shell.jsonl").read_text().splitlines() if '"speed"' in line] \
+        if (run / "shell.jsonl").exists() else []
+    changes = [(e["tick"], e["speed"]) for e in events if e.get("what") == "speed"]
+    sent = []
+    if (run / "net.jsonl").exists():
+        for line in (run / "net.jsonl").read_text().splitlines():
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if d.get("dir") == "send" and d.get("tick", 0) > 0:
+                sent.append((d["tick"], d["ms"]))
+    spans = []
+    for i, (t0, speed) in enumerate(changes):
+        t1 = changes[i + 1][0] if i + 1 < len(changes) else (sent[-1][0] if sent else t0)
+        inside = [(t, ms) for t, ms in sent if t0 + 40 <= t <= t1 - 40]
+        tps = None
+        if len(inside) >= 2 and inside[-1][1] > inside[0][1]:
+            tps = round((inside[-1][0] - inside[0][0]) * 1000 / (inside[-1][1] - inside[0][1]), 2)
+        spans.append({"from": t0, "to": t1, "speed": speed, "ticks_per_s": tps})
+    return spans
+
+
 def start_problems(out: Path, args, eden: set) -> list:
     """How each copy's start_info.json differs from what was asked (seed, mission DLL, players, Eden boxes, initial
     vehicles): a lobby step that missed would otherwise record another game under the same recipe. Empty: as asked."""
@@ -171,6 +198,8 @@ def main() -> int:
                                   "start_info.json with the seed, players, Eden boxes and vehicles")
     ap.add_argument("--vehicles", type=int, help="the lobby's Initial Vehicles (default: its own, 0)")
     ap.add_argument("--telemetry-every", type=int, default=1)
+    ap.add_argument("--speed", help="each copy's Game Speed preference (outpost2.ini GameSpeed, 1-10), in player "
+                                    "order, e.g. 10,3 (one value: every copy; default the prefix's ini)")
     ap.add_argument("--turbo", action="store_true", help="uncapped game speed (shell.py --turbo)")
     ap.add_argument("--timeout", type=float, default=900, help="wall-clock limit of each game")
     args = ap.parse_args()
@@ -178,6 +207,11 @@ def main() -> int:
         ap.error("--ticks must be a multiple of 500 (the shell's `game` tick events)")
     if not 2 <= args.players <= 6:
         ap.error("--players takes 2 to 6")
+    speeds = [int(s) for s in args.speed.split(",")] if args.speed else []
+    if len(speeds) == 1:
+        speeds *= args.players
+    if speeds and (len(speeds) != args.players or not all(1 <= s <= 10 for s in speeds)):
+        ap.error("--speed takes one value 1-10, or one per player")
     eden = {int(p) for p in args.eden.split(",") if p.strip()}
     if any(p >= args.players for p in eden):
         ap.error("--eden names a player past --players")
@@ -215,10 +249,13 @@ def main() -> int:
     for name, text in drives.items():
         (out / f"{name}_drive.txt").write_text(text)
 
-    def shell(name: str, script: Path | None) -> list[str]:
+    def shell(p: int, script: Path | None) -> list[str]:
+        name = side_name(p)
         cmd = [sys.executable, str(HERE / "shell.py"), "--net", "--drive", str(out / f"{name}_drive.txt"), "--sync", str(sync),
                "--telemetry-every", str(args.telemetry_every), "--ini", "IntroAVI=0", "--ini", "Music=0", "--ini", "Sound=0",
                "--timeout", str(args.timeout + 200 + lobby_timeout), "--out", str(out / name)]
+        if speeds:
+            cmd += ["--ini", f"GameSpeed={speeds[p]}"]
         if args.turbo:
             cmd += ["--turbo", "--draw-from", str(args.ticks)]
         if args.seed is not None:
@@ -237,7 +274,7 @@ def main() -> int:
         for p in [*range(1, args.players), 0]:
             name = side_name(p)
             logs.append(open(out / f"{name}.log", "w"))
-            procs[name] = subprocess.Popen(shell(name, getattr(args, f"script{p}")), stdout=logs[-1], stderr=subprocess.STDOUT)
+            procs[name] = subprocess.Popen(shell(p, getattr(args, f"script{p}")), stdout=logs[-1], stderr=subprocess.STDOUT)
         rc = {name: procs[name].wait() for name in ["host", *joiners]}
     finally:
         for p in procs.values():
@@ -265,10 +302,12 @@ def main() -> int:
     telemetry = tel["join"] if args.players == 2 else tel
     summary = {"exit": rc, "wall_seconds": round(time.monotonic() - t0, 1), "ticks": args.ticks, "turbo": args.turbo,
                "players": args.players, "type": args.type, "mission": args.mission, "seed": args.seed, "eden": sorted(eden), "vehicles": args.vehicles,
-               "dll": args.dll, "orders": ords, "telemetry": telemetry, "start": start_problems(out, args, eden)}
+               "dll": args.dll, "orders": ords, "telemetry": telemetry, "start": start_problems(out, args, eden),
+               "speed": speeds or None, "pacing": {side_name(p): pacing(out / side_name(p)) for p in range(args.players)}}
     (out / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
     brief = {j: {k: v for k, v in t.items() if k not in ("host", "other")} for j, t in tel.items()}
-    print(json.dumps({"exit": rc, "wall_seconds": summary["wall_seconds"], "orders": ords, "telemetry": brief, "start": summary["start"]}))
+    print(json.dumps({"exit": rc, "wall_seconds": summary["wall_seconds"], "orders": ords, "telemetry": brief, "start": summary["start"],
+                      "pacing": summary["pacing"]}))
     ok = all(v == 0 for v in rc.values()) and all(t.get("equal") for t in tel.values()) and same_orders and not summary["start"]
     return 0 if ok else 1
 

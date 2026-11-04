@@ -1964,6 +1964,15 @@ void RunScriptCmd(const ScriptCmd& orig, int tick) {
   else if (c.verb == "telemetry")    WriteTelemetry(tick);
   else if (c.verb == "trace")        WriteTrace(tick);
   else if (c.verb == "quit")         Quit("script quit");
+  else if (c.verb == "gamespeed") {
+    // The in-game Game Speed MORE/LESS buttons' own call (0x466342, 0x466437): GameImpl's helper 0x4231C0 (fastcall:
+    // option, value) writes ctGameOpt (0x2B) option 0x14 = speed * 4 into the local player's pending slot, so in a
+    // network game it crosses the wire like any command. The buttons also write the ini's GameSpeed (not done here).
+    using QueueGameOptFn = void(__fastcall*)(int option, int value);
+    const int speed = std::clamp(num(0), 1, 10);
+    reinterpret_cast<QueueGameOptFn>(0x4231C0)(0x14, speed * 4);
+    Log("script: tick %d gamespeed %d queued", tick, speed);
+  }
   else if (c.verb == "spawn") {
     const MapID type = TypeByName(arg(0)), weapon = TypeByName(arg(4));
     const int dir = c.args.size() > 5 ? (num(5) & 0xFF) : 0;
@@ -4259,6 +4268,11 @@ void __fastcall ShellCycleHook(GameImpl* self, void*) {
   if (cfg.telemEvery > 0 && tick >= g_nextTelem) { WriteTelemetry(tick);  g_nextTelem = (tick / cfg.telemEvery + 1) * cfg.telemEvery; }
   ProbeTick(tick);
   if (tick % 500 == 0) ShellEvent("\"ev\":\"game\",\"what\":\"tick\",\"tick\":%d", tick);
+  // GameImpl::gameSpeed_, the frame limiter's ticks per second (set at the start from GameStartInfo +0xAE, 0x4893CD;
+  // by a ctGameOpt 0x14 on every machine, 0x422DBE).
+  static int lastSpeed = -1;
+  if (tick == 0 || g_gameImpl.gameSpeed_ != lastSpeed)
+    ShellEvent("\"ev\":\"game\",\"what\":\"speed\",\"tick\":%d,\"speed\":%d", tick, lastSpeed = g_gameImpl.gameSpeed_);
   const int end = int(self->gameTermReasons_);
   if (end != g_shellEnd) {
     ShellEvent("\"ev\":\"game\",\"what\":\"end\",\"tick\":%d,\"reason\":%d", tick, end);
