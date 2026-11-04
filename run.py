@@ -22,11 +22,17 @@ import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import prefixes  # noqa: E402
+
 # Harness runs use their own Wine prefix when one exists (prefix-harness/, a copy of prefix/), so they get their own
-# wineserver and can't steal focus from, or swap DLLs under, a game David is playing from prefix/.
+# wineserver and can't steal focus from, or swap DLLs under, a game David is playing from prefix/. OP2_HARNESS_PREFIX
+# (an absolute path) chooses another (prefixes.py).
 PLAY_PREFIX = ROOT / "prefix"
-PREFIX = Path(os.environ.get("OP2_HARNESS_PREFIX") or
-              (ROOT / "prefix-harness" if (ROOT / "prefix-harness").is_dir() else PLAY_PREFIX))
+try:
+    PREFIX = prefixes.harness_prefix(ROOT)
+except ValueError as e:
+    raise SystemExit(f"run.py: {e}") from None
 GAME_DIR = PREFIX / "drive_c" / "GOG Games" / "Outpost 2"
 OPU_DIR = GAME_DIR / "OPU"
 

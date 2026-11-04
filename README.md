@@ -741,7 +741,9 @@ Wine and Xvfb startup add about 3 s per run. Parallel runs work: each gets its o
 share the harness prefix's wineserver.
 
 **Own prefix.** When `prefix-harness/` exists (a plain copy of `prefix/`: `cp -a prefix prefix-harness`), `run.py` and
-`make install` use it instead of `prefix/` (override with `OP2_HARNESS_PREFIX` / `HARNESS_PREFIX`). Harness runs then
+`make install` use it instead of `prefix/` (override with `OP2_HARNESS_PREFIX`, an absolute path, or make's
+`HARNESS_PREFIX`; harness/prefixes.py). `make install` and `uninstall` refuse the play prefix (this checkout's or the
+main checkout's `prefix/`), so without `prefix-harness/` they need one of the overrides. Harness runs then
 have their own wineserver, so they can't take focus from, or replace DLLs under, a game being played from `prefix/`.
 Mission DLLs are installed into `prefix/` by missions/Makefile; `run.py` mirrors `OPU/maps` into the harness prefix
 before each run.

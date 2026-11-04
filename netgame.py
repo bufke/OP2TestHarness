@@ -27,7 +27,6 @@ prefix-harness, and its wineserver would host the games). It refuses prefix/ and
 """
 import argparse
 import json
-import os
 import signal
 import subprocess
 import sys
@@ -240,9 +239,13 @@ def main() -> int:
     eden = {int(p) for p in args.eden.split(",") if p.strip()}
     if any(p >= args.players for p in eden):
         ap.error("--eden names a player past --players")
-    prefix = os.environ.get("OP2_HARNESS_PREFIX", "")
-    shared = {(HERE.parent / p).resolve() for p in ("prefix", "prefix-harness")}
-    if not prefix or Path(prefix).resolve() in shared:
+    sys.path.insert(0, str(HERE))
+    import prefixes
+    try:
+        prefix = prefixes.env_prefix()
+    except ValueError as e:
+        ap.error(str(e))
+    if prefix is None or prefix.resolve() in prefixes.shared_prefixes(HERE.parent):
         ap.error("set OP2_HARNESS_PREFIX to a prefix of its own (e.g. prefix-net, a copy of prefix-harness), "
                  "never prefix/ (David's) or prefix-harness/ (shared by every harness run)")
     out = args.out.resolve()

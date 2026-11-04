@@ -7,9 +7,17 @@
 # mission used by `run.sh --scenario` (build/zScenario.dll, installed next to harness.dll, not in OPU/maps).
 
 CXX      := i686-w64-mingw32-g++
-# Install into the prefix run.py runs in: OP2_HARNESS_PREFIX when set (an absolute path), else the harness's own prefix when it exists,
-# else the shared play prefix. prefix-harness is shared by every checkout's harness runs: an install replaces their DLLs.
+# Install into the prefix run.py runs in (harness/prefixes.py): OP2_HARNESS_PREFIX when set (an absolute path: run.py
+# would read a relative one from the current directory, this file from harness/), else the harness's own prefix when it
+# exists. prefix-harness is shared by every checkout's harness runs: an install replaces their DLLs. Never the play
+# prefix (David's prefix/, this checkout's or the main checkout's): install and uninstall refuse it.
+ifneq ($(OP2_HARNESS_PREFIX),)
+ifeq ($(filter /%,$(OP2_HARNESS_PREFIX)),)
+$(error OP2_HARNESS_PREFIX must be an absolute path, not $(OP2_HARNESS_PREFIX))
+endif
+endif
 HARNESS_PREFIX ?= $(or $(OP2_HARNESS_PREFIX),$(if $(wildcard ../prefix-harness),../prefix-harness,../prefix))
+PLAY_PREFIXES := $(realpath ../prefix $(shell git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/../prefix)
 GAME_DIR := $(HARNESS_PREFIX)/drive_c/GOG Games/Outpost 2
 OPU_DIR  := $(GAME_DIR)/OPU
 
@@ -38,7 +46,12 @@ build/zScenario.dll: test/Scenario.cpp src/mingw_compat.h
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
 
-install: all
+# Refuses the play prefix (realpath: through the worktrees' links).
+prefix-guard:
+	@$(if $(filter $(realpath $(HARNESS_PREFIX)),$(PLAY_PREFIXES)),echo "harness: $(HARNESS_PREFIX) is the play prefix (David's): \
+	  create prefix-harness/ or set OP2_HARNESS_PREFIX to a copy of your own" >&2; exit 1,true)
+
+install: all prefix-guard
 	@echo "harness: installing into $(HARNESS_PREFIX) (OP2_HARNESS_PREFIX or HARNESS_PREFIX chooses another)"
 	mkdir -p "$(OPU_DIR)/Harness"
 	# Copy then rename: a game that is running from this prefix keeps its mapped copy of the old file intact.
@@ -46,7 +59,7 @@ install: all
 	  mv -f "$(OPU_DIR)/Harness/.$$f.new" "$(OPU_DIR)/Harness/$$f"; done
 	python3 tools/ini.py install "$(OPU_DIR)/outpost2.ini"
 
-uninstall:
+uninstall: prefix-guard
 	python3 tools/ini.py uninstall "$(OPU_DIR)/outpost2.ini"
 	rm -rf "$(OPU_DIR)/Harness"
 
@@ -70,4 +83,4 @@ record-check: install
 clean:
 	rm -rf build
 
-.PHONY: all install uninstall check record-check clean
+.PHONY: all install uninstall check record-check clean prefix-guard
