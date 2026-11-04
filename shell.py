@@ -19,6 +19,9 @@ Driver script, one step per line ('#' starts a comment). Times are wall-clock se
     click <x> <y> [right]                                     mouse click at desktop pixel x, y
     ctl <text | id=N> [in=<window text regex>] [right]        click the centre of a control (a `dump` finds it; '_' in
                                                               text stands for a space)
+    pick <text | id=N> <item regex> [in=<window regex>]       choose a combo box's entry, the first whose text matches
+                                                              the regex ('_' a space; case-insensitive): click the box
+                                                              open, Home, Down to it, Return; then check the selection
     move <x> <y>                                              move the pointer
     unfocus | minimize | restore                              focus another window, minimize, or restore the game window
     key <keysym> [keysym ...]                                 key presses (X keysym names: Escape Return space a F1 ...)
@@ -385,6 +388,8 @@ def main() -> int:
                          "exchange lets it)")
     ap.add_argument("--draw-from", type=int, default=0, metavar="TICK",
                     help="with --turbo: draw every tick from TICK on (so a screenshot at the end shows current panes)")
+    ap.add_argument("--net-seed", type=int, metavar="N",
+                    help="with --net: start the game from this seed instead of the lobby's (every copy must be given the same)")
     ap.add_argument("--sync", type=Path, help="folder for the `touch` and `waitfile` steps (shared by runs driven together)")
     args = ap.parse_args()
     if args.window and args.window != "max" and not re.fullmatch(r"\d+x\d+", args.window.lower()):
@@ -449,6 +454,9 @@ def session(args, out: Path, w: int, h: int, procs: dict[str, subprocess.Popen])
                OP2H_NET="1" if args.net else "0", OP2H_TURBO="1" if args.turbo else "0", OP2H_DRAW_FROM=str(args.draw_from))
     env.pop("WAYLAND_DISPLAY", None)
     env.pop("OP2H_MISSION", None)
+    env.pop("OP2H_NET_SEED", None)
+    if args.net and args.net_seed is not None:
+        env["OP2H_NET_SEED"] = str(args.net_seed & 0xFFFFFFFF)
     for kv in args.ini:
         k, _, v = kv.partition("=")
         env[f"OP2H_INI_{k}"] = v
@@ -544,6 +552,34 @@ def session(args, out: Path, w: int, h: int, procs: dict[str, subprocess.Popen])
                 cx, cy = c["rect"][0] + c["rect"][2] // 2, c["rect"][1] + c["rect"][3] // 2
                 x.click(cx, cy, 3 if "right" in a[1:] else 1)
                 record("ctl", what=a[0], id=c.get("id"), text=c.get("text"), at=[cx, cy])
+            elif verb == "pick":
+                within = next((v[3:] for v in a[2:] if v.startswith("in=")), None)
+                what = a[0].replace("_", " ")
+                n_dump += 1
+                d = dump(f"ctl{n_dump}")
+                c = find_control(d, what, within) if d else None
+                items = (c or {}).get("items")
+                if not items:
+                    record("pick", what=a[0], found=None)
+                    return False, f"line {lineno}: no combo box {a[0]!r}"
+                want = re.compile(a[1].replace("_", " "), re.I)
+                index = next((i for i, t in enumerate(items) if want.search(t)), None)
+                if index is None:
+                    record("pick", what=a[0], item=a[1], found=None, items=items)
+                    return False, f"line {lineno}: no entry matching {a[1]!r} in {a[0]!r}"
+                cx, cy = c["rect"][0] + c["rect"][2] // 2, c["rect"][1] + c["rect"][3] // 2
+                x.click(cx, cy)
+                time.sleep(0.5)
+                for k in ["Home"] + ["Down"] * index + ["Return"]:
+                    x.key(k)
+                    time.sleep(0.03)
+                time.sleep(0.5)
+                n_dump += 1
+                d = dump(f"ctl{n_dump}")
+                sel = (find_control(d, what, within) or {}).get("sel") if d else None
+                record("pick", what=a[0], item=items[index], index=index, sel=sel)
+                if sel != index:
+                    return False, f"line {lineno}: {a[0]!r} shows entry {sel}, not {index} ({items[index]!r})"
             elif verb == "move":
                 x.move(int(a[0]), int(a[1]))
                 record("move", at=[int(a[0]), int(a[1])])

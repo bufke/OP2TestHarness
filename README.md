@@ -616,34 +616,49 @@ speed without a device. Each run uses its own desktop name, so parallel runs on 
 
 ## Network games (`netgame.py`, `shell.py --net`)
 
-Two copies of the original play a two-player LAN game over 127.0.0.1, each logged from inside (docs/multiplayer.md
+Two to six copies of the original play a LAN game over 127.0.0.1, each logged from inside (docs/multiplayer.md
 "Stage 2a"):
 
 ```sh
 cp -a prefix-harness prefix-net && make -C harness install HARNESS_PREFIX=../prefix-net   # once (gitignored)
 OP2_HARNESS_PREFIX=$PWD/prefix-net harness/netgame.py --out /tmp/net --ticks 3000 --turbo \
   --script0 harness/oracle/net/ml2_08_p0.txt --script1 harness/oracle/net/ml2_08_p1.txt
+OP2_HARNESS_PREFIX=$PWD/prefix-net harness/netgame.py --out /tmp/net3 --players 3 --mission 3P --vehicles 4 \
+  --seed 3003 --eden 1 --ticks 5000 --turbo --script0 ... --script1 ... --script2 ...      # recordings.toml net_ml3_08
 tools/target/debug/op2-missionhost netlog /tmp/net --bundle /tmp/net/desync.tar.gz       # replay and compare
 ```
 
-- Two shell-mode runs boot the game in their own Xvfb and virtual desktop in **one prefix**: the host creates a TCP/IP
-  game (the lobby's default map, ml2_08.dll), the joiner joins 127.0.0.1 and ticks Ready, the host starts it; the
-  drivers (written into OUT as `host_drive.txt`, `join_drive.txt`) wait for each other with shell.py's `touch` and
+- Shell-mode runs boot the game in their own Xvfb and virtual desktop in **one prefix**: the host creates a TCP/IP
+  game, the joiners join 127.0.0.1 one after another and tick Ready, the host starts it; the drivers (written into OUT
+  as `host_drive.txt`, `join_drive.txt`, `join2_drive.txt`, ...) wait for each other with shell.py's `touch` and
   `waitfile` steps in `--sync DIR`. Use a prefix of its own (`OP2_HARNESS_PREFIX`; netgame.py refuses prefix/), not
-  prefix-harness, whose wineserver other tools share. About a minute per game, most of it the two boots and the lobby.
+  prefix-harness, whose wineserver other tools share. About a minute per game, most of it the boots and the lobby.
+- The lobby: `--players N` (NEW NETWORK GAME's Max Players), `--type` (its Scenario Type: Last One Standing, Midas,
+  Resource Race, Space Race, Land Rush), `--mission` (a regex on GAME SETTINGS' scenario list of that type; default its
+  first, 2P LoS 'Ambush Alley', ml2_08.dll), `--vehicles` (Initial Vehicles), `--eden 0,2` (who ticks Eden; the rest
+  play Plymouth). shell.py's `pick` step chooses a combo box entry with the keyboard and checks it (the window dumps
+  list each combo box's `items` and `sel`). Player k's units are the scenario's slot k; their ids depend on the seed (the
+  bases' layout), so write a script for a fixed `--seed` (check the ids with `op2-missionhost play DLL --start-info`).
+- `--seed N`: every copy starts from seed N instead of the lobby's (harness OP2H_NET_SEED; the PrepareGame hook in
+  harness.cpp "Network games"), so the game can be recorded again from its arguments: a recordings.toml `netgame` run
+  whose `args` hold `--seed` is recorded by runs.py (`OP2_HARNESS_PREFIX=$PWD/prefix-net python3 -I tools/agent/record
+  --replace NAME`).
 - `shell.py --net` (harness.cpp "Network games") writes `start_info.json` (the lobby's GameStartInfo at the first
   cycle), `packets.jsonl` (every player's command slot as it executes, every 4th tick) and `net.jsonl` (every UDP
   datagram, sent and received), and makes a `--script`'s orders the local player's own commands: their packets go into
   the player's pending slot, as the UI's do, and cross the network. Orders for another player's units are skipped;
   verbs that change the game directly (spawn, setcell, poke, ...) would make the copies differ. One order per player per
-  4-tick turn, and none on turns the frame sends its machine settings ((tick / 4) % 8 == 7): harness.log WARNs when an
-  order replaces a pending command or a queued order didn't run. `packet` lines are refused (they would run on one
+  4-tick turn; an order given at a tick that is a multiple of 32 takes the slot of that turn's machine settings
+  (executed at ticks 8 mod 32) and replaces them, harmlessly: harness.log WARNs when an order replaces a pending command
+  or a queued order didn't run. `packet` lines are refused (they would run on one
   machine only). `--turbo` lifts the frame limiter (the turn exchange still keeps the copies in lockstep) and draws the
   panes 4 ticks in 256, and every tick from `--draw-from TICK` on (netgame.py passes its `--ticks`, so the closing
   screenshots are current).
-- OUT/summary.json says whether both copies executed the same orders and kept the same telemetry on every tick both
-  have (they quit a few hundred ticks apart in turbo). Recorded game: `harness/oracle/runs/net_ml2_08`, a `netgame` run in
-  accuracy/recordings.toml (not re-recordable: runs.py checks its files and refuses to record it).
+- OUT/summary.json says whether every copy executed the same orders as the host and kept the same telemetry on every
+  tick both have (they quit a few ticks apart in turbo). Recorded games: the `net_*` runs in accuracy/recordings.toml;
+  net_ml2_08 (the lobby's own seed) isn't re-recordable: runs.py checks its files and refuses to record it.
+  op2-accuracy's missions check replays every one (metric `net.<run>.exact_ticks`, scoreboard row "Network games of
+  the original replayed").
 
 ## Coordinates
 

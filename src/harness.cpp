@@ -3563,8 +3563,33 @@ void WriteStartInfo(const std::string& path) {
   fclose(out);
 }
 
+// OP2H_NET_SEED (netgame.py --seed): every copy replaces the lobby's seed with this one as the game starts, so a network
+// game can be played again from the same start. GameImpl::PrepareGame (0x4893B0) seeds the game's RNG from the
+// GameStartInfo's randomNumberSeed (+0xB2, at 0x489549) and keeps the GameStartInfo (start_info.json shows the seed it
+// ran with); the lobby has agreed on the start and checked its checksum before this, and every copy writes the same
+// value, so they stay in step.
+using PrepareGameFn = ibool(__thiscall*)(GameImpl*, GameStartInfo*);
+PrepareGameFn g_netPrepare = nullptr;
+uint32 g_netSeed = 0;
+bool g_netSeedSet = false;
+
+ibool __fastcall NetPrepareHook(GameImpl* self, void*, GameStartInfo* gsi) {
+  if (g_netSeedSet && gsi) {
+    Log("net: seed %u -> %u (OP2H_NET_SEED)", unsigned(gsi->randomNumberSeed), unsigned(g_netSeed));
+    gsi->randomNumberSeed = g_netSeed;
+  }
+  return g_netPrepare(self, gsi);
+}
+
 void NetInit() {
   InitializeCriticalSection(&g_netLock);
+  if (const char* s = getenv("OP2H_NET_SEED"); s && *s) {
+    g_netSeed = uint32(strtoul(s, nullptr, 10));
+    g_netSeedSet = true;
+    static const uint8_t prepare[] = { 0x81, 0xEC, 0x2C, 0x01, 0x00, 0x00 };  // sub esp,12Ch
+    g_netPrepare = reinterpret_cast<PrepareGameFn>(HookEntry(0x4893B0, prepare, 6, reinterpret_cast<void*>(&NetPrepareHook)));
+    Log("net: forced seed %u, PrepareGame hook %s", unsigned(g_netSeed), g_netPrepare ? "on" : "FAILED");
+  }
   g_netT0 = Now();
   g_netPackets = fopen((cfg.out + "\\packets.jsonl").c_str(), "w");
   g_netWire = fopen((cfg.out + "\\net.jsonl").c_str(), "w");
@@ -3910,6 +3935,25 @@ std::string WindowText(HWND h) {
   return buf;
 }
 
+// A combo box's list (`,"items":[...],"sel":N`) for a dump, so a driver can pick an entry by its text (shell.py `pick`:
+// the lobby's scenario list). Asked through timeouts like WindowText; nothing for other classes.
+std::string ComboItemsJson(HWND h, const char* cls) {
+  if (_stricmp(cls, "ComboBox") != 0) return "";
+  auto ask = [&](UINT msg, WPARAM w, LPARAM l) {
+    DWORD_PTR r = 0;
+    return SendMessageTimeoutA(h, msg, w, l, SMTO_ABORTIFHUNG, 500, &r) ? LRESULT(r) : LRESULT(CB_ERR);
+  };
+  const LRESULT n = ask(CB_GETCOUNT, 0, 0);
+  if (n == CB_ERR) return "";
+  std::string out = ",\"items\":[";
+  for (LRESULT i = 0; i < std::min<LRESULT>(n, 300); ++i) {
+    char item[256] = {};
+    if (ask(CB_GETLBTEXTLEN, i, 0) < LRESULT(sizeof(item))) ask(CB_GETLBTEXT, i, reinterpret_cast<LPARAM>(item));
+    out += (i ? "," : "") + JsonStr(item);
+  }
+  return out + "],\"sel\":" + std::to_string(int(ask(CB_GETCURSEL, 0, 0)));
+}
+
 std::string WindowJson(HWND h) {
   char cls[64] = {};
   GetClassNameA(h, cls, sizeof(cls));
@@ -3922,7 +3966,7 @@ std::string WindowJson(HWND h) {
            (void*)h, JsonStr(cls).c_str(), JsonStr(WindowText(h).c_str()).c_str(), GetDlgCtrlID(h), r.left, r.top,
            r.right - r.left, r.bottom - r.top, (unsigned long)style, IsWindowVisible(h) ? 1 : 0, IsWindowEnabled(h) ? 1 : 0,
            (void*)GetParent(h));
-  return buf;
+  return std::string(buf) + ComboItemsJson(h, cls);
 }
 
 BOOL CALLBACK AddChildJson(HWND c, LPARAM p) {
