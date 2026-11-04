@@ -99,6 +99,12 @@ def side_name(player: int) -> str:
     return "host" if player == 0 else "join" if player == 1 else f"join{player}"
 
 
+def seat_name(player: int) -> str:
+    """Player N's name in the lobby (its private ini's [Game] Name): Host, Joiner1, Joiner2, ..., distinct so a chat
+    line's or a message's sender can be told apart (net_chat)."""
+    return "Host" if player == 0 else f"Joiner{player}"
+
+
 def lobby_ids(player: int) -> tuple[int, int]:
     """The GAME SETTINGS dialog's Eden and Ready check boxes of the player's row: 40003/40004 on the host's row, then
     40006/40007, 40011/40012, ... five ids a row (the lobby dump in net_ml2_08's shell.jsonl)."""
@@ -272,6 +278,7 @@ def main() -> int:
         name = side_name(p)
         cmd = [sys.executable, str(HERE / "shell.py"), "--net", "--drive", str(out / f"{name}_drive.txt"), "--sync", str(sync),
                "--telemetry-every", str(args.telemetry_every), "--ini", "IntroAVI=0", "--ini", "Music=0", "--ini", "Sound=0",
+               "--ini", f"Name={seat_name(p)}",
                "--timeout", str(args.timeout + 200 + lobby_timeout), "--out", str(out / name)]
         if speeds:
             cmd += ["--ini", f"GameSpeed={speeds[p]}"]

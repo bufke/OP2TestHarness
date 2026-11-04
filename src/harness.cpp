@@ -4435,7 +4435,7 @@ void ShellInit() {
   const std::string ini = cfg.out + "\\outpost2.ini";
   if (CopyFileA(g_configFile.iniPath_, ini.c_str(), FALSE) && ini.size() < sizeof(g_configFile.iniPath_)) {
     strcpy(g_configFile.iniPath_, ini.c_str());
-    for (const char* key : { "IntroAVI", "ShowMovies", "Music", "Sound", "GameSpeed", "Demo", "MusicVol", "SoundVol" }) {
+    for (const char* key : { "IntroAVI", "ShowMovies", "Music", "Sound", "GameSpeed", "Demo", "MusicVol", "SoundVol", "Name" }) {
       const std::string v = Env((std::string("OP2H_INI_") + key).c_str());
       if (!v.empty()) WritePrivateProfileStringA("Game", key, v.c_str(), ini.c_str());
     }
