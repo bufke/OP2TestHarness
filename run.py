@@ -46,20 +46,33 @@ def sync_missions_from_play_prefix():
         shutil.copytree(src, OPU_DIR / "maps", dirs_exist_ok=True)
 
 
+def winepath(flag: str, *paths: str) -> list:
+    """`winepath FLAG PATHS...` in the harness prefix: one converted path per argument, or a clean exit when winepath is
+    missing, hangs, fails or answers short."""
+    env = dict(os.environ, WINEPREFIX=str(PREFIX), WINEDEBUG="-all")
+    try:
+        r = subprocess.run(["winepath", flag, *paths], env=env, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        sys.exit(f"run.py: winepath {flag} failed: {e}")
+    out = [l for l in r.stdout.splitlines() if l]
+    if r.returncode != 0 or len(out) != len(paths):
+        sys.exit(f"run.py: winepath {flag} {' '.join(paths)} exited {r.returncode}: {out} {r.stderr.strip()[-300:]}")
+    return out
+
+
 def fit_script_name(mission: str) -> str:
     """The mission as the game's GameStartInfo.scriptName (char[32]) can hold it. A DLL given by its path in the game
     folder (OPU/maps/<folder>/<stem>.dll: the multiplayer start reads the descriptor by that path) longer than 31
     characters is named by Wine's 8.3 short path instead; PrepareGame fails on the truncated name (ml4_42 and 19 other
     community maps, 2026-11-04)."""
-    if len(mission) <= 31 or not any(s in mission for s in "/\\"):
-        return mission
-    env = dict(os.environ, WINEPREFIX=str(PREFIX), WINEDEBUG="-all")
-    full = "C:\\GOG Games\\Outpost 2\\" + mission.replace("/", "\\")
-    out = subprocess.run(["winepath", "-s", "C:\\GOG Games\\Outpost 2", full], env=env, capture_output=True, text=True,
-                         timeout=60).stdout.split("\n")
-    if len(out) < 2 or not out[1].lower().startswith(out[0].lower() + "\\"):
-        sys.exit(f"run.py: no short path for {mission} (winepath -s: {out})")
-    short = out[1][len(out[0]) + 1:]
+    rel = mission.replace("/", "\\")
+    if len(rel) <= 31 or "\\" not in rel:
+        return rel
+    (game,) = winepath("-w", str(GAME_DIR))
+    short_game, short_full = winepath("-s", game, game.rstrip("\\") + "\\" + rel)
+    if not short_full.lower().startswith(short_game.rstrip("\\").lower() + "\\"):
+        sys.exit(f"run.py: no short path for {mission} under {short_game} (winepath -s: {short_full})")
+    short = short_full[len(short_game.rstrip("\\")) + 1:]
     if len(short) > 31:
         sys.exit(f"run.py: {mission} doesn't fit the game's 31-character script name even as {short}")
     return short
