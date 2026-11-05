@@ -530,7 +530,7 @@ it:
   `view` (optional tile, default the spawns' centroid) centres the camera for screenshots.
   `techtree` (optional, default `multitek.txt`) is the tech tree the scenario mission loads (run.py patches its
   TechtreeName; up to 12 characters, e.g. `edentek.txt`).
-  `setcell` (optional) repaints cell types before spawning (`cell` is a CellType id or name). Unknown keys such as `note` are ignored.
+  `setcell` (optional) repaints cell types before spawning (`cell` is a CellType id or name). `note` is a comment. op2-sim refuses a key that neither it nor the harness reads (op2-sim `Scenario::parse`, `HARNESS_KEYS`), so add a new harness-only key there too.
 - run.py turns the scenario into a script (`scenario_script.txt` in the output) and runs the scenario mission
   (`test/Scenario.cpp`): an empty colony on `map`, with player 0 a human Eden player, player 1 an idle Plymouth AI,
   and daylight everywhere. Spawns happen at tick 1, the first harness cycle. The trace starts there and samples
