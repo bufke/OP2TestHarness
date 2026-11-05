@@ -83,7 +83,7 @@ END_REASONS = {0: "Running", 3: "MissionAccomplished", 4: "MissionFailed", 6: "M
                8: "Defeat", 9: "ControlTerminated", 12: "GameOver"}
 
 
-# CellType names from TethysAPI Game/MapImpl.h, for scenario "cells" overrides given by name.
+# CellType names from TethysAPI Game/MapImpl.h, for scenario "setcell" overrides given by name.
 CELL_TYPES = ["FastPassible1", "Impassible2", "SlowPassible1", "SlowPassible2", "MediumPassible1", "MediumPassible2",
               "Impassible1", "FastPassible2", "NorthCliffs", "CliffsHighSide", "CliffsLowSide", "VentsAndFumaroles",
               *[f"ZPad{i}" for i in range(12, 21)], "DozedArea", "Rubble", "NormalWall", "MicrobeWall", "LavaWall",
@@ -134,7 +134,7 @@ def scenario_mission(map_name: str, techtree: str = "multitek.txt") -> str:
 def scenario_script(scn: dict) -> str:
     """Translates a scenario JSON (ENGINE_PLAN.md format) into a harness script in file tile coordinates."""
     lines = ["# generated from a scenario by run.py", "0 coords file"]
-    for c in scn.get("setcell", []) + scn.get("cells", []):
+    for c in scn.get("setcell", []):
         cell = c["cell"] if isinstance(c["cell"], int) else CELL_TYPES.index(c["cell"])
         x1, y1, x2, y2 = c["rect"]
         lines.append(f"0 setcell {x1} {y1} {x2} {y2} {cell}")
