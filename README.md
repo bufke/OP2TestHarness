@@ -630,8 +630,7 @@ it:
   run.py writes one patched copy of `zScenario.dll` per map, as `OPU/Harness/zs_<map>.dll`. Missions in
   `OPU/Harness` never appear in the game's mission lists.
 - A scenario run takes about 1 to 3 s. `oracle/` holds the reference scenarios (`make_scenarios.py` writes them;
-  `run_all.sh [names]` runs them 4 at a time into `oracle/runs/`, which is gitignored, and `analyze.py` summarises
-  steps, turns and routes). Measured results are in `oracle/FINDINGS.md` and `../notes/findings-*.md`. `op2-inspect`
+  `tools/agent/record NAME...` records them into `oracle/runs/`, which is gitignored). Measured results are in `oracle/FINDINGS.md` and `../notes/findings-*.md`. `op2-inspect`
   (tools/README.md) wraps all of this for agents.
 
 Recording a scenario as video frames: `--screenshot-every 1` (or 2, 5...) saves a PNG per sampled tick of the view
