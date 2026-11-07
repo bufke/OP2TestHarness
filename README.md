@@ -116,7 +116,7 @@ The exit status is 0 when the run reached its tick limit or the mission ended.
   every unit type's player-0 stats (`moveSpeed`, `turnRate`, `track`, `hp`, `armor`, the raw `stats` words, ...;
   buildings: `size`, `dock` per colony, `rubble` [common, rare], `buildingFlags`; weapons: `pixelsSkipped`,
   `radius`, `indirect` = type +0x250), and `cells`: the cell type of every tile as the running game sees it, in file
-  coordinates, row-major (`op2-inspect verify_coords` checks it against the .map).
+  coordinates, row-major.
 - `shot_<tick>.png`: the game window's client area.
 - `present.log` (with `--presents`): one JSON object per game tick and per real second. Tick records count the detail,
   minimap and command surfaces' presents; second records add the interval's `ms`, tick delta and ending tick. The hook is
