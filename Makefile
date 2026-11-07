@@ -28,7 +28,7 @@ CXXFLAGS := -std=c++17 -O2 -Wall -Wno-return-type -Wno-array-bounds \
             -isystem ../vendor/include
 LDFLAGS  := -shared -static -static-libgcc -static-libstdc++ -s -Wl,--kill-at -Wl,--no-insert-timestamp -lgdi32
 
-all: build/harness.dll build/sample_bot.dll build/easter_bot.dll build/cheat_bot.dll build/cursor_bot.dll build/hpblink_bot.dll build/hitmask_bot.dll build/los_bot.dll build/zHarnessEnd.dll build/zScenario.dll
+all: build/harness.dll build/sample_bot.dll build/easter_bot.dll build/cheat_bot.dll build/cursor_bot.dll build/hpblink_bot.dll build/hitmask_bot.dll build/los_bot.dll build/edge_bot.dll build/zHarnessEnd.dll build/zScenario.dll
 
 build/harness.dll: src/harness.cpp src/mingw_compat.h
 	@mkdir -p build
