@@ -90,6 +90,11 @@ CreateWallFn const CreateWallOrTube = reinterpret_cast<CreateWallFn>(0x478AA0);
 using Disaster3Fn = void(__fastcall*)(int, int, int);
 Disaster3Fn const SetMeteor = reinterpret_cast<Disaster3Fn>(0x4783B0);
 Disaster3Fn const SetEarthquake = reinterpret_cast<Disaster3Fn>(0x478320);
+Disaster3Fn const SetEruption = reinterpret_cast<Disaster3Fn>(0x4782E0);
+using Storm5Fn = void(__fastcall*)(int, int, int, int, int);
+Storm5Fn const SetLightning = reinterpret_cast<Storm5Fn>(0x4783E0);
+using Storm6Fn = void(__fastcall*)(int, int, int, int, int, int);
+Storm6Fn const SetTornado = reinterpret_cast<Storm6Fn>(0x478350);
 
 void(__thiscall* const Clip)(Loc*) = reinterpret_cast<void(__thiscall*)(Loc*)>(0x475960);
 void(__thiscall* const Add)(Loc*, const Loc*) = reinterpret_cast<void(__thiscall*)(Loc*, const Loc*)>(0x475A30);
@@ -173,7 +178,9 @@ void Probe() {
   struct Write { const char* name; SetFn fn; int x, y, v, sx, sy; };
   const Write writes[] = {
       {"SetCellType", SetCellType, 70, 128, 6, 102, 0},   {"SetCellType", SetCellType, 70, -1, 6, 38, 127},
-      {"SetCellType", SetCellType, 31, 10, 6, 31, 10},    {"SetCellType", SetCellType, 160, 10, 6, 160, 10},
+      {"SetCellType", SetCellType, 31, 10, 3, 31, 10},    {"SetCellType", SetCellType, 160, 10, 3, 160, 10},
+      {"SetCellType", SetCellType, 230, 14, 9, 230, 14},   {"SetTile", SetTile, 20, 12, 100, 20, 12},
+      {"SetTile", SetTile, 220, 12, 100, 220, 12},       {"SetCellType", SetCellType, 150, 128, 3, 182, 0},
       {"SetCellType", SetCellType, 290, 12, 6, 34, 12},   {"SetTile", SetTile, 72, 128, 20, 104, 0},
       {"SetTile", SetTile, 74, -1, 20, 42, 127},          {"SetTile", SetTile, 290, 14, 20, 34, 14},
       {"SetLavaPossible", SetLavaPossible, 76, 128, 1, 108, 0}, {"SetLavaPossible", SetLavaPossible, 76, -1, 1, 44, 127},
@@ -192,6 +199,24 @@ void Probe() {
     CreateWallOrTube(78, 128, 0, 0x11);
     Begin("CreateWallOrTube", {78, 128, 0, 0x11});
     fprintf(g_out, ",\"spill\":[110,0],\"before\":%u,\"after\":%u", before, *Tile(110, 0));
+    End();
+  }
+  {
+    // x isn't masked: (-1, 2 * 128 + 5) is block -1's row 261, i.e. block 1's row 5, column 63.
+    const unsigned before = *Tile(63, 5);
+    CreateWallOrTube(-1, 261, 0, 0x11);
+    Begin("CreateWallOrTube", {-1, 261, 0, 0x11});
+    fprintf(g_out, ",\"spill\":[63,5],\"before\":%u,\"after\":%u", before, *Tile(63, 5));
+    End();
+  }
+  // The padding writes read back.
+  const Loc readbacks[] = {{31, 10}, {160, 10}, {230, 14}, {20, 12}, {220, 12}, {182, 0}};
+  for (Loc l : readbacks) {
+    Begin("GetTile", {l.x, l.y});
+    fprintf(g_out, ",\"r\":%d", GetTile(0, 0, l.x, l.y));
+    End();
+    Begin("GetCellType", {l.x, l.y});
+    fprintf(g_out, ",\"r\":%d", GetCellType(0, 0, l.x, l.y));
     End();
   }
 
@@ -245,6 +270,18 @@ void Probe() {
     End();
     SetEarthquake(q[0], q[1], 0);
     Begin("SetEarthquake", {q[0], q[1], 0});
+    NewObjects();
+    End();
+    SetEruption(q[0], q[1], 10);
+    Begin("SetEruption", {q[0], q[1], 10});
+    NewObjects();
+    End();
+    SetLightning(q[0], q[1], 10, 60, 60);
+    Begin("SetLightning", {q[0], q[1], 10, 60, 60});
+    NewObjects();
+    End();
+    SetTornado(q[0], q[1], 10, 60, 60, 0);
+    Begin("SetTornado", {q[0], q[1], 10, 60, 60, 0});
     NewObjects();
     End();
   }
