@@ -150,6 +150,39 @@ def main() -> int:
     assert lines == ["0 coords file", "10     move 2 45 64"], lines
     assert "tool calls" in tool("game_stop")
 
+    # Checkpoints (op2-inspect checkpoint.rs, README "Checkpoints"): steps resume from the last run's save, orders
+    # given at the save's tick run after the load, a stop on an event saves where it stopped, a rewind and a peek
+    # resume from an earlier save, and every 2nd resumed run is checked against a replay from tick 0 here.
+    env["OP2_INSPECT_CHECK_EVERY"] = "2"
+    tool("game_start", "mission=zHarnessEnd", "campaign=none", "tick=10", "name=ckpt")
+    text = tool("game_step", "ticks=100", "name=ckpt")
+    assert "resumed from the checkpoint at tick 10)" in text, text
+    text = tool("game_step", f"orders=move {lynx} 50 60", f"until=idle:{lynx}", "name=ckpt")
+    assert f"resumed from the checkpoint at tick 110)" in text and f"stopped at event: idle {lynx}" in text, text
+    assert "checkpoints checked: a replay from tick 0" in text, text  # the 2nd resumed run
+    text = tool("game_step", "orders=move 2 45 64", "ticks=50", "name=ckpt")
+    assert "resumed from the checkpoint at tick" in text, text
+    text = tool("game_peek", "tick=60", "name=ckpt")
+    assert "resumed from the checkpoint at tick 10)" in text, text
+    text = tool("game_rewind", "tick=200", "name=ckpt")
+    assert "resumed from the checkpoint at tick 110)" in text, text
+    text = tool("game_verify", "name=ckpt")
+    assert "identical" in text and "resumed" in text, text
+    tool("game_stop", "name=ckpt")
+    # Off at game_start: every run from tick 0.
+    tool("game_start", "mission=zHarnessEnd", "campaign=none", "tick=10", "name=nockpt", "checkpoints=false")
+    assert "resumed" not in tool("game_step", "ticks=100", "name=nockpt")
+    tool("game_stop", "name=nockpt")
+    del env["OP2_INSPECT_CHECK_EVERY"]
+
+    # The harness side: a resumed run of a script goes on as the continuous one (checkpoint_check.py).
+    lynx_script = BUILD / "check_ckpt_script.txt"
+    lynx_script.write_text(f"0 coords file\n10 move {lynx} 50 60\n300 move {lynx} 40 55\n")
+    out = subprocess.run([sys.executable, str(HERE / "test" / "checkpoint_check.py"), "--mission", "zHarnessEnd.dll",
+                          "--script", str(lynx_script), "--at", "200,300", "--split", "--ticks", "700", "--trace-every", "4",
+                          "--out", str(BUILD / "check_ckpt")], capture_output=True, text=True)
+    assert out.returncode == 0 and "checkpoint check: PASS" in out.stdout, out.stdout + out.stderr
+
     # Shell mode: first_cycle is logged before tick-0 commands; the script-done gate and any shot behind it come after.
     done_out = BUILD / "check_script_done"
     done = subprocess.run([str(HERE / "shell.sh"), "--drive", str(HERE / "test" / "script_done_drive.txt"),
