@@ -3483,14 +3483,39 @@ uint32_t CookieNow(const uint8_t* base) {
   return at && !IsBadReadPtr(reinterpret_cast<const void*>(at), 4) ? *reinterpret_cast<const uint32_t*>(at) : 0;
 }
 
-// After a resume's load: the DLL's writable dwords outside its save region against the saved game's. A process has its
-// own security cookie and heap, so a dword may differ for that alone: the cookie itself and values XORed with it
-// (their difference is the cookies'), pointers the CRT encodes with it or with the process's own secret
-// (EncodePointer) that both decode to addresses, and heap addresses (both values addresses). Any other difference is mission state the save
-// didn't carry: a global the DLL changed but doesn't save (the load loads the DLL again: its globals start over). A
-// plain number there, or an address in a module (the same in every process), is put back as the saved game had it, so
-// the DLL goes on as the continued game's would; a heap address the loaded DLL lacks (a pointer that is a number now)
-// can't be, and the `checkpoint: dll DIFFERS` line says so (op2-inspect then distrusts the save).
+// The DLL's writable sections as its file defines them (zero past each section's raw data): what a load that loads
+// the DLL again leaves in a global nothing set since. None when the file can't be read or the DLL isn't at its
+// preferred base (its pointers would be relocated, not the file's).
+std::vector<std::string> FileSections(const uint8_t* base, const std::vector<DllSection>& secs) {
+  std::vector<std::string> out(secs.size());
+  char path[MAX_PATH] = {};
+  if (!GetModuleFileNameA(reinterpret_cast<HMODULE>(const_cast<uint8_t*>(base)), path, sizeof path - 1)) return out;
+  const std::string file = ReadFile(path);
+  const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+  if (file.empty() || nt->OptionalHeader.ImageBase != uintptr_t(base)) return out;
+  const IMAGE_SECTION_HEADER* h = IMAGE_FIRST_SECTION(nt);
+  for (size_t i = 0; i < secs.size(); ++i)
+    for (int k = 0; k < nt->FileHeader.NumberOfSections; ++k) {
+      if (h[k].VirtualAddress != secs[i].rva) continue;
+      out[i].assign(secs[i].size, '\0');
+      const size_t n = std::min<size_t>({ h[k].SizeOfRawData, secs[i].size, file.size() > h[k].PointerToRawData ? file.size() - h[k].PointerToRawData : 0 });
+      if (n) memcpy(&out[i][0], file.data() + h[k].PointerToRawData, n);
+    }
+  return out;
+}
+
+// After a resume's load: the DLL's writable dwords outside its save region against the saved game's. The load loads
+// the DLL again, so its globals start over from the file's values, and a process has its own security cookie, heap,
+// handles and CRT state. Classed in this order:
+// - put back: the loaded value is still the file's and the saved one is a small number (below 64 KB, or a small
+//   negative) or an address in a module mapped here: a global the mission set during play, which the load undid;
+// - mission state not put back (`lost`): other plain numbers (below 4 MB): a value this process set itself (a handle,
+//   a TLS index, a CRT counter) or one that may be a low heap address, where writing the other process's would be
+//   wrong; and anything left after the next two;
+// - process-only: the cookie and values XORed with it (their difference is the cookies'), pointers the CRT encodes
+//   with it or with the process's own secret (EncodePointer) that both decode to addresses, and heap addresses.
+// `checkpoint: dll same | process-only | restored | DIFFERS` says what; with any lost dword op2-inspect checks the
+// session against a replay from tick 0 at once and then more often.
 void CheckDllState(const std::string& save) {
   std::ifstream f(save + ".dll", std::ios::binary);
   std::string magic;
@@ -3537,6 +3562,8 @@ void CheckDllState(const std::string& save) {
   // tick or flag, or a small negative. A dword that differs is a heap address when the loaded one is mapped here.
   auto address = [](uint32_t v) { return v >= 0x400000 && v < 0x80000000u; };
   auto number = [](uint32_t v) { return v < 0x400000 || v >= 0xFFC00000u; };
+  auto small = [](uint32_t v) { return v < 0x10000 || v >= 0xFFFF0000u; };  // Below any address Wine hands out.
+  const auto file = FileSections(base, saved);
   auto here = [&](uint32_t v) {
     MEMORY_BASIC_INFORMATION m;
     return v >= 0x10000 && v < 0x80000000u && VirtualQuery(reinterpret_cast<const void*>(uintptr_t(v)), &m, sizeof m) && m.State == MEM_COMMIT;
@@ -3588,20 +3615,29 @@ void CheckDllState(const std::string& save) {
       memcpy(&a, was + k, 4);
       memcpy(&b, cur + k, 4);
       const uintptr_t at = uintptr_t(cur) + k;
-      if ((cookieSaved != cookieNow && (a ^ b) == (cookieSaved ^ cookieNow)) || encoded(a, b, decoded[i][k / 4])) {
-        cookieBytes += differ;
-      } else if (counted == 4 && image(a) && (b == 0 || image(b))) {
-        // An address in a module mapped here (Outpost2.exe, this DLL): the same in every process, e.g. a function
-        // pointer the DLL looked up on first use (TethysAPI's thunks) that the loaded DLL hasn't yet.
+      uint32_t initial = 0;
+      const bool known = !file[i].empty();
+      if (known) memcpy(&initial, file[i].data() + k, 4);
+      if (counted == 4 && known && b == initial && (small(a) || image(a))) {
+        // Untouched since the load loaded the DLL again (its file's value), and as saved a small number or an address
+        // in a module mapped here (the same in every process, e.g. a function pointer TethysAPI looked up on first
+        // use): a global the mission set during play. Put back as the continued game has it.
         restore.emplace_back(at, a);
         restoredBytes += differ;
         note(restored, shownRestored, at, a, b);
-      } else if ((address(a) && address(b)) || (a >= 0x10000 && a < 0x80000000u && here(b))) {
+      } else if (a >= 0x10000 && a < 0x80000000u && here(b)) {
+        // Both addresses, the loaded one mapped here (low ones too: Wine keeps the process parameters, e.g. the
+        // command line the CRT notes, below 4 MB).
         heapBytes += differ;
       } else if (counted == 4 && number(a) && number(b)) {
-        restore.emplace_back(at, a);
-        restoredBytes += differ;
-        note(restored, shownRestored, at, a, b);
+        // Plain numbers, but not one the mission set and the load undid: a value this process set itself (a handle,
+        // a TLS index, a CRT counter) or one that may be a low heap address. Not put back; reported.
+        lostBytes += differ;
+        note(lost, shownLost, at, a, b);
+      } else if ((cookieSaved != cookieNow && (a ^ b) == (cookieSaved ^ cookieNow)) || encoded(a, b, decoded[i][k / 4])) {
+        cookieBytes += differ;
+      } else if (address(a) && address(b)) {
+        heapBytes += differ;
       } else {
         lostBytes += differ;
         note(lost, shownLost, at, a, b);
@@ -3673,39 +3709,55 @@ int PutBackHiveCounts(const std::vector<HiveCounts>& counts) {
   return clash;
 }
 
-// A save outside a recording (`savegame`, OP2H_CHECKPOINT) with the mission DLL's state and the hives' counts beside it.
-bool SaveWithDllState(const std::string& path, int tick) {
+// OP2H_CHECKPOINT's save, with the mission DLL's state (`SAVE.dll`) and the hives' counts (`SAVE.hive`) beside it; the
+// counts are put back after SaveGame too (the run's last records and state.json come after the save). Only checkpoint
+// saves do this: a `savegame` line saves as the game does, so the original's own post-save behaviour stays measurable.
+void SaveCheckpoint(int tick) {
+  const std::string path = SavePathOf(cfg.checkpoint);
   DeleteFileA(path.c_str());  // So a save that fails leaves no older file behind to pass for it.
+  for (const char* ext : { ".dll", ".hive" }) DeleteFileA((path + ext).c_str());
   const auto hives = NoteHiveCounts();
   g_tApp.SaveGame(path);
-  DeleteSidecar(path.c_str());  // Saved without a recording: an older recording's sidecar no longer matches it.
   if (const int clash = PutBackHiveCounts(hives)) Log("checkpoint: WARN the save rebuilt %d hives otherwise (their counts may differ)", clash);
   if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
-    Log("script: WARN save %s at tick %d failed", path.c_str(), tick);
-    return false;
+    Log("checkpoint: WARN save %s at tick %d failed", path.c_str(), tick);
+    return;
   }
   WriteDllState(path);
-  if (FILE* f = fopen((path + ".hive").c_str(), "w")) {
+  // Written whole or not at all: a header with the count, to a temporary file renamed into place.
+  const std::string hive = path + ".hive", tmp = hive + ".tmp";
+  bool ok = false;
+  if (FILE* f = fopen(tmp.c_str(), "w")) {
+    fprintf(f, "op2h-hive 1 %u\n", unsigned(hives.size()));
     for (const auto& c : hives) fprintf(f, "%d %d %d %d\n", c.id, c.cc, c.enabled, c.dirt);
-    fclose(f);
+    ok = !ferror(f);
+    ok = fclose(f) == 0 && ok;
   }
-  return true;
+  if (!ok || !MoveFileExA(tmp.c_str(), hive.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+    DeleteFileA(tmp.c_str());
+    Log("checkpoint: WARN writing %s failed: no checkpoint", hive.c_str());
+    DeleteFileA(path.c_str());
+    return;
+  }
+  Log("checkpoint: saved %s at tick %d", path.c_str(), tick);
 }
 
-// After a resume's load: the hives' counts as the saved game had them.
+// After a resume's load: the hives' counts as the saved game had them. `checkpoint: hives: ...` says it was done; any
+// other `checkpoint: hives` line (no file, a short one) makes op2-inspect distrust the run.
 void LoadHiveCounts(const std::string& save) {
   std::ifstream f(save + ".hive");
-  if (!f) { Log("checkpoint: hives unknown (no counts saved beside %s)", save.c_str());  return; }
+  std::string magic;
+  unsigned version = 0, n = 0;
+  if (!(f >> magic >> version >> n) || magic != "op2h-hive" || version != 1) {
+    Log("checkpoint: hives unknown (no counts saved beside %s)", save.c_str());
+    return;
+  }
   std::vector<HiveCounts> counts;
-  for (HiveCounts c; f >> c.id >> c.cc >> c.enabled >> c.dirt;) counts.push_back(c);
+  for (HiveCounts c; counts.size() < n && f >> c.id >> c.cc >> c.enabled >> c.dirt;) counts.push_back(c);
+  if (counts.size() != n) { Log("checkpoint: hives unknown (%s.hive is short: %u of %u)", save.c_str(), unsigned(counts.size()), n);  return; }
   const int clash = PutBackHiveCounts(counts);
   Log("checkpoint: hives: the counts of %u structures' hives put back%s", unsigned(counts.size()),
       clash ? (" (WARN: " + std::to_string(clash) + " hives rebuilt otherwise than saved)").c_str() : "");
-}
-
-void SaveCheckpoint(int tick) {
-  const std::string path = SavePathOf(cfg.checkpoint);
-  if (SaveWithDllState(path, tick)) Log("checkpoint: saved %s at tick %d", path.c_str(), tick);
 }
 
 // OP2H_RESUME: loads the checkpoint and sets the harness's clocks to its tick. Returns that tick, or -1.
@@ -3744,7 +3796,10 @@ void RunSaveLoad(int tick) {
     const auto [verb, path] = g_saveLoadDue[k];
     if (verb == "savegame") {
       if (g_record) TAppSaveHook(&g_tApp, nullptr, path.c_str(), nullptr);
-      else SaveWithDllState(path, tick);
+      else {
+        g_tApp.SaveGame(path);
+        DeleteSidecar(path.c_str());  // Saved without a recording: an older recording's sidecar no longer matches it.
+      }
       Log("script: save %s at tick %d", path.c_str(), tick);
       continue;
     }

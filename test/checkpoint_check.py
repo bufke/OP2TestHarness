@@ -3,8 +3,8 @@
 going on? For a win script and checkpoint ticks T1,T2,...:
   1. the reference: a plain run of the script (`--eco --state`, telemetry every 10 ticks, trace every 20, `--trace-every`;
      all compared as streams, record by record: a long run's files are gigabytes);
-  2. the checkpoint runs: the script with `T savegame` lines, which must play exactly like the reference (a save
-     changes nothing), saving at each T (and its mission DLL state, `<save>.dll`);
+  2. a checkpoint run per T: the script to T with `--checkpoint` (the save, its mission DLL state `<save>.dll` and
+     hive counts `<save>.hive`, as op2-inspect's sessions make them), which must play like the reference to T;
   3. a resumed run per T: `run.py --resume` on that save with the script's lines after T, compared with the reference
      from T on: telemetry (heap addresses in the raw MapObject bytes masked, the hive slot numbers reported apart),
      trace (frame/anim aside), events after T (status messages apart), the final state.json and the end; and the
@@ -57,7 +57,7 @@ def write_script(path: Path, lines: list) -> None:
     path.write_text("\n".join(text) + "\n")
 
 
-def harness(args, script: Path, out: Path, ticks: int, resume: str | None = None) -> dict:
+def harness(args, script: Path, out: Path, ticks: int, resume: str | None = None, checkpoint: str | None = None) -> dict:
     cmd = [sys.executable, str(HERE / "run.py"), "--mission", args.mission, "--script", str(script), "--ticks", str(ticks),
            "--eco", "--state", "--telemetry-every", "10", "--trace-every", str(args.trace_every), "--out", str(out)]
     if args.campaign:
@@ -66,6 +66,8 @@ def harness(args, script: Path, out: Path, ticks: int, resume: str | None = None
         cmd += ["--players", str(args.players)]
     if resume:
         cmd += ["--resume", resume]
+    if checkpoint:
+        cmd += ["--checkpoint", checkpoint]
     p = subprocess.run(cmd, capture_output=True, text=True)
     summary = next((json.loads(l) for l in reversed(p.stdout.splitlines()) if l.startswith("{")), None)
     assert summary and not summary["timed_out"], p.stdout + p.stderr
@@ -222,63 +224,56 @@ def main() -> int:
     ok = True
     saves = []
     try:
-        groups = [[t] for t in ats] if args.split else [ats]
-        for group in groups:
-            names = {t: f"ckptcheck{run.os.getpid()}_{t}.op2" for t in group}
-            saves += names.values()
-            kept = [l for l in lines if not (args.split and l[0] == group[0])]
-            saving = sorted(kept + [(t, "internal", f"{t} savegame {names[t]}") for t in group], key=lambda l: l[0])
-            write_script(out / "save.txt", saving)
-            sd = out / f"save_{group[0]}"
-            harness(args, out / "save.txt", sd, max(group))
+        for t in ats:
+            name = f"ckptcheck{run.os.getpid()}_{t}.op2"
+            saves.append(name)
+            write_script(out / "save.txt", [l for l in lines if not (args.split and l[0] == t)])
+            sd = out / f"save_{t}"
+            harness(args, out / "save.txt", sd, t, checkpoint=name)
             log = (sd / "harness.log").read_text(errors="replace")
-            missing = [t for t in group if f"{names[t]} at tick {t}" not in log or not (run.OPU_DIR / "saves" / names[t]).exists()]
-            assert not missing, f"no save at {missing}: {sd / 'harness.log'}"
+            assert f"checkpoint: saved" in log and (run.OPU_DIR / "saves" / name).exists(), f"no save at {t}: {sd / 'harness.log'}"
             if not args.split:
-                end = max(group)
-                for what, a, b in (("telemetry", records(ref / "telemetry.jsonl", 0, end), records(sd / "telemetry.jsonl", 0, end)),
-                                   ("trace", trace_rows(ref, 0, end), trace_rows(sd, 0, end))):
-                    text, good = compare_rows(f"  with saves at {','.join(map(str, group))}: {what} to {max(group)}", a, b,
-                                              what == "telemetry", ("hiveSlot",))
+                for what, a, b in (("telemetry", records(ref / "telemetry.jsonl", 0, t), records(sd / "telemetry.jsonl", 0, t)),
+                                   ("trace", trace_rows(ref, 0, t), trace_rows(sd, 0, t))):
+                    text, good = compare_rows(f"  checkpoint run to {t}: {what}", a, b, what == "telemetry", ("hiveSlot",))
                     print(text)
                     ok &= good
-            for t in group:
-                rest = [l for l in lines if l[0] > t or (args.split and l[0] == t)]
-                write_script(out / f"rest_{t}.txt", rest)
-                rd = out / f"resume_{t}"
-                s = harness(args, out / f"rest_{t}.txt", rd, args.ticks, resume=names[t])
-                print(f"resume at {t}: {s['quit']} ({s['game_term_reason']}); {dll_line(rd)}")
-                if not (rd / "state.json").is_file():
-                    log = (rd / "harness.log").read_text(errors="replace").splitlines()
-                    print(f"  FAILED: no state.json; harness.log ends: {log[-3:]}")
-                    ok = False
-                    continue
-                # Events are small (thousands of lines): read whole.
-                ev_ref, ev_got = list(records(ref / "events.jsonl", t + 1)), list(records(rd / "events.jsonl", t + 1))
-                results = [
-                    # The record at the checkpoint's tick itself is taken right after the load, before the game's next
-                    # cycle recomputes what a load leaves to it (each player's recalc flag, the structures' hive counters).
-                    compare_rows(f"  telemetry at {t}, right after the load", records(ref / "telemetry.jsonl", t, t),
-                                 records(rd / "telemetry.jsonl", t, t), True, ("",)),
-                    compare_rows("  telemetry after it", records(ref / "telemetry.jsonl", t + 1), records(rd / "telemetry.jsonl", t + 1), True, ("hiveSlot",)),
-                    compare_rows("  trace", trace_rows(ref, t), trace_rows(rd, t)),
-                    compare_rows("  events after it (status messages apart)", [e for e in ev_ref if e["ev"] != "msg"],
-                                 [e for e in ev_got if e["ev"] != "msg"]),
-                ]
-                sa, sb = json.loads((ref / "state.json").read_text()), json.loads((rd / "state.json").read_text())
-                results.append((f"  final state.json {'identical' if sa == sb else 'DIFFERS: ' + '; '.join(diff_keys(sa, sb)[:4])}", sa == sb))
-                for text, good in results:
-                    print(text)
-                    ok &= good
-                print(messages("  status messages after it", [e for e in ev_ref if e["ev"] == "msg"], [e for e in ev_got if e["ev"] == "msg"]))
-                if args.split:
-                    at_t = list(records(rd / "events.jsonl", t, t))
-                    ref_t = list(records(ref / "events.jsonl", t, t))
-                    print(f"  events at {t}: resumed {len(at_t)}, reference {len(ref_t)}")
-                tail = last_tick(rd / "telemetry.jsonl")
-                if tail != end_tick:
-                    print(f"  the resumed run ended at {tail}, the reference at {end_tick}")
-                    ok = False
+            rest = [l for l in lines if l[0] > t or (args.split and l[0] == t)]
+            write_script(out / f"rest_{t}.txt", rest)
+            rd = out / f"resume_{t}"
+            s = harness(args, out / f"rest_{t}.txt", rd, args.ticks, resume=name)
+            print(f"resume at {t}: {s['quit']} ({s['game_term_reason']}); {dll_line(rd)}")
+            if not (rd / "state.json").is_file():
+                log = (rd / "harness.log").read_text(errors="replace").splitlines()
+                print(f"  FAILED: no state.json; harness.log ends: {log[-3:]}")
+                ok = False
+                continue
+            # Events are small (thousands of lines): read whole.
+            ev_ref, ev_got = list(records(ref / "events.jsonl", t + 1)), list(records(rd / "events.jsonl", t + 1))
+            results = [
+                # The record at the checkpoint's tick itself is taken right after the load, before the game's next
+                # cycle recomputes what a load leaves to it (each player's recalc flag, the structures' hive counters).
+                compare_rows(f"  telemetry at {t}, right after the load", records(ref / "telemetry.jsonl", t, t),
+                             records(rd / "telemetry.jsonl", t, t), True, ("",)),
+                compare_rows("  telemetry after it", records(ref / "telemetry.jsonl", t + 1), records(rd / "telemetry.jsonl", t + 1), True, ("hiveSlot",)),
+                compare_rows("  trace", trace_rows(ref, t), trace_rows(rd, t)),
+                compare_rows("  events after it (status messages apart)", [e for e in ev_ref if e["ev"] != "msg"],
+                             [e for e in ev_got if e["ev"] != "msg"]),
+            ]
+            sa, sb = json.loads((ref / "state.json").read_text()), json.loads((rd / "state.json").read_text())
+            results.append((f"  final state.json {'identical' if sa == sb else 'DIFFERS: ' + '; '.join(diff_keys(sa, sb)[:4])}", sa == sb))
+            for text, good in results:
+                print(text)
+                ok &= good
+            print(messages("  status messages after it", [e for e in ev_ref if e["ev"] == "msg"], [e for e in ev_got if e["ev"] == "msg"]))
+            if args.split:
+                at_t = list(records(rd / "events.jsonl", t, t))
+                ref_t = list(records(ref / "events.jsonl", t, t))
+                print(f"  events at {t}: resumed {len(at_t)}, reference {len(ref_t)}")
+            tail = last_tick(rd / "telemetry.jsonl")
+            if tail != end_tick:
+                print(f"  the resumed run ended at {tail}, the reference at {end_tick}")
+                ok = False
     finally:
         for n in [] if args.keep else saves:
             for f in (n, n + ".dll", n + ".hive"):

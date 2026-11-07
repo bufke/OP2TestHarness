@@ -145,8 +145,7 @@ or `@N` for the unit made by the Nth `spawn` command, or a name (`$NAME`, "Unit 
      guard <id> <id> | attackground <id> x y | lights <id> 0|1 | scatter <id> <id>...   # scatter: one ctMoScatter
      movewp <id> x,y[,r] ... | standground <id> x,y[,r] ... | patrol <id> <loop> x,y[,r] ...   # waypoints, range r
 1236 packet    2 012b0001003007a300    # a recorded UI packet (type, data hex), run inside the cycle starting at 1236
-     savegame <file> | loadgame <file>  # TApp::SaveGame/LoadGame on OPU/saves/<file>, once each (recording tests;
-                                        # outside a recording a save is a checkpoint's: "Checkpoints")
+     savegame <file> | loadgame <file>  # TApp::SaveGame/LoadGame on OPU/saves/<file>, once each (recording tests)
      gamespeed <1-10>   # what the in-game Game Speed buttons queue: ctGameOpt 0x14 = speed x 4 (0x4231C0), which runs 2 turns later
 ```
 
@@ -391,8 +390,9 @@ earlier run where the script up to it is unchanged (tools/README.md "Checkpoints
 
 - `--checkpoint SAVE`: when the run stops with the game going on (its tick limit, a `--stop` event), the game is saved
   to SAVE first, at the end of that tick's cycle (after its script lines, samples and session events), as TApp::SaveGame
-  saves (0x4877E0, what the Save dialog calls). `checkpoint: saved SAVE at tick T` in harness.log. A `savegame` line
-  outside a recording does the same.
+  saves (0x4877E0, what the Save dialog calls). `checkpoint: saved SAVE at tick T` in harness.log. Only these saves
+  write what follows and put the hives' counts back; a `savegame` line saves as the game does, so the original's own
+  behaviour after a save stays measurable.
 - Beside the save, `SAVE.dll`: the mission DLL's writable sections (from its PE headers in memory) as they are at the
   save, and each dword as the process's DecodePointer reads it.
 - `--resume SAVE`: at the first game cycle, before any script line runs, TApp::LoadGame (0x4878F0, what the Load dialog
@@ -403,14 +403,23 @@ earlier run where the script up to it is unchanged (tools/README.md "Checkpoints
 - After the load the harness compares the mission DLL's memory outside its save region (GetSaveRegions, as
   MissionManager keeps it) with `SAVE.dll`. **A load loads the mission DLL again** (its CRT draws a new security
   cookie; measured on c_euf.dll), so every global the DLL doesn't save starts over from the DLL file's values. Each
-  dword that differs is classed: the CRT's cookie and values it encodes (XORed, or a pointer encoded with the cookie
-  or with EncodePointer, decoding to addresses), heap addresses (both values addresses: a process allocates
-  elsewhere), and the rest, mission state. Plain numbers and module addresses (Outpost2.exe's, the DLL's own: the
-  same in every process, e.g. a function pointer TethysAPI looks up on first use) are **put back** as saved, so the
-  DLL goes on as the continued game's would. `checkpoint: dll same | process-only | restored: ... | DIFFERS: ...` says
-  which (DIFFERS: a heap address the loaded DLL's globals lack, which can't be put back; op2-inspect then checks the
-  session against a replay from tick 0 sooner). c_euf.dll keeps two such globals (0x11027780 and 0x11027784, which
-  its unit-creating helpers pass on as arguments: 2,1 saved against the file's 0,6), which a resume puts back.
+  dword that differs is classed, in this order:
+  - **put back** as saved: the loaded value is still the DLL file's (nothing set it since the load) and the saved one
+    is a small number (below 64 KB, or a small negative) or an address in a module mapped here (Outpost2.exe's, the
+    DLL's own: the same in every process, e.g. a function pointer TethysAPI looks up on first use): a global the
+    mission set during play, so the DLL goes on as the continued game's would. Only for a DLL at its preferred base
+    (else the file's pointers aren't the loaded ones);
+  - **lost** (mission state not put back): other plain numbers below 4 MB (unless the loaded one is an address
+    mapped here: then both are heap addresses, process-only), a value this process set itself (a handle,
+    a TLS index, a CRT counter) or possibly a low heap address (Wine allocates below 4 MB), where the other process's
+    value would be wrong; and whatever is left after the next two;
+  - process-only: the CRT's cookie and values it encodes (XORed, or a pointer encoded with the cookie or with
+    EncodePointer, decoding to addresses), and heap addresses (both values addresses: a process allocates elsewhere).
+
+  `checkpoint: dll same | process-only | restored: ... | DIFFERS: ...` says which; with any lost dword op2-inspect
+  checks the session against a replay from tick 0 at once and then more often. c_euf.dll keeps two such globals
+  (0x11027780 and 0x11027784, which its unit-creating helpers pass on as arguments: 2,1 saved against the file's
+  0,6), which a resume puts back.
 - **The hives' counts.** A save doesn't hold the tube networks (HiveManager): saving rebuilds them in the game that goes
   on (new slots in HiveManager's array) and loading builds them afresh, both with each hive's counts (Command Centers
   +0xC, an enabled one +0x10, DIRTs +0x14) at zero until its owner's next allocation pass recounts them (ECONOMY.md
