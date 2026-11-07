@@ -344,6 +344,12 @@ def main() -> int:
     ap.add_argument("--desktop", metavar="WxH",
                     help="run the game in a Wine virtual desktop of this size (dialogs stay inside it, for gamescope)")
     ap.add_argument("--silent", action="store_true", help="with --record: sound and music off, no audio device")
+    ap.add_argument("--resume", metavar="SAVE",
+                    help="load this checkpoint save (OPU/saves/SAVE, or a path) at the first game cycle and play the "
+                         "script from its tick: every script line must be at that tick or later (README \"Checkpoints\")")
+    ap.add_argument("--checkpoint", metavar="SAVE",
+                    help="when the run stops with the game going on (--ticks, --stop), save it to SAVE first, with the "
+                         "mission DLL's state beside it (README \"Checkpoints\")")
     ap.add_argument("--fast", action="store_true",
                     help="with --record, for tests of the recording itself: turbo on a private Xvfb, nobody playing "
                          "(the script's `savegame`/`loadgame` lines stand in for the dialogs)")
@@ -456,6 +462,14 @@ def main() -> int:
         env["OP2H_BOT"] = win_path(args.bot.resolve())
     if args.campaign:
         env["OP2H_CAMPAIGN"] = win_path(args.campaign.resolve())
+    if args.resume:
+        if args.record or scn:
+            ap.error("--resume plays a mission's script on from a checkpoint (not a recording or a scenario)")
+        env["OP2H_RESUME"] = args.resume if "/" not in args.resume else win_path(Path(args.resume).resolve())
+    if args.checkpoint:
+        if args.record or scn:
+            ap.error("--checkpoint saves a mission's scripted run (not a recording or a scenario)")
+        env["OP2H_CHECKPOINT"] = args.checkpoint if "/" not in args.checkpoint else win_path(Path(args.checkpoint).resolve())
     env.pop("WAYLAND_DISPLAY", None)  # Make sure Wine uses the X display we picked.
 
     start = time.monotonic()

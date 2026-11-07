@@ -42,6 +42,8 @@ When run from Claude Code, `run.sh` and `make check` need `dangerouslyDisableSan
 | `--state` | | session state: `events.jsonl` through the run and `state.json` at the end (see "Session state") |
 | `--stop KINDS` | | end the run at the first event of these kinds after `--stop-from` (implies `--state`) |
 | `--stop-from T` | 0 | `--stop` only counts events after tick T |
+| `--checkpoint SAVE` | | when the run stops with the game going on (`--ticks`, `--stop`), save it to SAVE (OPU/saves/SAVE, or a path) first, with the mission DLL's state beside it (see "Checkpoints") |
+| `--resume SAVE` | | load that save at the first game cycle and play the script on from its tick; every script line must be at that tick or later (see "Checkpoints") |
 | `--campaign FILE` | | start as a campaign mission with this carry-over (MissionResults): `key value` lines `food`, `common`, `rare`, `workers`, `scientists`, `kids`, `satellites`, `moraleLevel`, `morale`, `event`, `techLevel`, `mission` (the finished mission's number; default the DLL's minus one, as the game starts the next one), and `techs` followed by the completed topic ids. Older files without `techs` still start with no carried research |
 | `--no-turbo` | | keep the game's frame limiter and render every frame (real time at `--speed`) |
 | `--presents` | | `present.log`: detail/minimap/command pane presents per game tick and per real second |
@@ -143,7 +145,8 @@ or `@N` for the unit made by the Nth `spawn` command, or a name (`$NAME`, "Unit 
      guard <id> <id> | attackground <id> x y | lights <id> 0|1 | scatter <id> <id>...   # scatter: one ctMoScatter
      movewp <id> x,y[,r] ... | standground <id> x,y[,r] ... | patrol <id> <loop> x,y[,r] ...   # waypoints, range r
 1236 packet    2 012b0001003007a300    # a recorded UI packet (type, data hex), run inside the cycle starting at 1236
-     savegame <file> | loadgame <file>  # TApp::SaveGame/LoadGame on OPU/saves/<file>, once each (recording tests)
+     savegame <file> | loadgame <file>  # TApp::SaveGame/LoadGame on OPU/saves/<file>, once each (recording tests;
+                                        # outside a recording a save is a checkpoint's: "Checkpoints")
      gamespeed <1-10>   # what the in-game Game Speed buttons queue: ctGameOpt 0x14 = speed x 4 (0x4231C0), which runs 2 turns later
 ```
 
@@ -338,8 +341,9 @@ the log. `@N` spawns keep their own rule (skipped once they have died).
 For tools that play a mission by replaying a growing script (op2-inspect's `game_*` tools, tools/README.md): a
 replay costs about 1 s of wall time at any tick (Wine and Xvfb start in ~0.8 s; measured 2026-10-22: e05's whole
 23,448-tick win in 1.0-1.3 s, 40,000 ticks of e06 or e12 in 1.1 s, p12 to its end at 37,652 in 1.4 s; with
-`--telemetry-every 1` e05 takes 3.6 s, writing 125 MB), so a session replays from tick 0 at every step instead of
-keeping a paused game, and its history is exactly the script that reproduces it. Reading the state changes nothing:
+`--telemetry-every 1` e05 takes 3.6 s, writing 125 MB), so a session replays its script at every step instead of
+keeping a paused game, and its history is exactly the script that reproduces it. Long games replay from a checkpoint
+instead of tick 0 (next section): with `--eco` a replay runs at 20k-30k ticks/s (c_euf_win to 46,296 in 2.4 s). Reading the state changes nothing:
 the telemetry of a run with `--state` is byte-identical to one without (measured on e05_win; `make -C harness check` compares them).
 
 - `events.jsonl`, one line per event, file tiles, written during the run:
@@ -378,6 +382,82 @@ the telemetry of a run with `--state` is byte-identical to one without (measured
 
 Learned while building it: wreckage is scavenged by a Cargo Truck driving onto it only once it has been discovered,
 and a Scout discovers it by coming near (e06: tanks next to it for 3000 ticks didn't).
+
+## Checkpoints (`--checkpoint`, `--resume`)
+
+A replay from tick 0 costs about 1 s plus the game's time, 20k-30k ticks/s with `--eco` and `--state`: 10 s for a
+250,000-tick colony game, and a session makes hundreds. op2-inspect's sessions therefore resume from a save of an
+earlier run where the script up to it is unchanged (tools/README.md "Checkpoints"); the harness's part:
+
+- `--checkpoint SAVE`: when the run stops with the game going on (its tick limit, a `--stop` event), the game is saved
+  to SAVE first, at the end of that tick's cycle (after its script lines, samples and session events), as TApp::SaveGame
+  saves (0x4877E0, what the Save dialog calls). `checkpoint: saved SAVE at tick T` in harness.log. A `savegame` line
+  outside a recording does the same.
+- Beside the save, `SAVE.dll`: the mission DLL's writable sections (from its PE headers in memory) as they are at the
+  save, and each dword as the process's DecodePointer reads it.
+- `--resume SAVE`: at the first game cycle, before any script line runs, TApp::LoadGame (0x4878F0, what the Load dialog
+  calls) loads the save; `resume: load SAVE at tick 1: ok, now tick T` in harness.log. The run then goes on as the
+  cycle of tick T: the script's lines (all must be at T or later; earlier ones are skipped with a WARN) at T run right
+  after the load, where they would have run after the saved cycle, then the samples at T (telemetry, trace) and the
+  session's events. The session state starts from the loaded game without events (no `new` for every unit).
+- After the load the harness compares the mission DLL's memory outside its save region (GetSaveRegions, as
+  MissionManager keeps it) with `SAVE.dll`. **A load loads the mission DLL again** (its CRT draws a new security
+  cookie; measured on c_euf.dll), so every global the DLL doesn't save starts over from the DLL file's values. Each
+  dword that differs is classed: the CRT's cookie and values it encodes (XORed, or a pointer encoded with the cookie
+  or with EncodePointer, decoding to addresses), heap addresses (both values addresses: a process allocates
+  elsewhere), and the rest, mission state. Plain numbers and module addresses (Outpost2.exe's, the DLL's own: the
+  same in every process, e.g. a function pointer TethysAPI looks up on first use) are **put back** as saved, so the
+  DLL goes on as the continued game's would. `checkpoint: dll same | process-only | restored: ... | DIFFERS: ...` says
+  which (DIFFERS: a heap address the loaded DLL's globals lack, which can't be put back; op2-inspect then checks the
+  session against a replay from tick 0 sooner). c_euf.dll keeps two such globals (0x11027780 and 0x11027784, which
+  its unit-creating helpers pass on as arguments: 2,1 saved against the file's 0,6), which a resume puts back.
+- **The hives' counts.** A save doesn't hold the tube networks (HiveManager): saving rebuilds them in the game that goes
+  on (new slots in HiveManager's array) and loading builds them afresh, both with each hive's counts (Command Centers
+  +0xC, an enabled one +0x10, DIRTs +0x14) at zero until its owner's next allocation pass recounts them (ECONOMY.md
+  "Tube network"; a computer player's pass comes every 256 ticks): p12's Eden read [1,0,0,0] instead of [1,2,1,1]
+  for 140 ticks after a save at 5000, **with no load**. DoDamage's Damage Prevention reads them in that window
+  (0x430050). So a checkpoint save notes each structure's hive counts first, puts them back after SaveGame, and
+  writes them beside the save (`SAVE.hive`); a resume puts them back after the load (`checkpoint: hives: the counts
+  of N structures' hives put back`). Only the slot numbers stay different (they decide nothing measured).
+- What a save doesn't hold of the harness's own state: unit names (`as NAME`, `name`), spawn indices, group names,
+  the UI (selection, view) of input verbs, a `packet` queued for the next cycle. op2-inspect doesn't resume past such
+  lines.
+
+**Fidelity** (2026-11-06, `python3 harness/test/checkpoint_check.py --mission M --script WIN --at T1,T2,..`: a
+reference run of the win script, runs that save at each T, and a run per T resumed in a new process, compared with
+the reference from T on: telemetry (`--eco` every 10 ticks), trace (every 4 ticks; every 20, the
+checker's default since a whole-run trace at 4 is gigabytes, in the last pass of c_euf, ml4_01 and the split),
+events, the final state.json; the checker streams the files and peaked at 24 MB):
+
+| mission | script | resumed at | result |
+|---|---|---|---|
+| e01 | e01.txt | 1000, 2000 | exact to the win at 3000 |
+| cResEsc | cResEsc.txt | 5000, 15000 | exact to the win at 17792 |
+| e10 | e10.txt (e10_campaign.txt) | 12000, 30000, 45000 | exact to the win at 48720 |
+| p12 | p12_partial.txt (p12_campaign.txt) | 5000, 15000 | exact to 27400 with the hives' counts put back (before: Eden's counts 0 for 140 ticks after each save) |
+| c_euf | c_euf_win.txt | 10000, 30000, 45000 | exact to the win at 46296 (the two DLL globals put back) |
+| c_euf, `--split` | c_euf_win.txt | 40800 (the assist and that tick's orders run after the load) | exact to the win |
+| ml4_01, `--players 2` | ml4_01.txt | 2000, 6000 | exact to the Victory at 12464 |
+
+The Sierra DLLs (e01, e10, p12, ml4_01) each have one dword the check can't class (e.g. p12.dll 0x11012268, 0xF0F03B01
+saved against 0xF0F03801): by the code around it (the list at 0x11012258) the MSVC CRT small-block heap's per-page
+free counts, not mission state; op2-inspect then checks the session against a replay from tick 0 sooner. p12_win.txt
+binds unit names (`as NAME`) before 10000, which a save doesn't hold: resumed there, its `$NAME` orders were skipped
+and the game crashed at 0x42324F (an order to a dead unit) at 29240; op2-inspect never resumes past such lines.
+
+"Exact": the trace (positions, actions, every unit field it writes) identical at every sample, the telemetry identical
+every 10 ticks, the events identical, the final state.json identical, the win at the same tick, apart from:
+- the structure hives' slot numbers in HiveManager's array (telemetry `hive`'s last value): **a save itself renumbers
+  them** in the game that goes on (c_euf, from the first sample after a save to the end, with nothing else differing),
+  and a load numbers them its own way (their counts are put back, above); and each unit's MapObject +0x7C (a heap address for most units; a Garage's
+  goes from -2 to 0x40 when the game is saved) and other heap addresses in the raw bytes (as record_check.py masks);
+- the telemetry record at the checkpoint's tick itself, taken right after the load: each player's recalc flag
+  (PlayerImpl dword 40) is set until the game's next cycle (from the next record on it is the continued game's);
+- status messages (`msg` events): MessageLog's throttle runs on the real clock, so they differ between any two runs of
+  different speed, resumed or not (two plain runs of c_euf_win, with and without `--trace-every 4`: 10 messages apart
+  by tick 40000).
+`harness/test/checkpoint_check.py --split` leaves the script's lines at T out of the save and plays them after the
+load (orders given at a checkpoint's tick).
 
 ## Recording your own play (`--record`)
 
@@ -472,7 +552,9 @@ make -C missions record MISSION=p12.dll         # CAMPAIGN= defaults to harness/
   as the saved one would have (the plain telemetry byte for byte, the win at the same tick) apart from internal values
   in `--eco` telemetry: every unit's MapObject +0x7C, a heap address (0x06xxxxxx, 0x78 apart from unit to unit) that a
   loaded game allocates 2 MB away, and the structure hives' slot numbers in HiveManager's array, which stay different to
-  the end without anything else differing; and in p12, Eden's hive counters read 0 for up to ~140 ticks after a load.
+  the end without anything else differing; and in p12, Eden's hive counters read 0 for up to ~140 ticks after a load
+  (after a save too, in the game that goes on: "Checkpoints" puts them back for its own saves; a recording's saves
+  are the player's and stay as the game makes them).
   The measured scope is in notes/uncertain-claims.md ("a load replays like continuing"). Sound on during a recording hasn't been tested for
   determinism (the checks run silent; replays are always silent): compare the first real recording's replay with its
   telemetry. Agents' harness runs share prefix-harness's wineserver and can take the foreground (input runs do): don't

@@ -37,6 +37,8 @@ namespace {
 struct Config {
   std::string mission, out, script, bot;
   std::string campaign;  // OP2H_CAMPAIGN: campaign carry-over file (see StartMissionHook).
+  std::string resume;    // OP2H_RESUME: a checkpoint save to load at the first game cycle ("Checkpoints").
+  std::string checkpoint;  // OP2H_CHECKPOINT: where to save the game when the run stops with the game going on.
   int ticks = 0, shotEvery = 0, telemEvery = 100, speed = 10, seed = 1, difficulty = 1, width = 1024, height = 768;
   int players = 1;  // OP2H_PLAYERS: >1 selects the original's multiplayer defaults.
   int drawEvery = 0;  // Turbo only: render every N ticks (0 = only just before screenshots).
@@ -2341,6 +2343,7 @@ std::vector<uint8_t> g_seenTech;      // Per tech number: player 0 has it.
 std::vector<int>     g_seenObjective;  // Per ScStub index: -1 not a victory condition, else met (0/1).
 std::vector<int>     g_seenDisaster;   // Per object index: the disaster type seen there (-1 none).
 bool g_sessionStarted = false;
+bool g_sessionSilent = false;  // A checkpoint's resume: take in the loaded game without an event (SessionRebaseline).
 
 constexpr uintptr_t VictoryConditionVtbl = 0x4D68C0;  // VictoryConditionImpl (TethysAPI ScBase.h).
 
@@ -2405,7 +2408,8 @@ void SessionTick(int tick) {
       if (s.live && !baseline) EventUnit("gone", id, s.type, s.owner, s.x, s.y);
       if (!baseline) EventUnit("new", id, type, owner, x, y);
       s = SeenUnit{ type, owner, mo->command_, mo->damage_, x, y, true };
-      return;
+      // A resume's baseline also takes in where each vehicle is going, as the continued game's last tick had it.
+      if (!g_sessionSilent) return;
     }
     if (mo->damage_ > s.damage && !baseline) {
       char extra[64];
@@ -2449,7 +2453,7 @@ void SessionTick(int tick) {
   if (g_seenObjective.empty()) g_seenObjective.assign(ScStubList::MaxNumScStubs, -1);
   ForEachObjective([&](int i, const VictoryConditionImpl* v) {
     const int met = ObjectiveMet(v);
-    if (g_seenObjective[i] != met && (g_seenObjective[i] >= 0 || met) && EventBegin("objective")) {
+    if (g_seenObjective[i] != met && (g_seenObjective[i] >= 0 || met) && !g_sessionSilent && EventBegin("objective")) {
       fprintf(g_events, ",\"met\":%d,\"text\":", met);
       JsonStr(g_events, v->pObjectiveText_);
       EventEnd("objective", -1);
@@ -2462,14 +2466,14 @@ void SessionTick(int tick) {
   for (int i = 1; i <= last && size_t(i) < g_seenDisaster.size(); ++i) {
     const MapObject* mo = MapObject::GetInstance(i);
     const int t = (mo && mo->IsLive() && IsDisaster(mo->GetTypeID())) ? int(mo->GetTypeID()) : -1;
-    if (t >= 0 && g_seenDisaster[i] != t && EventBegin("disaster")) {
+    if (t >= 0 && g_seenDisaster[i] != t && !g_sessionSilent && EventBegin("disaster")) {
       fprintf(g_events, ",\"type\":\"%s\",\"x\":%d,\"y\":%d,\"timer\":%d", TypeName(MapID(t)), mo->pixelX_ / 32 - pad,
               mo->pixelY_ / 32, mo->actionTimer_);
       EventEnd("disaster", -1);
     }
     g_seenDisaster[i] = t;
   }
-  if (g_gameImpl.gameTermReasons_ != GameTermReasons::Running && EventBegin("end")) {
+  if (g_gameImpl.gameTermReasons_ != GameTermReasons::Running && !g_sessionSilent && EventBegin("end")) {
     fprintf(g_events, ",\"reason\":%d", int(g_gameImpl.gameTermReasons_));
     EventEnd("end", -1);
   }
@@ -3396,14 +3400,343 @@ int __fastcall TAppLoadHook(void* self, void*, const char* name) {
 // after the cycle; RunSaveLoad at the end of GameCycleHook.
 std::vector<std::pair<std::string, std::string>> g_saveLoadDue;  // verb, path
 
-void SaveLoadVerb(const ScriptCmd& c, int tick) {
-  if (c.args.empty()) { Log("script: WARN tick %d line %d: `%s` needs a file name (skipped)", tick, c.line, c.verb.c_str());  return; }
-  const std::string& a = c.args[0];
+// A save's path: OPU\saves\NAME in the game folder, as the dialogs name their files, or a path as given.
+std::string SavePathOf(const std::string& a) {
+  if (a.find_first_of(":\\/") != std::string::npos) return a;
   char exe[MAX_PATH] = {};
   GetModuleFileNameA(nullptr, exe, sizeof exe - 1);
   std::string dir = exe;
-  dir = dir.substr(0, dir.find_last_of('\\') + 1);  // The game folder, as the dialogs name their files
-  g_saveLoadDue.emplace_back(c.verb, a.find_first_of(":\\/") != std::string::npos ? a : dir + "OPU\\saves\\" + a);
+  return dir.substr(0, dir.find_last_of('\\') + 1) + "OPU\\saves\\" + a;
+}
+
+void SaveLoadVerb(const ScriptCmd& c, int tick) {
+  if (c.args.empty()) { Log("script: WARN tick %d line %d: `%s` needs a file name (skipped)", tick, c.line, c.verb.c_str());  return; }
+  g_saveLoadDue.emplace_back(c.verb, SavePathOf(c.args[0]));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Checkpoints (README "Checkpoints"): op2-inspect's game sessions resume a long game from a save instead of replaying
+// its script from tick 0. A `savegame` outside a recording also writes `<save>.dll`, the mission DLL's writable
+// sections (its PE headers in memory) as they are at the save. OP2H_RESUME (`run.py --resume SAVE`) loads a save at the
+// first game cycle, before any script line runs (TApp::LoadGame, as the Load dialog does), then plays the script, whose
+// lines are the ones still to run: all at the save's tick or later. Those at the save's tick run right after the load,
+// where they would have run after the saved cycle, and that tick's samples and session events are taken again after
+// them. After the load, the DLL's writable memory outside its save region (GetSaveRegions, as MissionManager keeps it)
+// is compared with `<save>.dll` and what the save didn't carry is put back where it can be (CheckDllState; the
+// `checkpoint: dll` line in harness.log says what), as are the hives' counts (`<save>.hive`, PutBackHiveCounts).
+
+struct DllSection { uint32_t rva, size; };
+
+const uint8_t* MissionBase() {
+  const MissionManager* m = MissionManager::GetInstance();
+  return m ? reinterpret_cast<const uint8_t*>(m->hModule_) : nullptr;
+}
+
+std::vector<DllSection> WritableSections(const uint8_t* base) {
+  std::vector<DllSection> out;
+  if (!base || IsBadReadPtr(base, sizeof(IMAGE_DOS_HEADER))) return out;
+  const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+  if (dos->e_magic != IMAGE_DOS_SIGNATURE) return out;
+  const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + dos->e_lfanew);
+  if (IsBadReadPtr(nt, sizeof(*nt)) || nt->Signature != IMAGE_NT_SIGNATURE) return out;
+  const IMAGE_SECTION_HEADER* s = IMAGE_FIRST_SECTION(nt);
+  for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++s)
+    if (s->Characteristics & IMAGE_SCN_MEM_WRITE)
+      out.push_back({ uint32_t(s->VirtualAddress), uint32_t(s->Misc.VirtualSize ? s->Misc.VirtualSize : s->SizeOfRawData) });
+  return out;
+}
+
+void WriteDllState(const std::string& save) {
+  const std::string path = save + ".dll";
+  DeleteFileA(path.c_str());
+  const uint8_t* base = MissionBase();
+  const auto sections = WritableSections(base);
+  FILE* f = sections.empty() ? nullptr : fopen(path.c_str(), "wb");
+  if (!f) { Log("checkpoint: WARN no mission DLL state written for %s", save.c_str());  return; }
+  const SaveRegion& r = MissionManager::GetInstance()->saveRegion_;
+  fprintf(f, "op2h-dll 2 %08x %08x %u %u\n", unsigned(uintptr_t(base)), unsigned(uintptr_t(r.pData)), unsigned(r.size), unsigned(sections.size()));
+  for (const auto& s : sections) fprintf(f, "%08x %u\n", s.rva, s.size);
+  for (const auto& s : sections) fwrite(base + s.rva, 1, s.size, f);
+  // Then each dword as this process's DecodePointer reads it: the CRT keeps some pointers encoded with the process's
+  // own secret, which only this process can undo.
+  for (const auto& s : sections)
+    for (uint32_t k = 0; k + 4 <= s.size; k += 4) {
+      void* p;
+      memcpy(&p, base + s.rva + k, 4);
+      const uint32_t d = uint32_t(uintptr_t(DecodePointer(p)));
+      fwrite(&d, 4, 1, f);
+    }
+  const bool ok = !ferror(f);
+  if (fclose(f) != 0 || !ok) { DeleteFileA(path.c_str());  Log("checkpoint: WARN writing %s failed", path.c_str()); }
+}
+
+// The CRT's security cookie of the mission DLL (its load config's SecurityCookie), and where it is; 0 without one.
+uintptr_t CookieAddress(const uint8_t* base) {
+  const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+  const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG];
+  if (!dir.VirtualAddress || dir.Size < offsetof(IMAGE_LOAD_CONFIG_DIRECTORY32, SecurityCookie) + 4) return 0;
+  return reinterpret_cast<const IMAGE_LOAD_CONFIG_DIRECTORY32*>(base + dir.VirtualAddress)->SecurityCookie;
+}
+
+uint32_t CookieNow(const uint8_t* base) {
+  const uintptr_t at = base ? CookieAddress(base) : 0;
+  return at && !IsBadReadPtr(reinterpret_cast<const void*>(at), 4) ? *reinterpret_cast<const uint32_t*>(at) : 0;
+}
+
+// After a resume's load: the DLL's writable dwords outside its save region against the saved game's. A process has its
+// own security cookie and heap, so a dword may differ for that alone: the cookie itself and values XORed with it
+// (their difference is the cookies'), pointers the CRT encodes with it or with the process's own secret
+// (EncodePointer) that both decode to addresses, and heap addresses (both values addresses). Any other difference is mission state the save
+// didn't carry: a global the DLL changed but doesn't save (the load loads the DLL again: its globals start over). A
+// plain number there, or an address in a module (the same in every process), is put back as the saved game had it, so
+// the DLL goes on as the continued game's would; a heap address the loaded DLL lacks (a pointer that is a number now)
+// can't be, and the `checkpoint: dll DIFFERS` line says so (op2-inspect then distrusts the save).
+void CheckDllState(const std::string& save) {
+  std::ifstream f(save + ".dll", std::ios::binary);
+  std::string magic;
+  unsigned version = 0, savedBase = 0, savedRegion = 0, savedSize = 0, n = 0;
+  if (!(f >> magic >> version >> std::hex >> savedBase >> savedRegion >> std::dec >> savedSize >> n) || magic != "op2h-dll" || version != 2) {
+    Log("checkpoint: dll unknown (no state saved beside %s)", save.c_str());
+    return;
+  }
+  std::vector<DllSection> saved(n);
+  for (auto& s : saved) f >> std::hex >> s.rva >> std::dec >> s.size;
+  f.get();  // The header's last newline.
+  uint8_t* base = const_cast<uint8_t*>(MissionBase());
+  const auto now = WritableSections(base);
+  const SaveRegion& r = MissionManager::GetInstance()->saveRegion_;
+  const uintptr_t lo = uintptr_t(r.pData), hi = lo + r.size;
+  bool sameLayout = now.size() == saved.size() && savedBase == unsigned(uintptr_t(base)) && savedRegion == unsigned(lo) && savedSize == unsigned(r.size);
+  for (size_t i = 0; sameLayout && i < now.size(); ++i) sameLayout = now[i].rva == saved[i].rva && now[i].size == saved[i].size;
+  if (!sameLayout) {
+    Log("checkpoint: dll DIFFERS: the mission DLL's layout or save region isn't the saved game's (base %08x/%08x, region %08x+%u/%08x+%u)",
+        savedBase, unsigned(uintptr_t(base)), savedRegion, savedSize, unsigned(lo), unsigned(r.size));
+    return;
+  }
+  std::vector<std::string> bytes(saved.size());
+  for (size_t i = 0; i < saved.size(); ++i) {
+    bytes[i].resize(saved[i].size);
+    f.read(&bytes[i][0], saved[i].size);
+    if (size_t(f.gcount()) != saved[i].size) { Log("checkpoint: dll DIFFERS: %s.dll is short", save.c_str());  return; }
+  }
+  std::vector<std::vector<uint32_t>> decoded(saved.size());
+  for (size_t i = 0; i < saved.size(); ++i) {
+    decoded[i].resize(saved[i].size / 4);
+    f.read(reinterpret_cast<char*>(decoded[i].data()), decoded[i].size() * 4);
+    if (size_t(f.gcount()) != decoded[i].size() * 4) { Log("checkpoint: dll DIFFERS: %s.dll is short", save.c_str());  return; }
+  }
+  const uintptr_t cookieAt = CookieAddress(base);
+  uint32_t cookieSaved = 0;
+  const uint32_t cookieNow = CookieNow(base);
+  for (size_t i = 0; cookieAt && i < saved.size(); ++i) {
+    const uintptr_t from = uintptr_t(base) + saved[i].rva;
+    if (cookieAt >= from && cookieAt + 4 <= from + saved[i].size) memcpy(&cookieSaved, &bytes[i][cookieAt - from], 4);
+  }
+  // An address: above the 4 MB a mission's numbers (ticks, ids, counts) stay under, or (`here`) one this process has
+  // mapped, above the first 64 KB (Wine keeps the process parameters, e.g. the command line, low). A number: a count, id,
+  // tick or flag, or a small negative. A dword that differs is a heap address when the loaded one is mapped here.
+  auto address = [](uint32_t v) { return v >= 0x400000 && v < 0x80000000u; };
+  auto number = [](uint32_t v) { return v < 0x400000 || v >= 0xFFC00000u; };
+  auto here = [&](uint32_t v) {
+    MEMORY_BASIC_INFORMATION m;
+    return v >= 0x10000 && v < 0x80000000u && VirtualQuery(reinterpret_cast<const void*>(uintptr_t(v)), &m, sizeof m) && m.State == MEM_COMMIT;
+  };
+  auto image = [&](uint32_t v) {
+    MEMORY_BASIC_INFORMATION m;
+    return v >= 0x10000 && v < 0x80000000u && VirtualQuery(reinterpret_cast<const void*>(uintptr_t(v)), &m, sizeof m) &&
+           m.State == MEM_COMMIT && m.Type == MEM_IMAGE;
+  };
+  // The CRTs' pointer decodings with the cookie: the UCRT's (rotate right by cookie % 32, then XOR the cookie) and an
+  // older one's (XOR, then rotate), as measured on c_euf.dll's onexit table.
+  auto ror = [](uint32_t v, int k) { k &= 31;  return k ? (v >> k | v << (32 - k)) : v; };
+  auto decode = [&](uint32_t v, uint32_t cookie) { return ror(v, cookie & 31) ^ cookie; };
+  auto decodeOld = [&](uint32_t v, uint32_t cookie) { return ror(v ^ cookie, cookie & 31); };
+  // Both decode to the same value, or to aligned addresses (this one mapped).
+  auto same = [&](uint32_t da, uint32_t db) { return da == db || (da % 4 == 0 && db % 4 == 0 && address(da) && here(db)); };
+  auto encoded = [&](uint32_t a, uint32_t b, uint32_t systemSaved) {
+    void* p;
+    memcpy(&p, &b, 4);
+    return same(decode(a, cookieSaved), decode(b, cookieNow)) || same(decodeOld(a, cookieSaved), decodeOld(b, cookieNow)) ||
+           same(systemSaved, uint32_t(uintptr_t(DecodePointer(p))));
+  };
+  size_t total = 0, cookieBytes = 0, heapBytes = 0;
+  std::vector<std::pair<uintptr_t, uint32_t>> restore;  // address, the saved game's value
+  std::string restored, lost;
+  int shownRestored = 0, shownLost = 0;
+  auto note = [](std::string& list, int& shown, uintptr_t at, uint32_t was, uint32_t is) {
+    if (shown++ >= 12) return;
+    char b[48];
+    snprintf(b, sizeof b, "%s%08x %08x/%08x", list.empty() ? "" : ", ", unsigned(at), unsigned(was), unsigned(is));
+    list += b;
+  };
+  size_t restoredBytes = 0, lostBytes = 0;
+  for (size_t i = 0; i < saved.size(); ++i) {
+    const auto& s = saved[i];
+    const uint8_t* was = reinterpret_cast<const uint8_t*>(bytes[i].data());
+    const uint8_t* cur = base + s.rva;
+    for (uint32_t k = 0; k + 4 <= s.size; k += 4) {
+      size_t differ = 0, counted = 0;
+      for (uint32_t j = k; j < k + 4; ++j) {
+        const uintptr_t at = uintptr_t(cur) + j;
+        if (at >= lo && at < hi) continue;
+        ++counted;
+        differ += was[j] != cur[j];
+      }
+      total += counted;
+      if (!differ) continue;
+      uint32_t a = 0, b = 0;
+      memcpy(&a, was + k, 4);
+      memcpy(&b, cur + k, 4);
+      const uintptr_t at = uintptr_t(cur) + k;
+      if ((cookieSaved != cookieNow && (a ^ b) == (cookieSaved ^ cookieNow)) || encoded(a, b, decoded[i][k / 4])) {
+        cookieBytes += differ;
+      } else if (counted == 4 && image(a) && (b == 0 || image(b))) {
+        // An address in a module mapped here (Outpost2.exe, this DLL): the same in every process, e.g. a function
+        // pointer the DLL looked up on first use (TethysAPI's thunks) that the loaded DLL hasn't yet.
+        restore.emplace_back(at, a);
+        restoredBytes += differ;
+        note(restored, shownRestored, at, a, b);
+      } else if ((address(a) && address(b)) || (a >= 0x10000 && a < 0x80000000u && here(b))) {
+        heapBytes += differ;
+      } else if (counted == 4 && number(a) && number(b)) {
+        restore.emplace_back(at, a);
+        restoredBytes += differ;
+        note(restored, shownRestored, at, a, b);
+      } else {
+        lostBytes += differ;
+        note(lost, shownLost, at, a, b);
+        void* p;
+        memcpy(&p, &b, 4);
+        Log("checkpoint: lost %08x: %08x/%08x, decoded with the cookie %08x/%08x, by DecodePointer %08x/%08x; cookies %08x/%08x", unsigned(at), a, b,
+            decode(a, cookieSaved), decode(b, cookieNow), decoded[i][k / 4], unsigned(uintptr_t(DecodePointer(p))), cookieSaved, cookieNow);
+      }
+    }
+  }
+  for (const auto& [at, v] : restore) memcpy(reinterpret_cast<void*>(at), &v, 4);
+  char what[200];
+  snprintf(what, sizeof what, "%u writable bytes outside the save region %08x+%u; %u differ by the security cookie, %u are heap addresses",
+           unsigned(total), unsigned(lo), unsigned(r.size), unsigned(cookieBytes), unsigned(heapBytes));
+  if (lostBytes) Log("checkpoint: dll DIFFERS: %u bytes of mission state can't be put back (addresses the loaded DLL lacks: %s%s); %u restored (%s)",
+                     unsigned(lostBytes), lost.c_str(), shownLost > 12 ? ", ..." : "", unsigned(restoredBytes), what);
+  else if (restoredBytes) Log("checkpoint: dll restored: %u bytes of mission state outside the save region put back as saved (address saved/loaded: %s%s; %s)",
+                              unsigned(restoredBytes), restored.c_str(), shownRestored > 12 ? ", ..." : "", what);
+  else Log("checkpoint: dll %s (%s)", cookieBytes || heapBytes ? "process-only" : "same", what);
+}
+
+// The session state as the loaded game has it, without an event: the next SessionTick reports only what changes after.
+void SessionRebaseline(int tick) {
+  if (!g_events) return;
+  g_seen.clear();
+  g_seenTech.clear();
+  g_seenObjective.clear();
+  g_seenDisaster.clear();
+  g_objectiveScanTick = -1000000;
+  g_sessionStarted = false;
+  g_sessionSilent = true;
+  SessionTick(tick);
+  g_sessionSilent = false;
+}
+
+// The tube networks' counts. A save doesn't hold the hives (HiveManager): saving rebuilds them in the game that goes on
+// (new slots) and loading builds them afresh, both with the counts a hive keeps (Command Centers +0xC, an enabled one
+// +0x10, DIRTs +0x14) at zero until the owner's next allocation pass recounts them (0x4300B0; every 256 ticks for a
+// computer player, so up to 256 ticks: p12's Eden after any save, measured 2026-11-06). DoDamage's Damage Prevention
+// reads them meanwhile (0x430050), so a structure hit then takes another damage than in the game never saved. Each
+// structure's counts are noted before a checkpoint's save (`SAVE.hive`) and put back into its hive after the save and
+// after the load: the game then goes on as if never saved.
+struct HiveCounts { int id, cc, enabled, dirt; };
+
+std::vector<HiveCounts> NoteHiveCounts() {
+  std::vector<HiveCounts> out;
+  ForEachPlayerUnit([&](Unit u) {
+    if (!u.IsLive() || !u.IsBuilding()) return;
+    const int* h = *reinterpret_cast<const int* const*>(reinterpret_cast<const uint8_t*>(u.GetMapObject()) + 0x38);
+    if (h && !IsBadReadPtr(h, 0x1C)) out.push_back({ u.GetID(), h[3], h[4], h[5] });
+  });
+  return out;
+}
+
+// Puts the noted counts back into each structure's hive; returns how many hives got two members' different counts
+// (the hives were rebuilt otherwise than they were: the counts of the last member noted stand).
+int PutBackHiveCounts(const std::vector<HiveCounts>& counts) {
+  std::map<int*, HiveCounts> set;
+  int clash = 0;
+  for (const auto& c : counts) {
+    const Unit u(c.id);
+    if (!Exists(u) || !u.IsBuilding()) continue;
+    int* h = *reinterpret_cast<int* const*>(reinterpret_cast<const uint8_t*>(u.GetMapObject()) + 0x38);
+    if (!h || IsBadWritePtr(h, 0x1C)) continue;
+    const auto [it, fresh] = set.emplace(h, c);
+    if (!fresh && (it->second.cc != c.cc || it->second.enabled != c.enabled || it->second.dirt != c.dirt)) ++clash;
+    h[3] = c.cc, h[4] = c.enabled, h[5] = c.dirt;
+  }
+  return clash;
+}
+
+// A save outside a recording (`savegame`, OP2H_CHECKPOINT) with the mission DLL's state and the hives' counts beside it.
+bool SaveWithDllState(const std::string& path, int tick) {
+  DeleteFileA(path.c_str());  // So a save that fails leaves no older file behind to pass for it.
+  const auto hives = NoteHiveCounts();
+  g_tApp.SaveGame(path);
+  DeleteSidecar(path.c_str());  // Saved without a recording: an older recording's sidecar no longer matches it.
+  if (const int clash = PutBackHiveCounts(hives)) Log("checkpoint: WARN the save rebuilt %d hives otherwise (their counts may differ)", clash);
+  if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    Log("script: WARN save %s at tick %d failed", path.c_str(), tick);
+    return false;
+  }
+  WriteDllState(path);
+  if (FILE* f = fopen((path + ".hive").c_str(), "w")) {
+    for (const auto& c : hives) fprintf(f, "%d %d %d %d\n", c.id, c.cc, c.enabled, c.dirt);
+    fclose(f);
+  }
+  return true;
+}
+
+// After a resume's load: the hives' counts as the saved game had them.
+void LoadHiveCounts(const std::string& save) {
+  std::ifstream f(save + ".hive");
+  if (!f) { Log("checkpoint: hives unknown (no counts saved beside %s)", save.c_str());  return; }
+  std::vector<HiveCounts> counts;
+  for (HiveCounts c; f >> c.id >> c.cc >> c.enabled >> c.dirt;) counts.push_back(c);
+  const int clash = PutBackHiveCounts(counts);
+  Log("checkpoint: hives: the counts of %u structures' hives put back%s", unsigned(counts.size()),
+      clash ? (" (WARN: " + std::to_string(clash) + " hives rebuilt otherwise than saved)").c_str() : "");
+}
+
+void SaveCheckpoint(int tick) {
+  const std::string path = SavePathOf(cfg.checkpoint);
+  if (SaveWithDllState(path, tick)) Log("checkpoint: saved %s at tick %d", path.c_str(), tick);
+}
+
+// OP2H_RESUME: loads the checkpoint and sets the harness's clocks to its tick. Returns that tick, or -1.
+int Resume() {
+  const std::string path = SavePathOf(cfg.resume);
+  const int from = g_gameImpl.tick_;
+  // Whether the load loads the mission DLL again (its CRT draws a new cookie) or keeps the one this start loaded.
+  const uint8_t* baseBefore = MissionBase();
+  const uint32_t cookieBefore = CookieNow(baseBefore);
+  const int ok = GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES ? g_tApp.LoadGame(path) : 0;
+  const int now = g_gameImpl.tick_;
+  Log("resume: load %s at tick %d: %s, now tick %d; the mission DLL %s", path.c_str(), from, ok ? "ok" : "FAILED", now,
+      MissionBase() != baseBefore || CookieNow(MissionBase()) != cookieBefore ? "was loaded again"
+      : cookieBefore ? "stayed as the start loaded it" : "has no CRT cookie to tell whether it was loaded again");
+  if (!ok) return -1;
+  CheckDllState(path);
+  LoadHiveCounts(path);
+  g_lastTick = now;
+  auto up = [](int t, int every) { return (t + every - 1) / every * every; };
+  if (cfg.telemEvery > 0) g_nextTelem = up(now, cfg.telemEvery);
+  if (cfg.traceEvery > 0) g_nextTrace = up(std::max(now, EnvInt("OP2H_TRACE_FROM", 0)), cfg.traceEvery);
+  g_lastTelemTick = g_lastTraceTick = -1;
+  g_packetDue.clear();
+  g_scriptPos = 0;
+  while (g_scriptPos < g_script.size() && g_script[g_scriptPos].tick < now) {
+    Log("script: WARN tick %d line %d: `%s` is before the checkpoint's tick %d (skipped)", g_script[g_scriptPos].tick,
+        g_script[g_scriptPos].line, g_script[g_scriptPos].verb.c_str(), now);
+    ++g_scriptPos;
+  }
+  SessionRebaseline(now);
+  return now;
 }
 
 void RunSaveLoad(int tick) {
@@ -3411,10 +3744,7 @@ void RunSaveLoad(int tick) {
     const auto [verb, path] = g_saveLoadDue[k];
     if (verb == "savegame") {
       if (g_record) TAppSaveHook(&g_tApp, nullptr, path.c_str(), nullptr);
-      else {
-        g_tApp.SaveGame(path);
-        DeleteSidecar(path.c_str());  // Saved without a recording: an older recording's sidecar no longer matches it.
-      }
+      else SaveWithDllState(path, tick);
       Log("script: save %s at tick %d", path.c_str(), tick);
       continue;
     }
@@ -3660,7 +3990,7 @@ bool WantDraw(int tick) {
 
 void __fastcall GameCycleHook(GameImpl* self, void*) {
   g_origGameCycle(self);
-  const int tick = self->tick_;
+  int tick = self->tick_;
   PresentTick(tick);
   if (tick == g_lastTick) return;
   if (g_lastTick < 0) {
@@ -3676,6 +4006,13 @@ void __fastcall GameCycleHook(GameImpl* self, void*) {
   // Parallel runs share one wineserver, so they take the foreground from each other, and an inactive game ignores keys
   // and edge/arrow scrolling (TApp::OnActivateApp 0x4862F0). Keep it active: this runs before the frame is drawn.
   if (g_inputUsed && (!g_record || g_in.active) && !g_tApp.AppActive()) g_tApp.OnActivateApp(1);
+  // A resume loads its checkpoint before anything of this cycle runs, then goes on as the cycle of the save's tick.
+  static bool resumed = false;
+  if (!cfg.resume.empty() && !resumed) {
+    resumed = true;
+    tick = Resume();
+    if (tick < 0) { Quit("resume: the checkpoint didn't load");  return; }
+  }
 
   // A `packet` whose cycle ran without handing the local player's slot to ProcessCommandPacket (a paused or playback
   // cycle, [GameImpl+0x9C] at 0x489F03, 0x4864A0 at 0x489FE0, the player's +0x4AC flag) never ran: say so.
@@ -3728,6 +4065,10 @@ void __fastcall GameCycleHook(GameImpl* self, void*) {
     RunSaveLoad(tick);
     if (g_loaded) return;  // The loaded game's end and tick limit are checked after its next cycle.
   }
+  // OP2H_CHECKPOINT: a run that stops while the game goes on (its tick limit, a stop event) saves it first.
+  if (!cfg.checkpoint.empty() && self->gameTermReasons_ == GameTermReasons::Running &&
+      (!g_stopReason.empty() || (cfg.ticks > 0 && tick >= cfg.ticks)))
+    SaveCheckpoint(tick);
   if (!g_stopReason.empty()) Quit(("stop: " + g_stopReason).c_str());
   if (self->gameTermReasons_ != GameTermReasons::Running) Quit("mission ended");
   if (cfg.ticks > 0 && tick >= cfg.ticks) Quit("tick limit");
@@ -4491,7 +4832,9 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   cfg.script     = Env("OP2H_SCRIPT");
   cfg.bot        = Env("OP2H_BOT");
   cfg.campaign   = Env("OP2H_CAMPAIGN");
-  cfg.ticks      = EnvInt("OP2H_TICKS", 0);
+  cfg.resume     = Env("OP2H_RESUME");
+  cfg.checkpoint = Env("OP2H_CHECKPOINT");
+  cfg.ticks     = EnvInt("OP2H_TICKS", 0);
   cfg.shotEvery  = EnvInt("OP2H_SHOT_EVERY", 0);
   cfg.telemEvery = EnvInt("OP2H_TELEM_EVERY", 100);
   cfg.speed      = EnvInt("OP2H_SPEED", 10);
