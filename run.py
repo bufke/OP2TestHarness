@@ -4,7 +4,7 @@
 Example:
     harness/run.sh --mission cHello.dll --ticks 3000 --screenshot-every 500 --out /tmp/op2run
 
-    harness/run.sh --scenario harness/oracle/scenarios/lynx_fast.json --out /tmp/op2scn
+    harness/run.sh --scenario harness/oracle/scenarios/line_fast.json --out /tmp/op2scn
 
 Outputs in --out: telemetry.jsonl, trace.jsonl, gamedata.json, shot_<tick>.png, harness.log, wine.log, summary.json.
 """
