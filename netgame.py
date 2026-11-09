@@ -45,9 +45,9 @@ ctl CREATE
 sleep 3
 {create}ctl id=1
 sleep 4
-{pick}{vehicles}{eden}dump lobby
+{pick}{vehicles}{settings}{eden}dump lobby
 touch host_lobby
-{wait_joiners}sleep 3
+{wait_joiners}{late}sleep 3
 shot lobby_ready
 ctl id=1045
 wait game what=first_cycle timeout=60
@@ -84,7 +84,7 @@ sleep 6
 sleep 1
 shot lobby_joined
 touch {name}_ready
-wait game what=first_cycle timeout=90
+{late}wait game what=first_cycle timeout=90
 wait game what=tick tick={ticks} timeout={game_timeout}
 shot game_end
 touch {name}_done
@@ -218,6 +218,12 @@ def main() -> int:
     ap.add_argument("--dll", help="the mission DLL the scenario must be (e.g. mm2_07.dll): checked in every copy's "
                                   "start_info.json with the seed, players, Eden boxes and vehicles")
     ap.add_argument("--vehicles", type=int, help="the lobby's Initial Vehicles (default: its own, 0)")
+    ap.add_argument("--toggle", default="", help="GAME SETTINGS check boxes the host clicks once before anyone joins: "
+                                                "disasters, morale, daynight (1077, 1078, 1079), comma-separated")
+    ap.add_argument("--resources", default="", help="each player's Resources as the host picks them (High, Med, Low), "
+                                                   "comma-separated in player order; the joiners' once all are ready")
+    ap.add_argument("--colors", default="", help="each player's Color as the host picks it (Blue, Red, ...), "
+                                                "comma-separated in player order (empty: the lobby's)")
     ap.add_argument("--telemetry-every", type=int, default=1)
     ap.add_argument("--speed", help="each copy's Game Speed preference (outpost2.ini GameSpeed, 1-10), in player "
                                     "order, e.g. 10,3 (one value: every copy; default the prefix's ini)")
@@ -262,9 +268,37 @@ def main() -> int:
     # Land Rush), which decides the lobby's scenario list.
     create = (f"pick id=1015 ^{args.players}$\nsleep 0.5\n" if args.players != 2 else "") + \
         (f"pick id=1039 {args.type.replace(' ', '_')}\nsleep 0.5\n" if args.type else "")
+    boxes = {"disasters": 1077, "morale": 1078, "daynight": 1079}
+    toggles = [t.strip() for t in args.toggle.split(",") if t.strip()]
+    if any(t not in boxes for t in toggles):
+        ap.error(f"--toggle takes {', '.join(boxes)}")
+    resources = [r.strip() for r in args.resources.split(",")] if args.resources else []
+    colors = [c.strip() for c in args.colors.split(",")] if args.colors else []
+    if len(resources) > args.players or len(colors) > args.players:
+        ap.error("--resources and --colors take at most one value per player")
+
+    def row_picks(players) -> str:
+        """The host's picks in the rows of `players`: Color and Resources (40001/40002 on its own row, then 40008/40009,
+        40013/40014, ... five ids a row)."""
+        steps = ""
+        for p in players:
+            color, res = (40001, 40002) if p == 0 else (40008 + 5 * (p - 1), 40009 + 5 * (p - 1))
+            if p < len(colors) and colors[p]:
+                steps += f"pick id={color} ^{colors[p]}$\nsleep 1\n"
+            if p < len(resources) and resources[p]:
+                steps += f"pick id={res} ^{resources[p]}$\nsleep 1\n"
+        return steps
+
+    settings = "".join(f"ctl id={boxes[t]}\nsleep 1\n" for t in toggles) + row_picks([0])
+    late = row_picks(range(1, args.players))
+    # The joiners' rows can be set only once they are in: the host sets them then, and every joiner shoots and dumps
+    # its lobby once more after that.
+    host_late = f"{late}dump lobby_set\ntouch host_set\n" if late else ""
+    join_late = f"waitfile host_set timeout={120 * args.players}\nsleep 3\nshot lobby_set\ndump lobby_set\n" if late else ""
     drives = {"host": HOST.format(
         ticks=args.ticks, game_timeout=game_timeout, pick=pick, create=create,
         vehicles=f"pick id=1018 ^{args.vehicles}$\nsleep 1\n" if args.vehicles is not None else "",
+        settings=settings, late=host_late,
         eden=f"ctl id={lobby_ids(0)[0]}\nsleep 1\n" if 0 in eden else "",
         wait_joiners="".join(f"waitfile {j}_ready timeout={lobby_timeout}\n" for j in joiners),
         wait_done="".join(f"waitfile {j}_done timeout=30\n" for j in joiners))}
@@ -272,7 +306,7 @@ def main() -> int:
         e, ready = lobby_ids(p)
         drives[side_name(p)] = JOIN.format(
             ticks=args.ticks, game_timeout=game_timeout, lobby_timeout=lobby_timeout, name=side_name(p), ready=ready,
-            after="host_lobby" if p == 1 else f"{side_name(p - 1)}_ready",
+            after="host_lobby" if p == 1 else f"{side_name(p - 1)}_ready", late=join_late,
             eden=f"ctl id={e}\nsleep 1\n" if p in eden else "")
     for name, text in drives.items():
         (out / f"{name}_drive.txt").write_text(text)
@@ -331,6 +365,7 @@ def main() -> int:
     telemetry = tel["join"] if args.players == 2 else tel
     summary = {"exit": rc, "wall_seconds": round(time.monotonic() - t0, 1), "ticks": args.ticks, "turbo": args.turbo,
                "players": args.players, "type": args.type, "mission": args.mission, "seed": args.seed, "eden": sorted(eden), "vehicles": args.vehicles,
+               "toggle": toggles, "resources": resources, "colors": colors,
                "dll": args.dll, "orders": ords, "telemetry": telemetry, "start": start_problems(out, args, eden),
                "speed": speeds or None, "pacing": {side_name(p): pacing(out / side_name(p)) for p in range(args.players)}}
     # Every copy's speed changes at the same ticks to the same speeds (the start's is the host's; `speed_problems`).
