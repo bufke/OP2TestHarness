@@ -1,0 +1,96 @@
+# OP2TestHarness on Windows
+
+The harness DLL is plain Win32, so on Windows it runs in the real game without Wine or Xvfb. This folder holds what
+that needs; the rest of OP2TestHarness (src/, test/, run.py's scenario translation, the scenarios) is shared with Linux.
+
+| File | What |
+|---|---|
+| `build.bat` | Builds `build\win\harness.dll` and `build\win\zScenario.dll` (32-bit) with MSVC |
+| `msvc_compat.h` | Force-included by `build.bat`: C++20, `NOMINMAX`, `__builtin_return_address` -> `_ReturnAddress`, `#undef small` (a Windows SDK macro) |
+| `run_win.py` | `setup` makes a private copy of the game with the harness installed; `run` plays a scenario in it |
+| `compare.py` | the original vs op2-rs on one scenario: op2-sim's tick-by-tick compare, both pictures side by side |
+| `run_port.py` | `install` copies a built outpost2-port into the game copy; `run` plays a scenario in its `--harness` mode |
+| `trace_diff.py` | compares two `trace.jsonl` files field by field, tick by tick (MATCH, or each field's first difference) |
+| `compare_port.py` | the original vs outpost2-port (and with `--op2rs`, op2-rs) on one or more scenarios, pictures side by side |
+
+## Requirements
+- Visual Studio 2022 Build Tools (C++ workload; `build.bat` uses `vcvars32.bat`).
+- TethysAPI at commit 141fd47 in `vendor\include\Tethys`:
+  `git clone https://github.com/OutpostUniverse/TethysAPI.git vendor\include\Tethys` then
+  `git -C vendor\include\Tethys checkout 141fd47`.
+- Python 3.11+ (no extra packages; screenshots are converted to PNG through System.Drawing).
+- Outpost 2 (GOG 1.2) with OPU 1.4.1.
+
+## Use (from the OP2TestHarness folder)
+The scenarios are op2-rs's, in its `harness\oracle` folder (README.md "Scenarios and recorded runs"):
+`set ORACLE=C:\Users\Desktop\GITHUB\op2-rs\harness\oracle` first.
+```
+windows\build.bat
+python -I windows\run_win.py setup --from "C:\Users\Desktop\Outpost 2"
+python -I windows\run_win.py run %ORACLE%\scenarios\line_fast.json build\runs\line_fast --shot-every 350
+```
+`setup` copies the game to `game\` (no .avi movies, no OPU backups or logs), installs the two DLLs into
+`game\OPU\Harness` and registers the module in `game\OPU\outpost2.ini`. Run it again after each rebuild. The player's
+own install is never written to. Add `--no-turbo` to `run` to watch the game play in real time.
+
+To compare with op2-rs's simulation (op2-rs built, `OP2_DIR` set to the game):
+```
+op2-inspect compare --scenario %ORACLE%\scenarios\line_fast.json --oracle build\runs\line_fast --out build\cmp\line_fast
+```
+
+## The original vs op2-rs in one command
+```
+python -I windows\compare.py %ORACLE%\scenarios\cmb_duel_laser.json --tick 200
+```
+`compare.py` plays the scenario in the original, has op2-sim replay it against the original's trace
+(`op2-inspect compare`), has op2-rs's engine draw the same tick at 1024x768, and writes to
+`build\compare\<scenario>\`: `side_by_side.png` (original left, op2-rs right), `sim\plot.png` (both trajectories),
+`sim_compare.txt` (MATCH, or the first divergence of every field). It needs an op2-rs checkout (`--op2rs`, default
+`C:\Users\Desktop\GITHUB\op2-rs`) with `cargo build -p op2-inspect -p op2-engine` done in its `tools\`.
+
+## The original vs outpost2-port
+[outpost2-port](https://github.com/leviathan400/outpost2-port) has a `--harness` mode that plays a scenario script and
+writes the same `trace.jsonl` as the original's harness. After building the port (`cmake --build build --config Release`):
+```
+python -I windows\run_port.py install --port C:\Users\Desktop\GITHUB\outpost2-port
+python -I windows\compare_port.py %ORACLE%\scenarios\line_fast.json %ORACLE%\scenarios\cmb_duel_laser.json --op2rs
+```
+`compare_port.py` writes, per scenario, to `build\compare-port\<scenario>\`: `port_diff.txt` (MATCH, or the first tick
+each field differs), `side_by_side.png` (original | port | op2-rs) and, with `--op2rs`, `sim_compare.txt`.
+`trace_diff.py` compares any two traces on its own. Fields both sides write are compared; `cmd`/`action` aren't (names
+in one, numbers in the other). `--ignore lights,rng` (on either script) sets known differences aside, to see what's
+under them; `--no-pictures` skips the screenshots for a quicker batch. Several scenarios end in a scoreboard, one line
+each.
+
+Results (2026-11-09, port 958323a): 8 of 9 match.
+
+| Scenario | Port vs original |
+|---|---|
+| cmb_duel_* (8: acid, cannon, EMP, foam, laser, microwave, rail gun, spam) | MATCH: every traced field and the RNG equal on every tick, hits, damage rolls and deaths included |
+| line_fast | 1,399 of 1,400 ticks: the port frees the move's path state at tick 731, the original at 732 (`fix` shows the leftover fraction for one tick); position, heading, HP and route equal throughout |
+
+How the first runs (port aca704a, nothing matched) got there:
+- `lights` from tick 1: the harness spawns through TethysAPI's `Game::CreateUnit`, which turns a vehicle's headlights
+  on after the game's CreateUnit; the port's harness mode now does the same (port de6ac4e).
+- turret sweep a phase off, the other tank targeting first in every duel: the original raises its tick after the unit
+  loop (0x48A01B call, 0x48A020..0x48A02D increment of `[GameImpl+0x84]`), the port before it (port 958323a).
+- `rng` from tick 1 and different damage rolls: the port drew `getRand(100)` every tick for its debug HUD (port
+  958323a).
+
+The port's own `--savetest` hangs after its save at tick 600; it did so before the harness work too (port 9db6cd8).
+
+## Verified (2026-11-09, Windows 10)
+- line_fast, cmb_duel_laser and cmb_duel_rail_gun: `MATCH` against op2-sim, every trace field equal on every tick.
+- Two runs of cmb_duel_laser gave byte-identical trace.jsonl.
+- Speed: 1,700-5,800 ticks/s in turbo.
+
+## Known differences from the Linux harness
+- The window's client area is 1032x766, not 1024x768: the ini's frame padding (+48, +36) is Wine's. Screenshots
+  differ in size from Linux runs; the simulation is unaffected.
+- The game window opens on the desktop at 0,0 and takes focus, and `ParkCursor` moves the real mouse pointer to the
+  screen's corner for the run.
+- `run_win.py` covers scenarios only, not `--mission`, `--campaign`, `--record`, checkpoints or shell mode.
+
+## Do not commit
+`game\` (a copy of the game's files), `build\` and `vendor\include\Tethys` (an upstream clone) stay out of version
+control.

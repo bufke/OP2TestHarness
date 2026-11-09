@@ -1,0 +1,9 @@
+# Build output and run outputs (run outputs hold game data, e.g. gamedata.json)
+build/
+recordings/
+# windows/run_win.py setup's private copy of the game
+game/
+# TethysAPI clone (README.md "Requirements")
+vendor/
+__pycache__/
+*.pyc
