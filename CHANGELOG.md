@@ -1,7 +1,8 @@
 # Changelog
 
 All notable changes to OP2TestHarness. Versions follow [Semantic Versioning](https://semver.org/); the version is in
-`VERSION`, and each release is tagged `vX.Y.Z`.
+`VERSION`, and each release is tagged `vX.Y.Z`. The rules below hold from 0.9.0 on: the contract is op2-rs's, which
+its recordings already depend on.
 
 ## Versioning rules
 
@@ -27,9 +28,11 @@ Every release notes its contract changes, if any, under **Contract**. A release 
 `harness.dll` replays op2-rs's recorded runs identically (op2-rs's `make accuracy`, 0 failures) unless its changelog
 says which runs change and why.
 
-## 1.0.0 (not yet released)
+## 0.9.0 (not yet released)
 
-The first version as a repository of its own (op2-rs issue #34).
+The first version as a repository of its own (op2-rs issue #34). 1.0.0 follows once the harness is shown to work for
+all three projects it measures for: the original game (Windows and Linux builds), op2-rs (its recorded runs replay
+identically) and outpost2-port.
 
 **Contract:** identical to op2-rs's `harness/` at commit ab5f74dd (2026-11-09): the same `OP2H_*` variables, `run.sh`
 options, script verbs, unit names, output fields and scenario format. `src/harness.cpp` behaves as op2-rs's; it differs
