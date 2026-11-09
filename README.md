@@ -292,8 +292,9 @@ instead; the harness resolves a name when the command runs, in the game, so it f
   inherit it (a unit that dies and is replaced by one of the same type inside one cycle would). `$TYPE@x,y` takes any
   owner and the nearest unit of exactly that type (so `$MINE@x,y` doesn't match a MINE_ADV; tiles in the script's
   coordinate mode, `coords file` included); none within 3 tiles is not found.
-- op2-missionhost's `play` (and so `game_verify` and the `mission_play` check) resolves names the same way
-  (`op2_missionhost::unitnames`, the rules above), so a named script replays there too.
+- op2-missionhost's `play` (and so `game_verify` and the `mission_play` check) and op2-engine's mission `--script`
+  (`netpair` and network games too) resolve names the same way (`op2_missionhost::unitnames`, the rules above, the scan
+  after every cycle), so a named script replays there too. op2-engine's scenario scripts take `@N` only.
 
 **An order naming something that can't be resolved is skipped, not fatal.** That is a `$name` or `$TYPE@x,y` that
 doesn't resolve, or a plain id past the object table (before: reading it crashed the game, exit 5). Every verb whose
