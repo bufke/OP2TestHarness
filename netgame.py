@@ -2,9 +2,9 @@
 """Play a LAN game of the original between two to six copies of the game under Wine on this machine, and log it from
 inside every copy (docs/multiplayer.md "Stage 2a").
 
-    OP2_HARNESS_PREFIX=$PWD/prefix-net harness/netgame.py --out /tmp/net --ticks 3000 \\
-        --script0 harness/oracle/net/ml2_08_p0.txt --script1 harness/oracle/net/ml2_08_p1.txt --turbo
-    OP2_HARNESS_PREFIX=$PWD/prefix-net harness/netgame.py --out /tmp/net --mission "Midas.*'Hidden" --seed 7 \\
+    OP2_HARNESS_PREFIX=$PWD/prefix-net netgame.py --out /tmp/net --ticks 3000 \\
+        --script0 $ORACLE/net/ml2_08_p0.txt --script1 $ORACLE/net/ml2_08_p1.txt --turbo
+    OP2_HARNESS_PREFIX=$PWD/prefix-net netgame.py --out /tmp/net --mission "Midas.*'Hidden" --seed 7 \\
         --players 3 --eden 0,2 --ticks 6000 --turbo --script0 ... --script1 ... --script2 ...
 
 Shell-mode runs (shell.py --net) boot the game normally in their own Xvfb and Wine virtual desktop, in the same prefix
@@ -22,7 +22,7 @@ Outputs: OUT/host, OUT/join, OUT/join2, ... each with start_info.json, packets.j
 the shell run's files; OUT/summary.json says whether every copy executed the same orders and kept the same telemetry,
 line for line, as the host, and where they first differ.
 
-Use a prefix nobody else is running (prefix-net, a copy of prefix-harness: tools that run harness/run.sh share
+Use a prefix nobody else is running (prefix-net, a copy of prefix-harness: tools that run ./run.sh share
 prefix-harness, and its wineserver would host the games). It refuses prefix/ and prefix-harness/.
 """
 import argparse
@@ -253,7 +253,7 @@ def main() -> int:
         ap.error(str(e))
     if prefix is None or prefix.resolve() in prefixes.shared_prefixes(HERE.parent):
         ap.error("set OP2_HARNESS_PREFIX to a prefix of its own (e.g. prefix-net, a copy of prefix-harness), "
-                 "never prefix/ (David's) or prefix-harness/ (shared by every harness run)")
+                 "never prefix/ (the play prefix) or prefix-harness/ (shared by every harness run)")
     out = args.out.resolve()
     sync = out / "sync"
     out.mkdir(parents=True, exist_ok=True)

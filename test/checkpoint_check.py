@@ -15,7 +15,7 @@ the load (a session's orders given at a checkpoint's tick).
 Needs Wine and Xvfb (sandbox disabled); saves go to the harness prefix's OPU/saves as ckptcheck<pid>_<T>.op2 and are
 deleted after. About 3 runs' time per checkpoint.
 
-    python3 harness/test/checkpoint_check.py --mission c_euf.dll --script harness/oracle/missions/c_euf_win.txt \\
+    python3 test/checkpoint_check.py --mission c_euf.dll --script $ORACLE/missions/c_euf_win.txt \\
         --at 10000,30000,45000 --out /tmp/ckcheck
 """
 import argparse

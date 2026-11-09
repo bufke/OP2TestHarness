@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Self-test of the session state (`run.sh --state`, `--stop`) and of op2-inspect's game_* tools on the self-test
-mission zHarnessEnd.dll (a Command Center and two Lynx; "Survive until tick 800"). Run by `make -C harness check`
+mission zHarnessEnd.dll (a Command Center and two Lynx; "Survive until tick 800"). Run by `make check`
 after the plain check, while the test mission is installed; build/check is that check's run.
 
-The game_* part runs the op2-inspect CLI (tools/target/debug/op2-inspect) with TMPDIR inside build/, so it never
-touches a session of the user's; it is skipped with a note when op2-inspect isn't built.
+The game_* part runs op2-rs's op2-inspect CLI (../tools/target/debug/op2-inspect: this folder inside an op2-rs
+checkout) with TMPDIR inside build/, so it never touches a session of the user's; it is skipped with a note when
+op2-inspect isn't built.
 """
 import json
 import os
@@ -15,6 +16,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent.parent
 BUILD = HERE / "build"
 INSPECT = HERE.parent / "tools" / "target" / "debug" / "op2-inspect"
+# op2-rs's harness/oracle (the canonical campaign scripts): $ORACLE, else oracle/ here, as inside op2-rs.
+ORACLE = Path(os.environ.get("ORACLE") or HERE / "oracle")
 
 
 def run(*args: str) -> dict:
@@ -71,7 +74,7 @@ def main() -> int:
     assert stopped["stop"] == f"enemy {enemy[0]['id']}" and stopped["tick"] == 20, (stopped["stop"], stopped["tick"])
 
     # The controlled canonical chain completes and preserves every applicable topic through the e06 unit mission.
-    canonical = HERE / "oracle" / "missions" / "canonical"
+    canonical = ORACLE / "missions" / "canonical"
     expected = {3301, 3303, 3401, 3501, 3502, 3601, 3602, 3604, 3605, 3606, 3607, 3608, 3609, 3610, 3801, 3851}
     for mission in ("e05", "e06"):
         out = subprocess.run([str(HERE / "run.sh"), "--mission", f"{mission}.dll", "--campaign",
@@ -89,7 +92,7 @@ def main() -> int:
 
     # A campaign file's completed topics become MissionResults research once PrepareGame has loaded the new tree.
     campaign = BUILD / "check_campaign.txt"
-    campaign.write_text((HERE / "oracle" / "missions" / "e07_campaign.txt").read_text() +
+    campaign.write_text((ORACLE / "missions" / "e07_campaign.txt").read_text() +
                         "techs 3405 5110\ntechs 5115 5401\ntechs -1 999999 invalid 6000\n")
     out = subprocess.run([str(HERE / "run.sh"), "--mission", "e07.dll", "--campaign", str(campaign), "--ticks", "1",
                           "--telemetry-every", "1", "--timeout", "120", "--out", str(BUILD / "check_campaign")],

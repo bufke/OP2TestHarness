@@ -1,10 +1,11 @@
 """Which Wine prefix the harness uses, and which prefixes it must never install into or run a private game in.
 
-Shared by harness/run.py, harness/netgame.py and tools/agent/check (harness/Makefile applies the same rules in make).
+Shared by run.py and netgame.py (Makefile applies the same rules in make). The prefixes live beside this folder:
+`../prefix` is the one you play from, `../prefix-harness` a copy of it for harness runs.
 - OP2_HARNESS_PREFIX, when set, must be an absolute path: run.py would resolve a relative one against the current
-  directory and the Makefile against harness/, so `../prefix` could pass a check and still install into prefix/.
-- The play prefix is the checkout's `prefix` and the main checkout's (the parent of the git common dir): a worktree
-  without a prefix link still knows David's.
+  directory and the Makefile against this folder, so `../prefix` could pass a check and still install into prefix/.
+- In a git checkout the play prefix is also the main checkout's `prefix` (the parent of the git common dir), so a
+  worktree without a prefix link still knows it.
 """
 import os
 import subprocess
@@ -24,7 +25,7 @@ def main_checkout(root: Path) -> Path:
 
 
 def play_prefixes(root: Path) -> set:
-    """David's play prefix, resolved, as this checkout and the main checkout name it."""
+    """The play prefix, resolved, as this folder and (in a git worktree) the main checkout name it."""
     return {(r / "prefix").resolve() for r in (root, main_checkout(root))}
 
 

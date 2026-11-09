@@ -2,7 +2,7 @@
 """Boot the original game normally (intro video, title, shell menus, briefings) under Xvfb in a Wine virtual desktop,
 drive it with real X input from a driver script, take screenshots of the whole desktop, and log what the game does.
 
-    harness/shell.sh --drive harness/oracle/shell/eden1.txt --out /tmp/shell
+    ./shell.sh --drive $ORACLE/shell/eden1.txt --out /tmp/shell
 
 The harness module runs in shell mode (OP2H_SHELL=1, see harness.cpp "Shell mode"): it only watches, writing
 shell.jsonl (movies, the shell's state messages, dialogs and their controls, files, game start and end). Outputs in
@@ -304,7 +304,7 @@ class SavesAside:
 
     def __init__(self, saves: Path, out: Path):
         # Runs with --clean-saves take turns (two at once moved each other's folders: `record --jobs 2`), and wait for a
-        # recording session (`run.py --record`, which holds the lock while David plays); the wait says who holds it.
+        # recording session (`run.py --record`, which holds the lock while someone plays); the wait says who holds it.
         self.lock = run.lock_saves(f"shell.py --clean-saves --out {out}")
         self.saves, self.out = saves, out
         self.aside = saves.parent / f"saves.harness-aside-{os.getpid()}"

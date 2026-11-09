@@ -9,8 +9,8 @@ normal harness and compares:
 Needs Xvfb and Wine (sandbox disabled) and the installed harness; uses prefix-harness's OPU/saves slot it saves to
 (SAVE and LOAD pick the slot the dialogs open on) and restores nothing else. Takes about 2 minutes (real-time play).
 
-    python3 harness/test/record_check.py --out /tmp/reccheck
-    python3 harness/test/record_check.py --steps FILE --out DIR   # explore: run other driver steps, no replay
+    python3 test/record_check.py --out /tmp/reccheck
+    python3 test/record_check.py --steps FILE --out DIR   # explore: run other driver steps, no replay
 
 Driver steps (one per line, `#` comments): `tick T` (wait until the game reaches tick T), `sleep S`, `shot NAME` (the
 X screen to NAME.png), `click X Y [right]`, `key KEYSYM...`, `type TEXT` (letters and spaces). Pixels are X screen

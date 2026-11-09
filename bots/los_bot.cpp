@@ -1,10 +1,10 @@
-// Line-of-sight probe bot (harness/oracle/FINDINGS.md "Combat"). At tick LOS_TICK (default 3) it asks the game's own
+// Line-of-sight probe bot ($ORACLE/FINDINGS.md "Combat"). At tick LOS_TICK (default 3) it asks the game's own
 // line-of-sight test (0x436FA0, thiscall on the map at 0x54F7F8, args x1 y1 x2 y2 in internal tiles; the target
 // search 0x4A6EA0 calls it with the candidate's tile first) between each tile listed in LOS_FROM ("x,y;x,y", file
 // tiles) and every tile within LOS_R (default 6), both ways, and logs each tile's TileData bit 31 (the flag the test
 // stops at besides sight-blocking cell types).
 //
-// Run: harness/run.sh --scenario S.json --bot harness/build/los_bot.dll --out DIR   (LOS_FROM in the environment)
+// Run: ./run.sh --scenario S.json --bot build/los_bot.dll --out DIR   (LOS_FROM in the environment)
 // Log: $OP2H_OUT\los.jsonl, one line per source tile: {"from":[x,y],"to":[[x,y,from->to,to->from,bit31],...]}
 #include <windows.h>
 #include <cstdio>

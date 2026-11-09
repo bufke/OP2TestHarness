@@ -1,5 +1,5 @@
 // Example harness bot: plays the human side by sending every idle player-0 combat vehicle to attack the nearest
-// enemy unit. Build with `make build/sample_bot.dll`, run with `run.sh --bot harness/build/sample_bot.dll`.
+// enemy unit. Build with `make build/sample_bot.dll`, run with `run.sh --bot build/sample_bot.dll`.
 // Orders go through Unit::Do*(), i.e. the same command packets local player input produces.
 #include <windows.h>
 #include <climits>

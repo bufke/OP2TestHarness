@@ -3,7 +3,7 @@
 an LLM (basic)"), for tests: it reads DIR/state.json, appends orders to DIR/orders.jsonl as bot_order does and reads
 the answers in DIR/log.jsonl, deciding only from what the state shows (no unit ids known in advance).
 
-    python3 -I harness/net/bot_standin.py DIR [--seconds S]
+    python3 -I net/bot_standin.py DIR [--seconds S]
 
 What it does, each step once, in order, as soon as the state allows: one order it knows is wrong (an unknown unit, so
 an error comes back); every vehicle but the ConVecs moves 3 tiles west; a ConVec with a kit builds it,

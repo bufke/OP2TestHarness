@@ -1,25 +1,63 @@
-# Outpost 2 test harness
+# OP2TestHarness - Outpost 2 Test Harness
 
-Runs an Outpost 2 mission unattended under Wine and Xvfb: no shell or clicking, game speed uncapped, telemetry
-written as JSONL, screenshots taken as PNG, and the game quits by itself. Any mission DLL works without changes.
+OP2TestHarness turns the original Outpost 2: Divided Destiny into a measuring instrument. A DLL loaded into the real
+game (`harness.dll`, an op2ext module) plays a mission or a scenario unattended: no shell or clicking, the game speed
+uncapped, scripted orders at given ticks, a fixed seed. It writes what happened as files (unit state every tick as
+JSONL, telemetry, PNG screenshots) and quits by itself. Any mission DLL works without changes. Runs are deterministic:
+the same recipe gives byte-identical output, so a recipe (scenario JSON or script) stands for its recording.
 
-```sh
-make -C harness install                       # once (and after changing src/)
-harness/run.sh --mission cHello.dll --ticks 6000 --screenshot-every 1500 --telemetry-every 500 --out /tmp/op2run
-harness/run.sh --scenario harness/oracle/scenarios/line_fast.json --out /tmp/op2scn   # oracle trace of a scenario
-make -C harness check                         # end-to-end self-test
+It was written for [op2-rs](https://gitlab.com/bufke/op2-rs), a reimplementation of the game, which plays the same
+recipes in its own simulation and compares every field, tick by tick ("Comparing with op2-rs"). It works for any
+reimplementation or tool that can read the outputs. ARCHITECTURE.md has the design, PROVENANCE.md the origin.
+
+**Windows** (native, no Wine; windows/README.md):
+
+```bat
+windows\build.bat                                         :: build build\win\harness.dll and zScenario.dll (MSVC)
+python -I windows\run_win.py setup                        :: private copy of the game in game\, harness installed
+python -I windows\run_win.py run %ORACLE%\scenarios\line_fast.json build\runs\line_fast --shot-every 350
+python -I windows\compare.py %ORACLE%\scenarios\cmb_duel_laser.json --tick 200   :: the original vs op2-rs
 ```
 
-**Requirements (development only).** The harness needs the GOG release with the **OPU 1.4.1** update installed in the
-Wine prefix: op2ext (part of OPU) loads `harness.dll` as an ini module, and every recorded oracle run is a recording
-of GOG 1.2 + OPU 1.4.1, so "the original" that op2-rs is checked against is that patched game (where OPU changed
-behaviour, docs/deviations.md says which we follow). A different OPU version can change recordings; re-record with
-`make accuracy-full` and review the differences before switching. Players don't need OPU: op2-rs reads the GOG or CD
-data with or without it, and honours OPU's loose files and extra missions when present (docs/game-data.md).
+**Linux** (Wine + Xvfb, the full option set below):
 
-When run from Claude Code, `run.sh` and `make check` need `dangerouslyDisableSandbox` (Wine uses `/run/user/1000/wine`).
+```sh
+make install                       # once (and after changing src/): build and install into ../prefix-harness
+./run.sh --mission cHello.dll --ticks 6000 --screenshot-every 1500 --telemetry-every 500 --out /tmp/op2run
+./run.sh --scenario $ORACLE/scenarios/line_fast.json --out /tmp/op2scn   # oracle trace of a scenario
+make check                         # end-to-end self-test
+```
+
+**Requirements.**
+- Outpost 2, the GOG release (1.2), with the **OPU 1.4.1** update: op2ext (part of OPU) loads `harness.dll` as an ini
+  module, and every address in `src/harness.cpp` is for that `Outpost2.exe`. Recordings are of GOG 1.2 + OPU 1.4.1; a
+  different OPU version can change them, so re-record and review the differences before switching.
+- TethysAPI at commit 141fd47 in `vendor/include/Tethys` (`git clone https://github.com/OutpostUniverse/TethysAPI.git
+  vendor/include/Tethys`, then `git -C vendor/include/Tethys checkout 141fd47`).
+- Windows: Visual Studio 2022 Build Tools (C++), Python 3.11+.
+- Linux: `i686-w64-mingw32-g++`, Wine (a wow64 prefix), Xvfb, Python 3.11+ (PIL for PNG screenshots).
+
+**Where things go.** On Linux the Wine prefixes sit beside this folder: `../prefix` is the one you play from, and
+harness runs use `../prefix-harness`, a copy of it (`cp -a ../prefix ../prefix-harness`), or the absolute path in
+`OP2_HARNESS_PREFIX`. On Windows the harness runs in `game\`, a copy `run_win.py setup` makes; the install you play from
+is never written to. Run outputs go where `--out` says; `build/`, `game/` and `vendor/` are not committed (they hold
+game data or upstream code).
+
+**Names in this file.** `op2-sim`, `op2-engine`, `op2-inspect`, `op2-missionhost` and `op2-accuracy` are op2-rs's tools,
+and paths written as `op2-rs notes/...`, `op2-rs docs/...`, `op2-rs accuracy/...` or `op2-rs tools/...` are in the op2-rs
+repository.
+
+**Scenarios and recorded runs (`ORACLE`).** The recipes this harness plays (scenario JSON, mission scripts, input and
+network scripts) and the findings measured with them stay in op2-rs, in `harness/oracle/`: they are op2-rs's regression
+tests. This file writes that folder as `$ORACLE` (Linux) or `%ORACLE%` (Windows), e.g.
+`ORACLE=~/op2-rs/harness/oracle` or `set ORACLE=C:\Users\Desktop\GITHUB\op2-rs\harness\oracle`. Comments inside
+those recipe files write this harness's folder as `harness/`.
 
 ## Options (`run.sh --help`)
+
+The Linux launcher's options. On Windows, `windows/run_win.py run` covers scenarios so far (`--shot-every`,
+`--no-turbo`, `--timeout`; the scenario sets ticks, seed, trace and telemetry intervals); the module itself reads the
+same `OP2H_*` settings on both.
 
 | option | default | |
 |---|---|---|
@@ -79,7 +117,7 @@ The exit status is 0 when the run reached its tick limit or the mission ended.
   - `cmd` is the unit's current `CommandType`. `cargo` is the weapon type, or the kit a ConVec carries.
   - `units` holds every live building and vehicle of each player. Gaia objects such as beacons and wreckage are left
     out.
-- `trace.jsonl` (with `--trace-every`/`--scenario`): the ENGINE_PLAN.md trace format, one line per sampled tick:
+- `trace.jsonl` (with `--trace-every`/`--scenario`): the op2-rs ENGINE_PLAN.md trace format, one line per sampled tick:
   ```json
   {"tick":120,"units":[{"id":1,"spawn":0,"type":"LIGHT_TANK","owner":0,"px":1680,"py":976,"sx":1679.666656,
    "sy":976.0,"fix":[110078635,63963136],"dir":0,"hp":300,"cmd":"Move","action":"Move","busy":0,"ipx":2704,
@@ -104,7 +142,7 @@ The exit status is 0 when the run reached its tick limit or the mission ended.
     (the game marks it dead too, with `pNext_` -2) and is listed again once it's out. A spawn that failed (the object
     table full: 2047 objects) is never listed.
   - Armed units (vehicles and Guard Posts; other structures use the weapon word for other things, e.g. a lab's research
-    countdown) add `weapon`, `tur`, `reload`, `tgt` (ENGINE_PLAN.md). A unit under a weapon status effect adds
+    countdown) add `weapon`, `tur`, `reload`, `tgt` (op2-rs ENGINE_PLAN.md). A unit under a weapon status effect adds
     `status`: its [EMP, stickyfoam, ESG] timers (+0x56, +0x54, +0x58, in 8-tick phases; 0 for an effect that is off). Top level: `fx` (weapon fire of spawned
     units, with `timer`), `ents` (every other live object as `[index, type, action, timer, px, py]`: explosions,
     unspawned units), `alloc` (the object index allocator, 0x439A10: highest index so far, the ring of freed
@@ -151,7 +189,7 @@ or `@N` for the unit made by the Nth `spawn` command, or a name (`$NAME`, "Unit 
 
 The last group builds the packets the UI sends (Guard, Attack on a tile, LightToggle, Move/Stand Ground/Patrol with up
 to 8 waypoints; `r` is the waypoint's range in its top 3 bits, `loop` the waypoint a patrol returns to). See
-`../notes/findings-commands-audio.md`.
+op2-rs `notes/findings-commands-audio.md`.
 
 Commands for a tick run after that game cycle. A move at tick T shows `cmd: Move` in tick T's trace line and the unit
 starts turning or moving in cycle T+1.
@@ -161,11 +199,11 @@ vehicle ignores them; chaos_sd_mid_dock), except `attack`, which goes through Te
 nothing when the target isn't live. A command whose first argument is a spawn (`@N`) the trace has seen die is skipped
 (logged): the dead unit's object index may belong to a shot by then, and an order to that crashes the game.
 
-**Differential fuzzing.** `op2-inspect fuzz --template harness/oracle/fuzz/colony.json --seeds 1-300 --out DIR`
-generates a random but legal script of these verbs per seed for a template (`oracle/fuzz/*.json`: a scenario plus
+**Differential fuzzing.** `op2-inspect fuzz --template $ORACLE/fuzz/colony.json --seeds 1-300 --out DIR`
+generates a random but legal script of these verbs per seed for a template (`$ORACLE/fuzz/*.json`: a scenario plus
 what to generate), plays it here and in op2-sim, compares the traces, and shrinks each diverging script (and each
-crash of the original, by crash site) to a minimal one with ddmin (`DIR/seed-N/minimal.json`). It runs the harness,
-so outside the Claude Code sandbox; tools/crates/op2-inspect/src/fuzz_run.rs. A template's `extras` mixes in verb groups
+crash of the original, by crash site) to a minimal one with ddmin (`DIR/seed-N/minimal.json`). It is op2-inspect's
+(op2-rs `tools/crates/op2-inspect/src/fuzz_run.rs`) and runs this harness for the original's side. A template's `extras` mixes in verb groups
 beyond the orders (`disaster`, `earthwork`, `repair`, `damage`, `scatter`, `eco`; `extra_percent` of the lines) and
 `wrap` (512) lets the area run past a wrapping map's seam. A diverging run whose script names a dead spawn after a
 line's first word (an order that reached whatever took the dead unit's index) is played again without those lines
@@ -196,9 +234,9 @@ Script verbs that drive the game's UI the way a player does (the orders above by
 - Keys: letters, digits, `f1`-`f12`, `enter`, `esc`, `space`, `tab`, `backspace`, `delete`, `home`, `end`, `pageup`,
   `pagedown`, arrows, `pause`, `plus`, `minus`, `numplus`, `numminus`, `vk:0xNN`, with `shift+`/`ctrl+`/`alt+`.
 - With `--scenario`, `--script` lines are appended to the scenario's own script (so in file coordinates), and a
-  scenario may carry raw script lines as `"script": ["10 click unit @0", ...]`. `oracle/input/` has the controls
-  experiments (`ui_base.json` plus one script per behaviour, see oracle/FINDINGS.md "Controls"):
-  `harness/run.sh --scenario harness/oracle/input/ui_base.json --script harness/oracle/input/box_rules.txt
+  scenario may carry raw script lines as `"script": ["10 click unit @0", ...]`. `$ORACLE/input/` has the controls
+  experiments (`ui_base.json` plus one script per behaviour, see $ORACLE/FINDINGS.md "Controls"):
+  `./run.sh --scenario $ORACLE/input/ui_base.json --script $ORACLE/input/box_rules.txt
   --telemetry-every 1 --out /tmp/x`.
 - When a script uses input verbs, each telemetry line adds `selected` (unit IDs, the game's selection list at
   0x547210) and `view` (the detail pane's top-left corner in file pixels). `harness.log` logs every input with the
@@ -226,7 +264,7 @@ How it works, and what is deterministic:
 
 ## Economy verbs and telemetry (`--eco`)
 
-Script verbs for colony experiments (oracle scenarios `eco_*`, spec in `oracle/ECONOMY.md`):
+Script verbs for colony experiments (oracle scenarios `eco_*`, spec in `$ORACLE/ECONOMY.md`):
 
 ```
 1    player   0 workers 40          # set a PlayerImpl field: workers scientists kids food common rare morale
@@ -334,17 +372,17 @@ the log. `@N` spawns keep their own rule (skipped once they have died).
   mission's InitProc the harness rebases them to what the log's reset (0x439510) writes at time 0, so the verdicts
   don't depend on the machine's uptime (before that fix, past ~27.7 h of uptime no throttled message passed all run).
 - The `tables` line's `prio_ctor` isn't all priorities: the game reuses part of those bytes, including a real
-  timeGetTime stamp (0x56E89C), so it changes between recordings; accuracy/runs.py leaves it out of the manifest hash.
+  timeGetTime stamp (0x56E89C), so it changes between recordings; op2-rs accuracy/runs.py leaves it out of the manifest hash.
 
 ## Session state (`--state`, `--stop`)
 
-For tools that play a mission by replaying a growing script (op2-inspect's `game_*` tools, tools/README.md): a
+For tools that play a mission by replaying a growing script (op2-inspect's `game_*` tools, op2-rs tools/README.md): a
 replay costs about 1 s of wall time at any tick (Wine and Xvfb start in ~0.8 s; measured 2026-10-22: e05's whole
 23,448-tick win in 1.0-1.3 s, 40,000 ticks of e06 or e12 in 1.1 s, p12 to its end at 37,652 in 1.4 s; with
 `--telemetry-every 1` e05 takes 3.6 s, writing 125 MB), so a session replays its script at every step instead of
 keeping a paused game, and its history is exactly the script that reproduces it. Long games replay from a checkpoint
 instead of tick 0 (next section): with `--eco` a replay runs at 20k-30k ticks/s (c_euf_win to 46,296 in 2.4 s). Reading the state changes nothing:
-the telemetry of a run with `--state` is byte-identical to one without (measured on e05_win; `make -C harness check` compares them).
+the telemetry of a run with `--state` is byte-identical to one without (measured on e05_win; `make check` compares them).
 
 - `events.jsonl`, one line per event, file tiles, written during the run:
   ```json
@@ -387,7 +425,7 @@ and a Scout discovers it by coming near (e06: tanks next to it for 3000 ticks di
 
 A replay from tick 0 costs about 1 s plus the game's time, 20k-30k ticks/s with `--eco` and `--state`: 10 s for a
 250,000-tick colony game, and a session makes hundreds. op2-inspect's sessions therefore resume from a save of an
-earlier run where the script up to it is unchanged (tools/README.md "Checkpoints"); the harness's part:
+earlier run where the script up to it is unchanged (op2-rs tools/README.md "Checkpoints"); the harness's part:
 
 - `--checkpoint SAVE`: when the run stops with the game going on (its tick limit, a `--stop` event), the game is saved
   to SAVE first, at the end of that tick's cycle (after its script lines, samples and session events), as TApp::SaveGame
@@ -433,7 +471,7 @@ earlier run where the script up to it is unchanged (tools/README.md "Checkpoints
   the UI (selection, view) of input verbs, a `packet` queued for the next cycle. op2-inspect doesn't resume past such
   lines.
 
-**Fidelity** (2026-11-06, `python3 harness/test/checkpoint_check.py --mission M --script WIN --at T1,T2,..`: a
+**Fidelity** (2026-11-06, `python3 test/checkpoint_check.py --mission M --script WIN --at T1,T2,..`: a
 reference run of the win script, runs that save at each T, and a run per T resumed in a new process, compared with
 the reference from T on: telemetry (`--eco` every 10 ticks), trace (every 4 ticks; every 20, the
 checker's default since a whole-run trace at 4 is gigabytes, in the last pass of c_euf, ml4_01 and the split),
@@ -466,28 +504,31 @@ every 10 ticks, the events identical, the final state.json identical, the win at
 - status messages (`msg` events): MessageLog's throttle runs on the real clock, so they differ between any two runs of
   different speed, resumed or not (two plain runs of c_euf_win, with and without `--trace-every 4`: 10 messages apart
   by tick 40000).
-`harness/test/checkpoint_check.py --split` leaves the script's lines at T out of the save and plays them after the
+`test/checkpoint_check.py --split` leaves the script's lines at T out of the save and plays them after the
 load (orders given at a checkpoint's tick).
 
 ## Recording your own play (`--record`)
 
-David plays a mission of the original by hand and his game becomes a harness script: a win script, an oracle run and,
-later, an op2-rs comparison.
+You play a mission of the original by hand and your game becomes a harness script: a win script, an oracle run and
+a comparison with a reimplementation. Linux only for now (it needs an X display: `--display`, or `$DISPLAY`, which
+gamescope sets).
 
 ```sh
-make -C missions record MISSION=p12.dll         # CAMPAIGN= defaults to harness/oracle/missions/p12_campaign.txt
-# -> harness/recordings/p12/recording.txt (gitignored), plus telemetry.jsonl and harness.log of the session
+./run.sh --record --mission p12.dll --campaign $ORACLE/missions/p12_campaign.txt --desktop 1088x816 --out recordings/p12
+# -> recordings/p12/recording.txt, plus telemetry.jsonl and harness.log of the session (not committed)
 ```
 
+op2-rs runs this under gamescope with `make -C missions record MISSION=p12.dll`.
+
 - **How it starts.** `run.py --record` loads the harness as for any scripted run (same `StartMissionHook`: seed 1,
-  normal difficulty, `--campaign` carry-over, player name, start info), in **prefix-harness, never prefix/** (David's
-  own play prefix isn't touched; mission DLLs are mirrored from it as for every run). The game runs in real time with
+  normal difficulty, `--campaign` carry-over, player name, start info), in **prefix-harness, never prefix/** (the
+  prefix you play from isn't touched; mission DLLs are mirrored from it as for every run). The game runs in real time with
   the frame limiter, sound and music as prefix-harness's ini has them (`--silent` turns them off), the real mouse and
   keys (no virtual cursor, no forced focus), the game's own questions answered by the player (the message box isn't
   intercepted), and no tick limit or timeout. It refuses to run when the prefix resolves to prefix/ (no prefix-harness,
   or `OP2_HARNESS_PREFIX` pointing there). It holds OPU/saves's lock for the session (`shell.py --clean-saves` waits for
-  it, saying who holds it; the lock file `OPU/saves.harness-lock` names the holder). The make target runs it under gamescope in a Wine virtual desktop
-  (`--desktop`, default 1088x816 around the 1024x768 game; `REC_SIZE`, `REC_W`, `REC_H`, `REC_OUT` change it). An
+  it, saying who holds it; the lock file `OPU/saves.harness-lock` names the holder). `--desktop 1088x816` runs it in a Wine virtual desktop
+  around the 1024x768 game, so its dialogs stay inside (for gamescope). An
   optional `--script` is a setup script (it runs as in any run and is copied to the top of the recording); its input
   verbs run through the harness's virtual cursor and keys, as in a replay, and the real mouse and keys take over once
   the last of them has run (telemetry then has the player's own `view` and `selected`, which a replay doesn't share).
@@ -523,15 +564,15 @@ make -C missions record MISSION=p12.dll         # CAMPAIGN= defaults to harness/
   `# BROKEN: ...` (it no longer replays). A failed save, and a `savegame` in a run that isn't a recording, delete the
   slot's sidecar. recording.txt is rewritten whole after every change (a temporary file renamed over it). A new session in the same `REC_OUT` keeps the previous files as
   `recording-<time>.txt`; loading a save from an earlier session resumes that history.
-- **Turning it into a win script and an oracle run** (coordinator). Copy recording.txt to
-  `harness/oracle/missions/<m>.txt`, write the header (what the mission asks, the plan as played; keep the packet lines),
-  then replay it: `harness/run.sh --mission <m>.dll --campaign <carry-over> --script harness/oracle/missions/<m>.txt
+- **Turning it into a win script and an oracle run.** Copy recording.txt to
+  `$ORACLE/missions/<m>.txt`, write the header (what the mission asks, the plan as played; keep the packet lines),
+  then replay it: `./run.sh --mission <m>.dll --campaign <carry-over> --script $ORACLE/missions/<m>.txt
   --ticks 0 --out /tmp/<m>` must end as the session did (MissionAccomplished at the recorded tick), and its
   telemetry.jsonl must equal the session's (same `--telemetry-every`: 100 by default) line for line. Then add `[runs.<m>_win]` to
-  accuracy/recordings.toml, `tools/agent/record <m>_win`, and `op2-inspect game_carry_over` for the next mission's
+  op2-rs accuracy/recordings.toml, op2-rs `tools/agent/record <m>_win`, and `op2-inspect game_carry_over` for the next mission's
   carry-over. To play on from the recording's end through op2-inspect (a partial game), `game_start mission=<m>
   script=<recording> tick=<end>` takes it as the session's base script.
-- **Check:** `python3 harness/test/record_check.py --out DIR` (about a minute; Xvfb, real X input through shell.py's
+- **Check:** `python3 test/record_check.py --out DIR` (about a minute; Xvfb, real X input through shell.py's
   `X`): plays e01 with clicks, SAVE GAME, two more orders, LOAD GAME and a different order, then replays the recording
   and requires the same executed packets, byte-identical telemetry and an identical trace (frame/anim aside), the
   abandoned packets gone, and op2-inspect's game_start to start from the recording at its end with the same units.
@@ -545,17 +586,17 @@ make -C missions record MISSION=p12.dll         # CAMPAIGN= defaults to harness/
   decodes each packet's bytes (`op2_sim::original_packet`: unit ids, internal pixels to file tiles, map ids to unit kinds,
   the research index to a tech id) into the op2-sim command a UI click makes, queues it for the cycle that starts at the
   line's tick and plays the mission on, so the compare tools (`op2-inspect compare_run`, `game_verify missionhost=true`,
-  `tools/agent/missioncompare`) work on a recording as on a win script. A packet op2-sim has no equivalent for (Transfer,
+  op2-rs `tools/agent/missioncompare`) work on a recording as on a win script. A packet op2-sim has no equivalent for (Transfer,
   Ally, GoAI, Guard on a tile, most GameOpt cheats, a stored-group selection) is listed in the summary as `unsupported
   packet: tick T ...` and not run; chat, machine settings and packets for units that no longer exist are left out
   silently. Packets only reach a cycle that is a multiple of 4 (a `packet` line at another tick is dropped with a note,
   as the harness does). Run `e01_ui_packets` is such a recording (three UI Moves at click pixels) and replays exactly.
-  A verb script can stand in for a recording: `python3 harness/tools/packetize.py SCRIPT [--gamedata RUN/gamedata.json]
+  A verb script can stand in for a recording: `python3 tools/packetize.py SCRIPT [--gamedata RUN/gamedata.json]
   [--max-delay N] [--keep VERBS]` rewrites its orders as `packet` lines (each at the first free command cycle after the
   verb's tick); runs `e01_packets`, `e02_packets`, `e03_packets`, `e04_packets`, `e05_packets`, `p02_lose_packets` and
   `p03_packets` are such scripts played in the original and in op2-missionhost, all exact (Move, Dock, LoadCargo,
   TransferCargo, Produce, Research, Train, Idle, Unidle, BuildWall, Attack, ...). Packetized e10, e11 and p10 (with
-  their Attack orders) were not exact and aren't kept as runs: leads in notes/findings-commands-audio.md.
+  their Attack orders) were not exact and aren't kept as runs: leads in op2-rs notes/findings-commands-audio.md.
 - **Limits.** Only the local player's packets are recorded (single player). The `= verb` and `~ verb` comments of a
   recording are for reading; op2-missionhost reads the hex.
   A load restores the game as the save holds it; across the p08, e05, e10, p12 and e01 scripts a loaded game went on
@@ -565,14 +606,14 @@ make -C missions record MISSION=p12.dll         # CAMPAIGN= defaults to harness/
   the end without anything else differing; and in p12, Eden's hive counters read 0 for up to ~140 ticks after a load
   (after a save too, in the game that goes on: "Checkpoints" puts them back for its own saves; a recording's saves
   are the player's and stay as the game makes them).
-  The measured scope is in notes/uncertain-claims.md ("a load replays like continuing"). Sound on during a recording hasn't been tested for
+  The measured scope is in op2-rs notes/uncertain-claims.md ("a load replays like continuing"). Sound on during a recording hasn't been tested for
   determinism (the checks run silent; replays are always silent): compare the first real recording's replay with its
-  telemetry. Agents' harness runs share prefix-harness's wineserver and can take the foreground (input runs do): don't
-  run input-verb runs while David records. Mission dialogs from a DLL are suppressed as in every run.
+  telemetry. Other harness runs share prefix-harness's wineserver and can take the foreground (input runs do): don't
+  run input-verb runs while someone records. Mission dialogs from a DLL are suppressed as in every run.
 
 ## Disasters
 
-Script verbs that schedule a disaster the way a mission does (the TethysGame::Set* exports; oracle/FINDINGS.md
+Script verbs that schedule a disaster the way a mission does (the TethysGame::Set* exports; $ORACLE/FINDINGS.md
 "Disasters"). A trailing `now` skips the two 500-tick warnings, as the API's immediate flag does.
 
 ```
@@ -605,7 +646,7 @@ runner understands the same verbs, `op2_sim::groups`):
 
 ## Scenarios (`--scenario`): oracle runs of the original game
 
-`--scenario FILE` runs a scenario in the ENGINE_PLAN.md format against the real game, so op2-sim can be compared with
+`--scenario FILE` runs a scenario in the op2-rs ENGINE_PLAN.md format against the real game, so op2-sim can be compared with
 it:
 
 ```json
@@ -630,9 +671,10 @@ it:
 - The game reads a mission's `MapName` from the DLL file without loading it (MissionManager::GetModuleDesc), so
   run.py writes one patched copy of `zScenario.dll` per map, as `OPU/Harness/zs_<map>.dll`. Missions in
   `OPU/Harness` never appear in the game's mission lists.
-- A scenario run takes about 1 to 3 s. `oracle/` holds the reference scenarios (`make_scenarios.py` writes them;
-  `tools/agent/record NAME...` records them into `oracle/runs/`, which is gitignored). Measured results are in `oracle/FINDINGS.md` and `../notes/findings-*.md`. `op2-inspect`
-  (tools/README.md) wraps all of this for agents.
+- A scenario run takes about 1 to 3 s. `$ORACLE/` (in op2-rs) holds the reference scenarios (`make_scenarios.py`
+  writes them; op2-rs's `tools/agent/record NAME...` records them into `$ORACLE/runs/`, which is never committed).
+  Measured results are in `$ORACLE/FINDINGS.md` and op2-rs `notes/findings-*.md`. On Windows, `windows/run_win.py run`
+  plays one. Any scenario file works: the recipes don't have to be op2-rs's.
 
 Recording a scenario as video frames: `--screenshot-every 1` (or 2, 5...) saves a PNG per sampled tick of the view
 centred on the units, about 20 frames/s of wall time. Assemble them with e.g.
@@ -642,10 +684,10 @@ centred on the units, about 20 frames/s of wall time. Assemble them with e.g.
 
 `shell.sh` boots the game normally (intro video, title, OP2Shell menus, briefings, movies) in a Wine virtual desktop
 on a private Xvfb, drives it with real X input (XTEST) from a driver script, screenshots the whole screen and logs
-what the game does. The startup flow it measured is in `../notes/findings-shell.md`.
+what the game does. The startup flow it measured is in op2-rs `notes/findings-shell.md`.
 
 ```sh
-harness/shell.sh --drive harness/oracle/shell/eden1.txt --script harness/oracle/missions/e01.txt \
+./shell.sh --drive $ORACLE/shell/eden1.txt --script $ORACLE/missions/e01.txt \
   --ini Music=0 --ini GameSpeed=10 --audio --out /tmp/shell     # about 3 minutes: the movies play in real time
 ```
 
@@ -659,7 +701,7 @@ harness/shell.sh --drive harness/oracle/shell/eden1.txt --script harness/oracle/
 | `--audio`, `--presents`, `--telemetry-every N` | in-game audio.jsonl, present.log and telemetry.jsonl, as in mission runs |
 | `--timeout S` | wall-clock limit (default 600) |
 | `--clean-saves` | run with an empty `OPU/saves` (the SAVE and LOAD dialogs list SGAME*.OP2 from there): the old saves are set aside and put back after the run, and the run's own go to `<out>/saves` (`shell_saveload`); such runs take turns (a lock file beside the folder) |
-| `--window WxH\|max` | the window's size: [GAME_WINDOW] of prefix-harness's OPU/outpost2.ini set for the run (at the desktop's top left, [DESKTOP] the run's desktop; `max`: MAXIMIZED=1) and put back after; such runs take turns. Make `--desktop` at least as large. Wine rounds the window up to a multiple of 32 px, so pick multiples of 32 (`shell_window_*`, notes/findings-shell.md "The shell window's size") |
+| `--window WxH\|max` | the window's size: [GAME_WINDOW] of prefix-harness's OPU/outpost2.ini set for the run (at the desktop's top left, [DESKTOP] the run's desktop; `max`: MAXIMIZED=1) and put back after; such runs take turns. Make `--desktop` at least as large. Wine rounds the window up to a multiple of 32 px, so pick multiples of 32 (`shell_window_*`, op2-rs notes/findings-shell.md "The shell window's size") |
 
 Driver steps, one per line (`#` comments; times in wall-clock seconds):
 
@@ -711,16 +753,16 @@ speed without a device. Each run uses its own desktop name, so parallel runs on 
 
 ## Network games (`netgame.py`, `shell.py --net`)
 
-Two to six copies of the original play a LAN game over 127.0.0.1, each logged from inside (docs/multiplayer.md
+Two to six copies of the original play a LAN game over 127.0.0.1, each logged from inside (op2-rs docs/multiplayer.md
 "Stage 2a"):
 
 ```sh
-cp -a prefix-harness prefix-net && make -C harness install HARNESS_PREFIX=../prefix-net   # once (gitignored)
-OP2_HARNESS_PREFIX=$PWD/prefix-net harness/netgame.py --out /tmp/net --ticks 3000 --turbo \
-  --script0 harness/oracle/net/ml2_08_p0.txt --script1 harness/oracle/net/ml2_08_p1.txt
-OP2_HARNESS_PREFIX=$PWD/prefix-net harness/netgame.py --out /tmp/net3 --players 3 --mission 3P --vehicles 4 \
+cp -a ../prefix-harness ../prefix-net && make install HARNESS_PREFIX=../prefix-net   # once
+OP2_HARNESS_PREFIX=$(realpath ../prefix-net) ./netgame.py --out /tmp/net --ticks 3000 --turbo \
+  --script0 $ORACLE/net/ml2_08_p0.txt --script1 $ORACLE/net/ml2_08_p1.txt
+OP2_HARNESS_PREFIX=$(realpath ../prefix-net) ./netgame.py --out /tmp/net3 --players 3 --mission 3P --vehicles 4 \
   --seed 3003 --eden 1 --ticks 5000 --turbo --script0 ... --script1 ... --script2 ...      # recordings.toml net_ml3_08
-tools/target/debug/op2-missionhost netlog /tmp/net --bundle /tmp/net/desync.tar.gz       # replay and compare
+op2-missionhost netlog /tmp/net --bundle /tmp/net/desync.tar.gz       # op2-rs: replay and compare
 ```
 
 - Shell-mode runs boot the game in their own Xvfb and virtual desktop in **one prefix**: the host creates a TCP/IP
@@ -738,17 +780,17 @@ tools/target/debug/op2-missionhost netlog /tmp/net --bundle /tmp/net/desync.tar.
 - `--speed 10,3`: each copy's Game Speed preference (its private ini's GameSpeed; one value for every copy). Every
   shell-mode game writes a `speed` event to shell.jsonl at its first cycle and whenever GameImpl's speed changes, and
   summary.json's `pacing` gives each copy's speed spans with the ticks per wall second it ran at (from net.jsonl's
-  datagram times; meaningful without `--turbo`). Run `net_speed` (docs/multiplayer.md "Game speed").
+  datagram times; meaningful without `--turbo`). Run `net_speed` (op2-rs docs/multiplayer.md "Game speed").
 - Chat and other input verbs (`key enter`, `type TEXT`, `key enter`) work in the tick scripts as in single player: the
   chat line's ctChat goes through the turns like an order. Every shell-mode game writes each status message to
   shell.jsonl (`msg` events: tick, SoundID, place, text; a chat line is "NAME: text" with SoundID 93), which
   op2-missionhost compares with op2-sim's chat lines per machine. A script with input verbs adds each machine's own
   `view` and `selected` to its telemetry; netgame.py's comparison of the copies leaves those out. Run `net_chat`
-  (docs/multiplayer.md "Chat").
+  (op2-rs docs/multiplayer.md "Chat").
 - `--seed N`: every copy starts from seed N instead of the lobby's (harness OP2H_NET_SEED; the PrepareGame hook in
-  harness.cpp "Network games"), so the game can be recorded again from its arguments: a recordings.toml `netgame` run
-  whose `args` hold `--seed` is recorded by runs.py (`OP2_HARNESS_PREFIX=$PWD/prefix-net python3 -I tools/agent/record
-  --replace NAME`).
+  harness.cpp "Network games"), so the game can be recorded again from its arguments: in op2-rs, a recordings.toml `netgame` run
+  whose `args` hold `--seed` is recorded by its runs.py (`tools/agent/record --replace NAME` with `OP2_HARNESS_PREFIX`
+  set to prefix-net).
 - `shell.py --net` (harness.cpp "Network games") writes `start_info.json` (the lobby's GameStartInfo at the first
   cycle), `packets.jsonl` (every player's command slot as it executes, every 4th tick) and `net.jsonl` (every UDP
   datagram, sent and received), and makes a `--script`'s orders the local player's own commands: their packets go into
@@ -761,7 +803,7 @@ tools/target/debug/op2-missionhost netlog /tmp/net --bundle /tmp/net/desync.tar.
   panes 4 ticks in 256, and every tick from `--draw-from TICK` on (netgame.py passes its `--ticks`, so the closing
   screenshots are current).
 - OUT/summary.json says whether every copy executed the same orders as the host and kept the same telemetry on every
-  tick both have (they quit a few ticks apart in turbo). Recorded games: the `net_*` runs in accuracy/recordings.toml;
+  tick both have (they quit a few ticks apart in turbo). Recorded games: the `net_*` runs in op2-rs accuracy/recordings.toml;
   net_ml2_08 (the lobby's own seed) isn't re-recordable: runs.py checks its files and refuses to record it.
   op2-accuracy's missions check replays every one (metric `net.<run>.exact_ticks`, scoreboard row "Network games of
   the original replayed").
@@ -779,14 +821,14 @@ tools/target/debug/op2-missionhost netlog /tmp/net --bundle /tmp/net/desync.tar.
 
 A bot is a DLL that exports `extern "C" void __cdecl HarnessBotTick(int tick)`. The harness calls it after every game
 cycle, and it can use all of TethysAPI to read state and give orders. `bots/sample_bot.cpp` sends player 0's idle
-tanks at the nearest enemy. Build it with `make -C harness`, then run with `--bot harness/build/sample_bot.dll`.
+tanks at the nearest enemy. Build it with `make`, then run with `--bot build/sample_bot.dll`.
 
 `bots/easter_bot.cpp` reproduces Dan's Dog (`EGG_MODE=dog`, with `test/egg_dandog.json`) and shows the unused Santa
-(`EGG_MODE=santa`, with `test/egg_santa.json`) in the original; see `../notes/findings-easter-eggs.md`.
+(`EGG_MODE=santa`, with `test/egg_santa.json`) in the original; see op2-rs `notes/findings-easter-eggs.md`.
 
 `bots/hitmask_bot.cpp` writes `hitmask.jsonl`: for every pixel round each unit, what a click there selects and what a
-command targets, asked of the game's own point query at the scenario's `hitTicks` (`oracle/input/make_hit.py`,
-`../notes/findings-input.md` "What a click hits").
+command targets, asked of the game's own point query at the scenario's `hitTicks` (`$ORACLE/input/make_hit.py`,
+op2-rs `notes/findings-input.md` "What a click hits").
 
 All orders, from scripts or bots, should use command packets: `Unit::Do*` helpers that build a `CommandPacket`, or
 `PlayerImpl::ProcessCommandPacket`. Avoid TethysAPI's `Unit::DoMove()`. It calls `MapObject::CmdMove()`, the AI/ScGroup
@@ -796,6 +838,29 @@ the Move packet itself (see `IssueMove`).
 Commands like these run immediately on the local player, which is fine in single player. In multiplayer they would
 desync: real player input is queued through the network layer (`GameNetLayer`) and runs on every machine at the same
 command-processing tick. A multiplayer-safe bot would have to queue packets there.
+
+## Comparing with op2-rs
+
+op2-rs plays the same recipes in op2-sim and compares them with a run of the original, field by field and tick by tick.
+Its tools come from a built op2-rs checkout (`cargo build -p op2-inspect -p op2-engine -p op2-missionhost` in its
+`tools/`), with `OP2_DIR` set to the game.
+
+- **A scenario:** `op2-inspect compare --scenario $ORACLE/scenarios/S.json --oracle RUN --out DIR`, where RUN is this
+  harness's output for that scenario. op2-sim loads RUN's `gamedata.json` as its rules (unit stats, terrain speeds),
+  replays the scenario, and prints `MATCH` or each trace field's first divergence, with a trajectory plot
+  (`DIR/plot.png`). Without `--oracle`, op2-inspect runs the harness itself (Linux, inside an op2-rs checkout).
+- **On Windows, in one command:** `python -I windows/compare.py $ORACLE/scenarios/S.json --tick T` runs the original,
+  the compare above, and op2-engine's picture of tick T, and writes `side_by_side.png` (windows/README.md).
+- **A mission** (a win script or a recording): `op2-missionhost play M.dll --script S --compare RUN`, RUN being this
+  harness's run of the same mission and script (`--telemetry-every 10 --trace-every 4` for a fine comparison).
+- **Many random scripts:** `op2-inspect fuzz` ("Differential fuzzing" above).
+- **op2-rs's accuracy suite** (`make accuracy` there) compares every recorded run of the original; its
+  `accuracy/recordings.toml` lists each run's recipe and `accuracy/manifest.json` the hashes anyone with the game can
+  reproduce.
+
+The outputs are plain JSONL and PNG (see "Outputs"), so another reimplementation can be checked the same way: play the
+recipe, write the same fields, compare. outpost2-port does this through its `--harness` mode: `windows/compare_port.py`
+compares it with the original (and op2-rs), and `windows/trace_diff.py` compares any two traces (windows/README.md).
 
 ## How it works
 
@@ -821,7 +886,7 @@ command-processing tick. A multiplayer-safe bot would have to queue packets ther
    name therefore ends the run with exit status 2 instead of hanging.
 
 Startup defaults to single-player missions. Missions whose names start with `t` get the Tutorial type, all others
-Colony. With `--campaign` the start info is a MissionResults with `isCampaign` set (notes/findings-missions.md).
+Colony. With `--campaign` the start info is a MissionResults with `isCampaign` set (op2-rs notes/findings-missions.md).
 With `--players N` (2-6), startup instead reads the mission's real type and maximum from `DescBlock`, initializes N
 human players plus any `DescBlockEx` AI slots, and uses the original multiplayer defaults: high resources, day/night
 on, morale steady on, zero initial vehicles, cheats off, and disasters off for Land Rush / Last One Standing but on
@@ -834,23 +899,25 @@ ticks/s with occasional screenshots, about 100 ticks/s when rendering every tick
 Wine and Xvfb startup add about 3 s per run. Parallel runs work: each gets its own Xvfb and output directory, and they
 share the harness prefix's wineserver.
 
-**Own prefix.** When `prefix-harness/` exists (a plain copy of `prefix/`: `cp -a prefix prefix-harness`), `run.py` and
-`make install` use it instead of `prefix/` (override with `OP2_HARNESS_PREFIX`, an absolute path, or make's
-`HARNESS_PREFIX`; harness/prefixes.py). `make install` and `uninstall` refuse the play prefix (this checkout's or the
-main checkout's `prefix/`), so without `prefix-harness/` they need one of the overrides. Harness runs then
-have their own wineserver, so they can't take focus from, or replace DLLs under, a game being played from `prefix/`.
-Mission DLLs are installed into `prefix/` by missions/Makefile; `run.py` mirrors `OPU/maps` into the harness prefix
-before each run.
+**Own prefix (Linux).** The prefixes sit beside this folder. When `../prefix-harness/` exists (a plain copy of the
+prefix you play from: `cp -a ../prefix ../prefix-harness`), `run.py` and `make install` use it (override with
+`OP2_HARNESS_PREFIX`, an absolute path, or make's `HARNESS_PREFIX`; prefixes.py). `make install` and `uninstall` refuse
+the play prefix `../prefix`, so without `../prefix-harness/` they need one of the overrides. Harness runs then have their
+own wineserver, so they can't take focus from, or replace DLLs under, a game being played from `../prefix`. Mission
+DLLs you install into `../prefix` (`OPU/maps`) are mirrored into the harness prefix before each run.
 
-**One installed harness for every checkout.** `make install` replaces `OPU/Harness/harness.dll` and `zScenario.dll` for
-all checkouts and worktrees. The builds are reproducible (no PE timestamps), and `run.py` warns when the installed
-copy differs from the checkout's `harness/build/` (someone else's version is installed, or yours isn't). Before
-installing, check that no other agent's runs depend on the installed version.
+**Own game copy (Windows).** `windows/run_win.py setup` copies the game to `game/` and installs the harness there; the
+install you play from is never written to (setup refuses to install into it).
+
+**One installed harness per prefix.** `make install` replaces `OPU/Harness/harness.dll` and `zScenario.dll` for every
+run from that prefix, including other checkouts of this folder. The builds are reproducible (no PE timestamps), and
+`run.py` warns when the installed copy differs from this folder's `build/` (another version is installed, or yours
+isn't). Before installing, check that no other runs depend on the installed version.
 
 ## Disabling / removing
 
-- Normal play is unaffected while `OP2H_MISSION` is unset. To unregister the module completely:
-  `make -C harness uninstall`. This removes the ini lines and `OPU/Harness/`.
+- Normal play is unaffected while `OP2H_MISSION` is unset. To unregister the module completely (Linux):
+  `make uninstall`. This removes the ini lines and `OPU/Harness/`. On Windows, delete the `game/` copy.
 - `OPU/outpost2.ini.pre-harness` is a backup of the ini taken before the first install.
 - `make check` puts its test mission in `OPU/maps/HarnessTest/` only while the check runs, so it never appears in the
   in-game lists.
@@ -861,21 +928,22 @@ installing, check that no other agent's runs depend on the installed version.
 - If a mission ends on its own, the final screenshot may show a frame from up to `--screenshot-every` ticks earlier,
   because rendering was skipped. Add `--draw-every 50` (for example) if the last frame matters.
 - Only the game's own message box is intercepted. A `MessageBoxA` from a mission DLL still blocks until `--timeout`,
-  and `timeout_screen.png` shows it. A crash ends the run with a non-zero exit (winedbg is disabled for harness runs).
+  and `timeout_screen.png` shows it. A crash ends the run with a non-zero exit (winedbg is disabled for harness runs
+  on Linux). On Windows, Windows Error Reporting's crash dialog can hold a crashed run until the timeout.
 - Scenario runs are single player only. Spawns are vehicles and buildings of players 0 and 1 via
   `Game::CreateUnit`.
 - Telemetry covers what is cheap to read, and is easy to extend in `WriteTelemetry()`. Research progress, factory
-  timers and cargo amounts need `--eco` (raw object bytes, decoded in `oracle/eco_check.py`); disasters aren't covered.
+  timers and cargo amounts need `--eco` (raw object bytes, decoded in `$ORACLE/eco_check.py`); disasters aren't covered.
 - TethysAPI's `Unit::DoBuild` (its `Location - Location` is a distance, not a difference) and `DoMiningRoute` build
   broken packets, and `DoTransferCargo` takes the AI path, which crashed: the `build`, `route` and `transfercargo`
   verbs send their own packets.
 - The game's code addresses are hard-coded for Outpost2.exe 1.2 as patched by OPU 1.4.x. They are the same addresses
   TethysAPI and OPUPatch use.
 
-## Gotchas and shared Wine setup (moved from CLAUDE.md)
+## Gotchas
 
 - Coordinates: internal tile x = file x + 32 on non-wrapping maps, no offset on 512-wide maps (Coordinates, above;
-  harness/oracle/FINDINGS.md).
+  $ORACLE/FINDINGS.md).
 - In OPU 1.4.1, TethysAPI `Unit::DoMove` on human units crashes; send command packets instead. `ScGroup::RemoveUnit` on
   a non-member crashes, and so does `FindEMPMissileTarget`. Triggers naming an AI player fire immediately. Mission
   callback names are `OnLoad/OnUnload/OnEnd`, not the TethysAPI docs' `OnLoadMission`.
@@ -883,13 +951,12 @@ installing, check that no other agent's runs depend on the installed version.
   ConVec drives to the margin's bottom-right tile and the order ends there with "can't build here", kit kept; if that
   tile is itself a cliff it waits beside it forever (runs eco_build_cliff, input_build_cliff_*). Only structures a
   mission creates (`spawn`, CreateUnit) are relocated: their spiral search skips the right margin column
-  (harness/oracle/FINDINGS.md, notes/findings-sim.md "Spawn relocation").
-- The harness and every oracle run assume GOG 1.2 + **OPU 1.4.1** (op2ext loads the harness). Players need OPU too:
-  op2-rs installs it from OPU's own installer into its data folder (`op2_formats::opu`, docs/game-data.md). Try setup
-  flows with `--config-dir`/`--data-dir` (the worktree checker refuses `XDG_*` overrides).
-- The harness uses its own Wine prefix, `prefix-harness/` (a copy of `prefix/`), so harness runs don't disturb David's
-  game in `prefix/`. Never run harness installs or `wineserver -k` against `prefix/` itself.
-- The Wine prefix is wow64: `WINEARCH=win32` isn't supported. All checkouts share one prefix and wineserver: check
-  `ps` (with the sandbox disabled; inside it you only see the sandbox's own processes, not David playing under
-  gamescope) before `make -C missions stop` or `wineserver -k`, and coordinate `make -C harness install` (it replaces
-  the installed harness DLLs for everyone).
+  ($ORACLE/FINDINGS.md, op2-rs notes/findings-sim.md "Spawn relocation").
+- The harness and every oracle run assume GOG 1.2 + **OPU 1.4.1** (op2ext loads the harness).
+- Linux: the harness uses its own Wine prefix, `../prefix-harness/` (a copy of `../prefix/`), so harness runs don't
+  disturb a game being played from `../prefix/`. Never run harness installs or `wineserver -k` against `../prefix/`.
+- Linux: the Wine prefix is wow64: `WINEARCH=win32` isn't supported. Every run from a prefix shares its wineserver:
+  check `ps` for a game being played before `wineserver -k`, and coordinate `make install` (it replaces the installed
+  harness DLLs for every run from that prefix).
+- Windows: a run's game window opens on the desktop (1032x766 client area: the ini's frame padding is Wine's) and takes
+  focus, and the harness parks the real mouse pointer in the screen's corner for the run (windows/README.md).

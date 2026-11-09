@@ -1,4 +1,4 @@
-// Hit mask probe (harness/oracle/input/hit/make_hit.py, notes/findings-input.md "What a click hits"). At the
+// Hit mask probe ($ORACLE/input/make_hit.py, notes/findings-input.md "What a click hits"). At the
 // scenario's "hitTicks" it asks the game, for every pixel around each unit of the "hitPlayers", which unit a click
 // there would pick, with the object-list query the detail pane's click handler uses: MapObjectManager's point
 // iterator (start 0x437940, next 0x437990, on the manager at 0x54F7F8).
@@ -10,7 +10,7 @@
 // comes from (buildings: +0x2C; vehicles: the chassis animation, +0x80) and, for buildings, the frame the pixel test
 // uses (+0x98, 0x409310).
 //
-// Run: harness/run.sh --scenario S.json --bot harness/build/hitmask_bot.dll --trace-every 0 --out DIR
+// Run: ./run.sh --scenario S.json --bot build/hitmask_bot.dll --trace-every 0 --out DIR
 // Output: $OP2H_OUT\hitmask.jsonl. Coordinates are internal map pixels (file pixel + padding tiles * 32).
 #include <windows.h>
 #include <cctype>

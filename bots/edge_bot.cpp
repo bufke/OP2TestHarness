@@ -3,7 +3,7 @@
 // came back: return values, the objects created (their index, internal pixel position, heading, type code) and the
 // tile words the writes touched. op2-missionhost's tests/edges.rs replays every probe against its own implementation.
 //
-// Run: harness/run.sh --scenario harness/oracle/scenarios/api_edges.json --bot harness/build/edge_bot.dll --out DIR
+// Run: ./run.sh --scenario $ORACLE/scenarios/api_edges.json --bot build/edge_bot.dll --out DIR
 // Output: $OP2H_OUT\edges.jsonl, one probe per line: {"p": name, "a": [args], "r": result, ...}. Coordinates are
 // internal tiles (file x + 32 on cm01.map, 128x128: map columns 32..159, tile array 0..255).
 //

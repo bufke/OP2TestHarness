@@ -4,8 +4,8 @@
 // default; OPUPatch UserInterface.cpp) also hooks 0x43EE62 to force the colour to red, which is why harness frames
 // show it steady. This bot puts the original `and ecx, 0x7C00` back on the first tick, so real-time frames show what
 // the unpatched game draws (the bars stay visible on every damaged unit, as with OPU).
-//   harness/run.sh --scenario harness/oracle/input/hp_blink.json --no-turbo --screenshot-every 1
-//     --bot harness/build/hpblink_bot.dll --out DIR
+//   ./run.sh --scenario $ORACLE/input/hp_blink.json --no-turbo --screenshot-every 1
+//     --bot build/hpblink_bot.dll --out DIR
 #include <windows.h>
 #include <cstring>
 

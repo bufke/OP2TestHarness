@@ -5,7 +5,7 @@
 // verbs (`mouse unit @3`, `key a`, ...): the handler reads the mouse map position the pane stored on WM_MOUSEMOVE
 // (0x57B7B4/0x57B7B8) and the modifiers through GetAsyncKeyState, both of which the harness feeds.
 //
-// Run: harness/run.sh --scenario S.json --script X.txt --bot harness/build/cursor_bot.dll --out DIR
+// Run: ./run.sh --scenario S.json --script X.txt --bot build/cursor_bot.dll --out DIR
 // Log: $OP2H_OUT\cursor.log, one line per tick on which anything logged changes (every tick with CURSOR_ALL=1):
 //   tick cursor-index name state mode-vtable mouse-x mouse-y
 #include <windows.h>

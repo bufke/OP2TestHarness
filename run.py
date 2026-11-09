@@ -2,9 +2,9 @@
 """Run an Outpost 2 mission headless under Xvfb via the Harness op2ext module and collect its output.
 
 Example:
-    harness/run.sh --mission cHello.dll --ticks 3000 --screenshot-every 500 --out /tmp/op2run
+    ./run.sh --mission cHello.dll --ticks 3000 --screenshot-every 500 --out /tmp/op2run
 
-    harness/run.sh --scenario harness/oracle/scenarios/line_fast.json --out /tmp/op2scn
+    ./run.sh --scenario $ORACLE/scenarios/line_fast.json --out /tmp/op2scn
 
 Outputs in --out: telemetry.jsonl, trace.jsonl, gamedata.json, shot_<tick>.png, harness.log, wine.log, summary.json.
 """
@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import prefixes  # noqa: E402
 
 # Harness runs use their own Wine prefix when one exists (prefix-harness/, a copy of prefix/), so they get their own
-# wineserver and can't steal focus from, or swap DLLs under, a game David is playing from prefix/. OP2_HARNESS_PREFIX
+# wineserver and can't steal focus from, or swap DLLs under, a game being played from prefix/. OP2_HARNESS_PREFIX
 # (an absolute path) chooses another (prefixes.py).
 PLAY_PREFIX = ROOT / "prefix"
 try:
@@ -102,11 +102,11 @@ def scenario_mission(map_name: str, techtree: str = "multitek.txt") -> str:
     tree `techtree` (its TechtreeName export, 13 bytes: `edentek.txt` and `ply_tek.txt` fit)."""
     src = OPU_DIR / "Harness" / "zScenario.dll"
     if not src.exists():
-        sys.exit("scenario mission not installed: run `make -C harness install`")
+        sys.exit("scenario mission not installed: run `make install`")
     data = bytearray(src.read_bytes())
     at = data.find(MAPNAME_MARKER) - len(b"cm01.map\0")
     if at < 0 or data[at:at + 9] != b"cm01.map\0":
-        sys.exit("zScenario.dll has no MapName slot; rebuild with `make -C harness install`")
+        sys.exit("zScenario.dll has no MapName slot; rebuild with `make install`")
     name = map_name.encode("ascii")
     if len(name) > 63:
         sys.exit(f"map name too long for the mission's MapName: {map_name}")
@@ -182,14 +182,14 @@ def win_path(p: Path) -> str:
 def check_installed() -> None:
     ini = (OPU_DIR / "outpost2.ini").read_text(errors="replace")
     if not (OPU_DIR / "Harness" / "harness.dll").exists() or "Harness=yes" not in ini:
-        sys.exit("harness module not installed: run `make -C harness install`")
+        sys.exit("harness module not installed: run `make install`")
     # All checkouts share one installed copy. Builds are reproducible (no PE timestamps), so a differing file means
     # another checkout installed its own version, or this checkout's changes aren't installed yet.
     for dll in ("harness.dll", "zScenario.dll"):
-        built = ROOT / "harness" / "build" / dll
+        built = Path(__file__).resolve().parent / "build" / dll
         if built.exists() and built.read_bytes() != (OPU_DIR / "Harness" / dll).read_bytes():
-            print(f"run.py: warning: the installed {dll} differs from this checkout's harness/build/{dll}; the run uses "
-                  "the installed one (another checkout's, or yours needs `make -C harness install`)", file=sys.stderr)
+            print(f"run.py: warning: the installed {dll} differs from this checkout's build/{dll}; the run uses "
+                  "the installed one (another checkout's, or yours needs `make install`)", file=sys.stderr)
 
 
 def start_xvfb(width: int, height: int) -> tuple[subprocess.Popen, str]:
@@ -361,7 +361,7 @@ def main() -> int:
         if scn:
             ap.error("--record plays a mission, not a scenario")
         if PREFIX.resolve() == PLAY_PREFIX.resolve():
-            ap.error(f"--record only runs in the harness's own prefix, and {PREFIX} is David's play prefix "
+            ap.error(f"--record only runs in the harness's own prefix, and {PREFIX} is the play prefix "
                      "(create prefix-harness/, a copy of prefix/, or point OP2_HARNESS_PREFIX at another copy)")
         if not args.fast:
             args.display = args.display or os.environ.get("DISPLAY")
@@ -399,8 +399,8 @@ def main() -> int:
         # The terminal or gamescope going away (SIGTERM, SIGHUP) ends the game too (the `except` around the wait).
         for sig in (signal.SIGTERM, signal.SIGHUP):
             signal.signal(sig, lambda signum, _frame: sys.exit(128 + signum))
-    # The saves (and their recordings) stay put while David plays: shell.py --clean-saves moves the folder aside, under
-    # this lock (harness/test/record_check.py holds it itself and says so).
+    # The saves (and their recordings) stay put while someone plays: shell.py --clean-saves moves the folder aside, under
+    # this lock (test/record_check.py holds it itself and says so).
     if args.record and not os.environ.get("OP2H_SAVES_LOCK_HELD"):
         saves_lock = lock_saves(f"run.py --record --mission {args.mission} --out {out}")
     for old in [*out.glob("shot_*.bmp"), *out.glob("shot_*.png"), out / "telemetry.jsonl", out / "harness.log",

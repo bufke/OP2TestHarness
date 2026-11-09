@@ -228,7 +228,7 @@ void WriteUnit(FILE* f, bool& first, Unit u) {
   first = false;
 }
 
-// Economy telemetry per player: named PlayerImpl fields (offsets in harness/oracle/ECONOMY.md) plus every dword of
+// Economy telemetry per player: named PlayerImpl fields (offsets in $ORACLE/ECONOMY.md) plus every dword of
 // PlayerImpl 0x00..0x1EF as `pi`, so fields can be read by offset.
 void WritePlayerEco(FILE* f, const PlayerImpl* p) {
   const auto& m = p->moraleState_;
@@ -3105,10 +3105,10 @@ void WriteRecording() {
   const std::string path = cfg.out + "\\recording.txt", tmp = path + ".tmp";
   FILE* f = fopen(tmp.c_str(), "w");
   if (!f) { Log("record: WARN cannot write %s", tmp.c_str());  return; }
-  fprintf(f, "# Recorded play of %s (harness/run.sh --record; harness/README.md \"Recording your own play\").\n", cfg.mission.c_str());
+  fprintf(f, "# Recorded play of %s (./run.sh --record; README.md \"Recording your own play\").\n", cfg.mission.c_str());
   fprintf(f, "# seed %d, difficulty %d, campaign %s\n", cfg.seed, cfg.difficulty,
           cfg.campaign.empty() ? "none" : UnixPath(cfg.campaign).c_str());
-  fprintf(f, "# Replay: harness/run.sh --mission %s%s%s --seed %d --difficulty %d --script <this file> --ticks 0 --out <dir>\n",
+  fprintf(f, "# Replay: ./run.sh --mission %s%s%s --seed %d --difficulty %d --script <this file> --ticks 0 --out <dir>\n",
           cfg.mission.c_str(), cfg.campaign.empty() ? "" : " --campaign ", cfg.campaign.empty() ? "" : UnixPath(cfg.campaign).c_str(),
           cfg.seed, cfg.difficulty);
   fputs("# `T packet TYPE HEX`: the command packet the player's UI sent, run in the cycle that starts at tick T. After it,\n"
@@ -3826,7 +3826,7 @@ void InstallRecordHooks() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Network games (shell mode with OP2H_NET=1; harness/netgame.py plays a LAN game between two copies of the game and
+// Network games (shell mode with OP2H_NET=1; netgame.py plays a LAN game between two copies of the game and
 // docs/multiplayer.md "Stage 2a" says what was measured). Each copy logs, in its output folder:
 //   start_info.json  at the game's first cycle: the GameStartInfo the lobby agreed on (seed, map DLL, flags, slots),
 //                    raw and decoded, the local player and the turn constants (CPPI, its log2, the command delay)
@@ -4297,7 +4297,7 @@ ibool __fastcall StartMissionHook(GameImpl* self, void*) {
 
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Shell mode (OP2H_SHELL=1, `harness/shell.py`): the game boots normally (intro video, title, menus, briefings) to
+// Shell mode (OP2H_SHELL=1, `shell.py`): the game boots normally (intro video, title, menus, briefings) to
 // measure the original's startup flow. The harness only watches and logs; shell.py drives the game with real X input
 // and takes X screenshots of the whole (virtual) desktop. Events go to shell.jsonl, one JSON object per line, with
 // `ms` since InitMod:

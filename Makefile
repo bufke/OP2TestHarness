@@ -1,16 +1,17 @@
-# Builds the harness op2ext module and installs it into the game's OPU folder.
+# OP2TestHarness, Linux/MinGW build: builds the op2ext module and installs it into the Wine prefix's OPU folder.
+# (Windows: windows/build.bat and windows/run_win.py, windows/README.md.)
 #   make            build build/harness.dll
 #   make install    copy it to OPU/Harness/ and register it (opt-in at runtime via OP2H_MISSION)
 #   make uninstall  remove it and its ini registration
-#   make check      end-to-end self-test (needs Xvfb and Wine; run outside the Claude sandbox)
+#   make check      end-to-end self-test (needs Xvfb and Wine)
 # Also builds the sample bot (build/sample_bot.dll), the easter egg bot (build/easter_bot.dll, see bots/easter_bot.cpp), the self-test mission (build/zHarnessEnd.dll) and the scenario
 # mission used by `run.sh --scenario` (build/zScenario.dll, installed next to harness.dll, not in OPU/maps).
 
 CXX      := i686-w64-mingw32-g++
-# Install into the prefix run.py runs in (harness/prefixes.py): OP2_HARNESS_PREFIX when set (an absolute path: run.py
-# would read a relative one from the current directory, this file from harness/), else the harness's own prefix when it
-# exists. prefix-harness is shared by every checkout's harness runs: an install replaces their DLLs. Never the play
-# prefix (David's prefix/, this checkout's or the main checkout's): install and uninstall refuse it.
+# Install into the prefix run.py runs in (prefixes.py): OP2_HARNESS_PREFIX when set (an absolute path: run.py would
+# read a relative one from the current directory, this file from this folder), else ../prefix-harness (a copy of your
+# Wine prefix beside this folder). ../prefix is taken to be the prefix you play from: install and uninstall refuse it,
+# so without ../prefix-harness set OP2_HARNESS_PREFIX. Every run from the harness prefix shares its installed DLLs.
 ifneq ($(OP2_HARNESS_PREFIX),)
 ifeq ($(filter /%,$(OP2_HARNESS_PREFIX)),)
 $(error OP2_HARNESS_PREFIX must be an absolute path, not $(OP2_HARNESS_PREFIX))
@@ -21,11 +22,11 @@ PLAY_PREFIXES := $(realpath ../prefix $(shell git rev-parse --path-format=absolu
 GAME_DIR := $(HARNESS_PREFIX)/drive_c/GOG Games/Outpost 2
 OPU_DIR  := $(GAME_DIR)/OPU
 
-# Same TethysAPI/MinGW workarounds as missions/Makefile.
+# TethysAPI/MinGW workarounds. TethysAPI 141fd47 is read from vendor/include/Tethys (or ../vendor/include).
 CXXFLAGS := -std=c++17 -O2 -Wall -Wno-return-type -Wno-array-bounds \
             -include src/mingw_compat.h \
             '-DBEGIN_PACKED=_Pragma("pack(push, 1)")' '-DEND_PACKED=_Pragma("pack(pop)")' \
-            -isystem ../vendor/include
+            -isystem vendor/include -isystem ../vendor/include
 LDFLAGS  := -shared -static -static-libgcc -static-libstdc++ -s -Wl,--kill-at -Wl,--no-insert-timestamp -lgdi32
 
 all: build/harness.dll build/sample_bot.dll build/easter_bot.dll build/cursor_bot.dll build/hpblink_bot.dll build/hitmask_bot.dll build/los_bot.dll build/edge_bot.dll build/zHarnessEnd.dll build/zScenario.dll
@@ -46,9 +47,9 @@ build/zScenario.dll: test/Scenario.cpp src/mingw_compat.h
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
 
-# Refuses the play prefix (realpath: through the worktrees' links).
+# Refuses the play prefix (realpath: through any links).
 prefix-guard:
-	@$(if $(filter $(realpath $(HARNESS_PREFIX)),$(PLAY_PREFIXES)),echo "harness: $(HARNESS_PREFIX) is the play prefix (David's): \
+	@$(if $(filter $(realpath $(HARNESS_PREFIX)),$(PLAY_PREFIXES)),echo "harness: $(HARNESS_PREFIX) is the play prefix: \
 	  create prefix-harness/ or set OP2_HARNESS_PREFIX to a copy of your own" >&2; exit 1,true)
 
 install: all prefix-guard
