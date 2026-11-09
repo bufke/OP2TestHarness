@@ -48,4 +48,5 @@ as inside op2-rs).
 op2-rs issue #34 lists what its 1,000+ recorded runs need to stay the same: the `OP2H_*` variables and `run.sh` options,
 the script verbs and their meaning, unit names (`$NAME`, `as NAME`, `$TYPE@x,y`), the output fields (telemetry, trace,
 `start_info.json`, audio log, screenshots) and the scenario JSON format. Changing any of them needs a version bump and a
-changelog note; adding verbs and options is fine.
+changelog note; adding verbs and options is fine. CHANGELOG.md "Versioning rules" says how each kind of change moves
+the version.

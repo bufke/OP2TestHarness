@@ -10,6 +10,11 @@ It was written for [op2-rs](https://gitlab.com/bufke/op2-rs), a reimplementation
 recipes in its own simulation and compares every field, tick by tick ("Comparing with op2-rs"). It works for any
 reimplementation or tool that can read the outputs. ARCHITECTURE.md has the design, PROVENANCE.md the origin.
 
+**Version:** 1.0.0 (`VERSION`). What other projects' recordings rely on (options, script verbs, unit names, output
+fields, the scenario format) changes only with a version bump; CHANGELOG.md has the rules and the history.
+
+**Licence:** GPL-3.0 (LICENSE), as op2-rs.
+
 **Windows** (native, no Wine; windows/README.md):
 
 ```bat

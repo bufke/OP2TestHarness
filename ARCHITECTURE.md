@@ -44,6 +44,7 @@ OP2TestHarness/
 ├── README.md              the full manual: options, script verbs, outputs, recording, checkpoints, gotchas
 ├── PROVENANCE.md          where it came from; what still follows op2-rs's layout
 ├── LICENSE                GPL-3.0 (op2-rs's)
+├── VERSION, CHANGELOG.md  the version and what changed; the contract and how changes to it move the version
 │
 │   ignored (.gitignore), never committed
 ├── game/                  the private copy of the game run_win.py runs (game files)
