@@ -118,6 +118,8 @@ An empty mission with a 64-byte `MapName` slot after a marker. The launcher writ
 `OPU/Harness/zs_<map>.dll`, because the game reads `MapName` from the DLL file. The harness script does the rest.
 
 ### Launchers
+- **windows/build.bat**: the release's ten DLLs with MSVC (x86, `/MT`, `/Brepro`: reproducible), the Makefile's `all`.
+- **windows/package.py**: the release zip (repository layout, DLLs in `build/win`, `SHA256SUMS`), reproducible.
 - **windows/run_win.py**: `setup` copies the game (robocopy, no movies or OPU backups) to `game/`, installs the DLLs
   and registers the module there. `run` builds the script with run.py's `scenario_script`, sets `OP2H_*`, starts
   `Outpost2.exe /OPU`, kills it on timeout (`taskkill /T`), converts BMPs through System.Drawing, writes summary.json.

@@ -4,8 +4,14 @@
       Copies the game (without movies and OPU backups) to a private folder, installs build\\win\\harness.dll and
       zScenario.dll into its OPU\\Harness and registers the module in its OPU\\outpost2.ini. Run again after a rebuild.
   python -I windows/run_win.py run SCENARIO.json OUT_DIR [--game DIR] [--shot-every N] [--no-turbo] [--timeout S]
+                                [--bot DLL]
       Writes the harness's outputs (trace.jsonl, telemetry.jsonl, gamedata.json, harness.log, shot_*.png,
       summary.json) to OUT_DIR. Compare with op2-rs: op2-inspect compare --scenario SCENARIO.json --oracle OUT_DIR
+      --bot runs a bot DLL (HarnessBotTick, e.g. build\\win\\sample_bot.dll) every tick.
+  python -I windows/run_win.py selftest [--game DIR]
+      The Makefile's `make check` on Windows: plays the self-test mission (build\\win\\zHarnessEnd.dll, won at tick
+      800) and requires MissionAccomplished with 4 screenshots, then plays it again with build\\win\\sample_bot.dll and
+      requires the bot to load. The mission is in OPU\\maps\\HarnessTest only while the test runs.
 
 The private copy (default: game\\ next to this folder's parent) keeps harness runs from touching the player's install
 and settings. The scenario translation is run.py's, imported unchanged.
@@ -85,28 +91,88 @@ def run_scenario(a) -> int:
     script = out / "scenario_script.txt"
     script.write_text(run.scenario_script(scn))
     (out / "scenario.json").write_text(json.dumps(dict(scn, seed=seed, ticks=ticks), indent=1) + "\n")
-    env = dict(os.environ, OP2H_MISSION=mission, OP2H_OUT=str(out), OP2H_SCRIPT=str(script),
+    env = dict(OP2H_MISSION=mission, OP2H_OUT=str(out), OP2H_SCRIPT=str(script),
                OP2H_TICKS=str(ticks), OP2H_SEED=str(seed), OP2H_DIFFICULTY=str(scn.get("difficulty", 1)),
                OP2H_TRACE_EVERY=str(scn.get("traceEvery", 1)), OP2H_TELEM_EVERY=str(scn.get("telemetryEvery", 100)),
                OP2H_TRACE_MAP="1" if scn.get("traceMap") else "0", OP2H_ECO="1" if scn.get("eco") else "0",
                OP2H_AUDIO="1" if scn.get("audio") else "0", OP2H_SHOT_EVERY=str(a.shot_every),
                OP2H_TURBO="0" if a.no_turbo else "1", OP2H_SPEED="10", OP2H_WIDTH="1024", OP2H_HEIGHT="768")
+    if getattr(a, "bot", None):
+        env["OP2H_BOT"] = str(a.bot.resolve())
+    summary = launch(env, out, a.timeout)
+    summary = {"scenario": str(a.scenario), "mission": mission, **summary}
+    (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print(json.dumps(summary))
+    return 0 if summary["ok"] else 1
+
+
+def launch(harness_env: dict, out: Path, timeout: float) -> dict:
+    """Starts Outpost2.exe /OPU in the game copy with these OP2H_* settings and waits (killing it after `timeout` s).
+    Returns the run's summary: exit code, timeout, wall time, screenshots (converted to PNG), how the game ended (the
+    last telemetry line's `end`), suppressed dialogs, the bot line, the quit line and `ok`."""
     start = time.monotonic()
-    game = subprocess.Popen([str(run.GAME_DIR / "Outpost2.exe"), "/OPU"], cwd=run.GAME_DIR, env=env)
+    game = subprocess.Popen([str(run.GAME_DIR / "Outpost2.exe"), "/OPU"], cwd=run.GAME_DIR,
+                            env=dict(os.environ, **harness_env))
     try:
-        code, timed_out = game.wait(timeout=a.timeout), False
+        code, timed_out = game.wait(timeout=timeout), False
     except subprocess.TimeoutExpired:
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(game.pid)], capture_output=True)
         code, timed_out = game.wait(), True
     hlog = (out / "harness.log").read_text(errors="replace") if (out / "harness.log").exists() else ""
     quit_line = next((l for l in hlog.splitlines() if l.startswith("quit at tick")), None)
-    summary = {"scenario": str(a.scenario), "mission": mission, "exit_code": code, "timed_out": timed_out,
-               "wall_seconds": round(time.monotonic() - start, 1), "screenshots": to_png(out),
-               "dialogs": [l[len("dialog: "):] for l in hlog.splitlines() if l.startswith("dialog: ")],
-               "quit": quit_line, "ok": bool(quit_line) and not timed_out and code == 0}
-    (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    print(json.dumps(summary))
-    return 0 if summary["ok"] else 1
+    end = None
+    telem = out / "telemetry.jsonl"
+    for line in reversed(telem.read_text(errors="replace").splitlines() if telem.exists() else []):
+        try:
+            end = json.loads(line)["end"]
+            break
+        except (json.JSONDecodeError, KeyError):
+            continue
+    return {"exit_code": code, "timed_out": timed_out, "wall_seconds": round(time.monotonic() - start, 1),
+            "screenshots": to_png(out), "game_term_reason": run.END_REASONS.get(end, end),
+            "dialogs": [l[len("dialog: "):] for l in hlog.splitlines() if l.startswith("dialog: ")],
+            "bot": next((l for l in hlog.splitlines() if l.startswith("bot: ")), None),
+            "quit": quit_line, "ok": bool(quit_line) and not timed_out and code == 0}
+
+
+def selftest() -> int:
+    """`make check` on Windows: the self-test mission ends MissionAccomplished at tick 800, with and without a bot."""
+    for f in ("harness.dll", "zScenario.dll"):
+        if not (run.OPU_DIR / "Harness" / f).exists():
+            sys.exit(f"selftest: no {f} in {run.GAME_DIR}: run `run_win.py setup` first")
+    built = ROOT / "build" / "win"
+    mission, bot = built / "zHarnessEnd.dll", built / "sample_bot.dll"
+    for f in (mission, bot):
+        if not f.exists():
+            sys.exit(f"selftest: {f} missing: run windows\\build.bat first")
+    maps = run.OPU_DIR / "maps" / "HarnessTest"
+    maps.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(mission, maps / mission.name)
+    failures = []
+    try:
+        for name, extra in (("plain", {}), ("bot", {"OP2H_BOT": str(bot)})):
+            out = ROOT / "build" / "selftest" / name
+            out.mkdir(parents=True, exist_ok=True)
+            for old in [*out.glob("shot_*"), *(out / n for n in ("telemetry.jsonl", "harness.log", "summary.json"))]:
+                old.unlink(missing_ok=True)
+            env = dict(OP2H_MISSION="zHarnessEnd.dll", OP2H_OUT=str(out), OP2H_TICKS="3000", OP2H_SHOT_EVERY="400",
+                       OP2H_TELEM_EVERY="100", OP2H_TURBO="1", OP2H_WIDTH="1024", OP2H_HEIGHT="768", **extra)
+            s = launch(env, out, 120)
+            (out / "summary.json").write_text(json.dumps(s, indent=2) + "\n")
+            problems = []
+            if s["game_term_reason"] != "MissionAccomplished":
+                problems.append(f"ended {s['game_term_reason']}")
+            if s["screenshots"] != 4:
+                problems.append(f"{s['screenshots']} screenshots, not 4")
+            if not s["ok"]:
+                problems.append(f"exit {s['exit_code']}, timed out {s['timed_out']}, quit line {s['quit']!r}")
+            if extra and not (s["bot"] or "").endswith("-> ok"):
+                problems.append(f"bot line {s['bot']!r}")
+            print(f"selftest {name}: " + ("OK" if not problems else "FAILED: " + "; ".join(problems)) + f" ({out})")
+            failures += [f"{name}: {p}" for p in problems]
+    finally:
+        shutil.rmtree(maps, ignore_errors=True)
+    return 1 if failures else 0
 
 
 def main() -> int:
@@ -122,11 +188,16 @@ def main() -> int:
     r.add_argument("--shot-every", type=int, default=0, metavar="N", help="screenshot every N ticks (0 = off)")
     r.add_argument("--no-turbo", action="store_true", help="real time at full game speed, to watch it")
     r.add_argument("--timeout", type=float, default=600, help="wall-clock seconds before the game is killed")
+    r.add_argument("--bot", type=Path, help="bot DLL exporting HarnessBotTick(int tick), called every tick")
+    c = sub.add_parser("selftest", help="make check on Windows: the self-test mission, with and without a bot")
+    c.add_argument("--game", type=Path, default=DEFAULT_GAME, help="the private copy")
     a = ap.parse_args()
     use_game(a.game.resolve())
     if a.cmd == "setup":
         setup(a.source.resolve(), a.game.resolve())
         return 0
+    if a.cmd == "selftest":
+        return selftest()
     return run_scenario(a)
 
 

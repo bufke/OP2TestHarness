@@ -41,8 +41,10 @@ only in comments and in the command line written into a recording's header.
 **History:** op2-rs's `harness/` history, filtered with `git filter-repo` and without `oracle/` (PROVENANCE.md).
 
 **Added**
-- `windows/`: an MSVC build of `harness.dll` and `zScenario.dll` (`build.bat`, `msvc_compat.h`); a native Windows
-  launcher that plays scenarios in a private copy of the game, without Wine (`run_win.py`); the original vs op2-rs on one
+- `windows/`: an MSVC build of every DLL a release ships, reproducible with `/Brepro` (`build.bat`, `msvc_compat.h`:
+  `harness.dll`, `zScenario.dll`, `zHarnessEnd.dll` and the seven bots); a native Windows launcher that plays scenarios
+  in a private copy of the game, without Wine, with an optional bot (`run_win.py`), and its `selftest`, the Makefile's
+  `make check` on Windows; the release zip with `SHA256SUMS` (`package.py`); the original vs op2-rs on one
   scenario, with op2-sim's tick-by-tick compare and both pictures side by side (`compare.py`); the original vs
   outpost2-port (`run_port.py`, `trace_diff.py`, `compare_port.py`).
 - `ARCHITECTURE.md`, `PROVENANCE.md`, this changelog, `VERSION`, `.gitignore`.
@@ -56,5 +58,6 @@ only in comments and in the command line written into a recording's header.
   folder's `build/`.
 
 **Verified** (Windows 10, MSVC build): line_fast, cmb_duel_laser and cmb_duel_rail_gun match op2-sim on every trace
-field of every tick, and two runs of a scenario give byte-identical traces. Not yet verified: the MinGW build since the
+field of every tick, and two runs of a scenario give byte-identical traces. `run_win.py selftest` passes (the self-test
+mission ends MissionAccomplished, alone and with `sample_bot.dll`); two builds give byte-identical DLLs. Not yet verified: the MinGW build since the
 move, and op2-rs's full `make accuracy` against this version.

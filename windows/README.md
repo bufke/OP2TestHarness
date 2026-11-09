@@ -5,9 +5,10 @@ that needs; the rest of OP2TestHarness (src/, test/, run.py's scenario translati
 
 | File | What |
 |---|---|
-| `build.bat` | Builds `build\win\harness.dll` and `build\win\zScenario.dll` (32-bit) with MSVC |
+| `build.bat` | Builds every DLL a release ships into `build\win` (32-bit, MSVC, reproducible): `harness.dll`, `zScenario.dll`, `zHarnessEnd.dll` and the seven bots |
 | `msvc_compat.h` | Force-included by `build.bat`: C++20, `NOMINMAX`, `__builtin_return_address` -> `_ReturnAddress`, `#undef small` (a Windows SDK macro) |
-| `run_win.py` | `setup` makes a private copy of the game with the harness installed; `run` plays a scenario in it |
+| `run_win.py` | `setup` makes a private copy of the game with the harness installed; `run` plays a scenario in it (`--bot` adds a bot); `selftest` is `make check` on Windows |
+| `package.py` | packs a release: `build\release\OP2TestHarness-<VERSION>.zip` with the DLLs, the scripts, the sources and `SHA256SUMS` |
 | `compare.py` | the original vs op2-rs on one scenario: op2-sim's tick-by-tick compare, both pictures side by side |
 | `run_port.py` | `install` copies a built outpost2-port into the game copy; `run` plays a scenario in its `--harness` mode |
 | `trace_diff.py` | compares two `trace.jsonl` files field by field, tick by tick (MATCH, or each field's first difference) |
@@ -27,6 +28,7 @@ The scenarios are op2-rs's, in its `harness\oracle` folder (README.md "Scenarios
 ```
 windows\build.bat
 python -I windows\run_win.py setup --from "C:\Users\Desktop\Outpost 2"
+python -I windows\run_win.py selftest
 python -I windows\run_win.py run %ORACLE%\scenarios\line_fast.json build\runs\line_fast --shot-every 350
 ```
 `setup` copies the game to `game\` (no .avi movies, no OPU backups or logs), installs the two DLLs into
@@ -37,6 +39,21 @@ To compare with op2-rs's simulation (op2-rs built, `OP2_DIR` set to the game):
 ```
 op2-inspect compare --scenario %ORACLE%\scenarios\line_fast.json --oracle build\runs\line_fast --out build\cmp\line_fast
 ```
+
+`selftest` is the Makefile's `make check` on Windows: it plays the self-test mission (`zHarnessEnd.dll`, won at tick
+800), which must end MissionAccomplished with 4 screenshots, then plays it again with `sample_bot.dll`, which must load.
+The mission sits in `game\OPU\maps\HarnessTest` only while the test runs.
+
+## A release
+```
+windows\build.bat
+python -I windows\run_win.py selftest
+python -I windows\package.py
+```
+`build.bat` links with `/Brepro`, so the same sources give byte-identical DLLs. `package.py` refuses uncommitted
+changes, and writes `build\release\OP2TestHarness-<VERSION>.zip` and its `.sha256`. The zip holds one folder laid out
+like the repository (the DLLs in `build\win`, so the scripts work from it as they are), every file git tracks, and
+`SHA256SUMS` for every file in it. Entries are sorted and dated with the commit's time, so the zip is reproducible too.
 
 ## The original vs op2-rs in one command
 ```
