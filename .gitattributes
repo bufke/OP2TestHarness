@@ -1,0 +1,5 @@
+# Line endings: LF in the repository; batch files are CRLF for cmd, shell scripts LF for bash, on every platform.
+* text=auto
+*.bat text eol=crlf
+*.sh text eol=lf
+*.dll binary

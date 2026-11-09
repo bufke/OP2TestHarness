@@ -42,7 +42,10 @@ def main() -> int:
     for rel in git("ls-files", "-z").split("\0"):
         if rel:
             # git's stored form (LF), not the Windows checkout's CRLF, so the zip matches on every platform.
-            files[rel] = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=ROOT, capture_output=True, check=True).stdout
+            data = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=ROOT, capture_output=True, check=True).stdout
+            if rel.endswith(".bat"):  # cmd needs CRLF (.gitattributes checks them out so too).
+                data = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+            files[rel] = data
     for dll in DLLS:
         p = ROOT / "build" / "win" / dll
         if not p.exists():
