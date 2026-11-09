@@ -10,9 +10,17 @@ rem /Brepro makes builds reproducible (no timestamps): the same sources give byt
 rem Each DLL's compiler output is in build\win\<name>.log.
 setlocal
 set ROOT=%~dp0..
-set VCVARS=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars32.bat
 if not exist "%ROOT%\vendor\include\Tethys\API\API.h" (echo build: TethysAPI missing at vendor\include\Tethys & exit /b 1)
-if not exist "%VCVARS%" (echo build: no Visual Studio 2022 Build Tools at "%VCVARS%" & exit /b 1)
+rem Visual Studio with the C++ tools, found by vswhere (Build Tools, Community, Enterprise...); VCVARS overrides it.
+if defined VCVARS goto have_vcvars
+set VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe
+if not exist "%VSWHERE%" (echo build: no vswhere: install Visual Studio 2022 Build Tools, C++ workload & exit /b 1)
+for /f "usebackq delims=" %%I in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VSPATH=%%I
+if not defined VSPATH (echo build: no Visual Studio with the C++ tools found & exit /b 1)
+set VCVARS=%VSPATH%\VC\Auxiliary\Build\vcvars32.bat
+:have_vcvars
+if not exist "%VCVARS%" (echo build: no "%VCVARS%" & exit /b 1)
+echo build: using %VCVARS%
 call "%VCVARS%" >nul 2>&1
 if not exist "%ROOT%\build\win\obj" mkdir "%ROOT%\build\win\obj"
 cd /d "%ROOT%\build\win"

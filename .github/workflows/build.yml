@@ -1,0 +1,127 @@
+# Builds every DLL a release ships with both toolchains, checks each build is reproducible, and on a version tag
+# (vX.Y.Z, matching VERSION) publishes a GitHub release with both packages. Nothing here runs the game: the game's files
+# can't be in CI, so the self-test (windows\run_win.py selftest, make check) stays a local step before tagging.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TETHYSAPI_COMMIT: 141fd47ef75c9498136e538f37aaf0d0ab87be4f
+
+jobs:
+  python:
+    name: Python scripts parse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Parse every Python file
+        run: |
+          python -I - <<'EOF'
+          import ast, pathlib, sys
+          files = sorted(p for p in pathlib.Path(".").rglob("*.py") if ".git" not in p.parts)
+          for p in files:
+              ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
+          print(f"{len(files)} Python files parse")
+          EOF
+
+  mingw:
+    name: Linux, MinGW (make)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MinGW
+        run: sudo apt-get update -q && sudo apt-get install -y -q g++-mingw-w64-i686 make
+      - name: Fetch TethysAPI
+        run: |
+          git clone -q https://github.com/OutpostUniverse/TethysAPI.git vendor/include/Tethys
+          git -C vendor/include/Tethys checkout -q "$TETHYSAPI_COMMIT"
+      - name: Build
+        run: |
+          i686-w64-mingw32-g++ --version | head -1
+          make all
+          sha256sum build/*.dll | tee "$RUNNER_TEMP/first.sha256"
+      - name: Reproducible (a second clean build is byte-identical)
+        run: |
+          make clean && make all
+          sha256sum build/*.dll > "$RUNNER_TEMP/second.sha256"
+          diff "$RUNNER_TEMP/first.sha256" "$RUNNER_TEMP/second.sha256"
+      - name: Package
+        run: python3 -I windows/package.py --toolchain mingw
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-mingw
+          path: build/release/
+          if-no-files-found: error
+
+  msvc:
+    name: Windows, MSVC (build.bat)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch TethysAPI
+        shell: bash
+        run: |
+          git clone -q https://github.com/OutpostUniverse/TethysAPI.git vendor/include/Tethys
+          git -C vendor/include/Tethys checkout -q "$TETHYSAPI_COMMIT"
+      - name: Build
+        shell: cmd
+        run: |
+          call windows\build.bat || (type build\win\*.log & exit /b 1)
+      - name: Reproducible (a second clean build is byte-identical)
+        shell: bash
+        run: |
+          sha256sum build/win/*.dll | tee "$RUNNER_TEMP/first.sha256"
+          rm build/win/*.dll
+          cmd //c 'windows\build.bat'
+          sha256sum build/win/*.dll > "$RUNNER_TEMP/second.sha256"
+          diff "$RUNNER_TEMP/first.sha256" "$RUNNER_TEMP/second.sha256"
+      - name: Package
+        run: python -I windows/package.py --toolchain msvc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-msvc
+          path: build/release/
+          if-no-files-found: error
+
+  release:
+    name: GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [python, mingw, msvc]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag matches VERSION
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          test "${GITHUB_REF_NAME}" = "v${version}" || { echo "tag ${GITHUB_REF_NAME} but VERSION is ${version}"; exit 1; }
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v v="## ${VERSION}" 'index($0, v) == 1 {on = 1; next} on && /^## / {exit} on' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "no '## ${VERSION}' section in CHANGELOG.md"; exit 1; }
+          cat notes.md
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          gh release create "${GITHUB_REF_NAME}" dist/*.zip dist/*.sha256 \
+            --title "OP2TestHarness ${VERSION}" --notes-file notes.md --verify-tag

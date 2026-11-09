@@ -1,12 +1,13 @@
-"""Packs a release: build/release/OP2TestHarness-<VERSION>.zip and its .sha256.
+"""Packs a release: build/release/OP2TestHarness-<VERSION>-<toolchain>.zip and its .sha256.
 
-  python -I windows/package.py [--allow-dirty]
+  python -I windows/package.py [--toolchain msvc|mingw] [--allow-dirty]
 
-Run windows\\build.bat first. The zip holds one folder, OP2TestHarness-<VERSION>/, laid out like the repository so the
-scripts work from it as they are:
-  build/win/*.dll   harness.dll, zScenario.dll, zHarnessEnd.dll and the seven bots (built by windows\\build.bat)
+Build first: `windows\\build.bat` (msvc, the default: DLLs in build/win) or `make` (mingw: DLLs in build/). The zip
+holds one folder, OP2TestHarness-<VERSION>/, laid out like the repository so the scripts work from it as they are:
+  build/win/*.dll   (msvc) or build/*.dll (mingw): harness.dll, zScenario.dll, zHarnessEnd.dll and the seven bots,
+                    where windows/run_win.py (msvc) or `make install` (mingw) looks for them
   everything git tracks: the Python driver (run.py, shell.py, netgame.py, prefixes.py, tools/, windows/), the net/
-  scripts, the self-tests, the sources and the docs
+  scripts, the self-tests, the sources and the docs (as committed: LF, batch files CRLF, git's executable bits)
   SHA256SUMS        the SHA-256 of every other file in the folder (`sha256sum -c SHA256SUMS` checks them)
 The zip is reproducible: entries are sorted and dated with the commit's time, so the same commit and the same DLLs give
 the same zip. It refuses a working tree with uncommitted changes (they wouldn't match the commit) unless --allow-dirty.
@@ -22,6 +23,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DLLS = ["harness.dll", "zScenario.dll", "zHarnessEnd.dll",
         *(f"{b}_bot.dll" for b in ("sample", "easter", "cursor", "hpblink", "hitmask", "los", "edge"))]
+DLL_DIRS = {"msvc": "build/win", "mingw": "build"}  # where each toolchain's build puts them
+BUILD_HOW = {"msvc": "windows\\build.bat", "mingw": "make"}
 
 
 def git(*args: str) -> str:
@@ -30,6 +33,7 @@ def git(*args: str) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--toolchain", choices=sorted(DLL_DIRS), default="msvc", help="which build to pack (default msvc)")
     ap.add_argument("--allow-dirty", action="store_true", help="pack even with uncommitted changes")
     a = ap.parse_args()
     version = (ROOT / "VERSION").read_text().strip()
@@ -39,35 +43,40 @@ def main() -> int:
     stamp = time.gmtime(int(git("log", "-1", "--format=%ct").strip()))[:6]
 
     files = {}  # path inside the folder -> bytes
-    for rel in git("ls-files", "-z").split("\0"):
-        if rel:
-            # git's stored form (LF), not the Windows checkout's CRLF, so the zip matches on every platform.
-            data = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=ROOT, capture_output=True, check=True).stdout
-            if rel.endswith(".bat"):  # cmd needs CRLF (.gitattributes checks them out so too).
-                data = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
-            files[rel] = data
+    executable = set()
+    for entry in git("ls-files", "-s", "-z").split("\0"):
+        if not entry:
+            continue
+        mode, rel = entry.split(" ", 1)[0], entry.split("\t", 1)[1]
+        if mode == "100755":
+            executable.add(rel)
+        # git's stored form (LF), not the Windows checkout's CRLF, so the zip matches on every platform.
+        data = subprocess.run(["git", "show", f"HEAD:{rel}"], cwd=ROOT, capture_output=True, check=True).stdout
+        if rel.endswith(".bat"):  # cmd needs CRLF (.gitattributes checks them out so too).
+            data = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+        files[rel] = data
+    dll_dir = DLL_DIRS[a.toolchain]
     for dll in DLLS:
-        p = ROOT / "build" / "win" / dll
+        p = ROOT / dll_dir / dll
         if not p.exists():
-            sys.exit(f"package: {p} missing: run windows\\build.bat first")
-        files[f"build/win/{dll}"] = p.read_bytes()
+            sys.exit(f"package: {p} missing: run {BUILD_HOW[a.toolchain]} first")
+        files[f"{dll_dir}/{dll}"] = p.read_bytes()
     sums = "".join(f"{hashlib.sha256(files[k]).hexdigest()}  {k}\n" for k in sorted(files))
     files["SHA256SUMS"] = sums.encode()
 
-    name = f"OP2TestHarness-{version}"
+    folder = f"OP2TestHarness-{version}"
     out = ROOT / "build" / "release"
     out.mkdir(parents=True, exist_ok=True)
-    zpath = out / f"{name}.zip"
-    executable = {"run.sh", "shell.sh"}
+    zpath = out / f"{folder}-{a.toolchain}.zip"
     with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         for rel in sorted(files):
-            info = zipfile.ZipInfo(f"{name}/{rel}", date_time=stamp)
+            info = zipfile.ZipInfo(f"{folder}/{rel}", date_time=stamp)
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = (0o100755 if rel in executable else 0o100644) << 16
             z.writestr(info, files[rel])
     digest = hashlib.sha256(zpath.read_bytes()).hexdigest()
-    (out / f"{name}.zip.sha256").write_text(f"{digest}  {zpath.name}\n")
-    print(f"package: {zpath} ({len(files)} files, commit {commit})\n  sha256 {digest}")
+    (out / f"{zpath.name}.sha256").write_text(f"{digest}  {zpath.name}\n")
+    print(f"package: {zpath} ({len(files)} files, {a.toolchain} build, commit {commit})\n  sha256 {digest}")
     return 0
 
 
