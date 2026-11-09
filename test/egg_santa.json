@@ -1,0 +1,2 @@
+{"map": "cm01.map", "seed": 1, "ticks": 400, "spawn": [], "orders": [],
+ "note": "Santa: run with EGG_MODE=santa and --bot harness/build/easter_bot.dll; the bot starts the exe's unused SantaWalking action on a marker (notes/findings-easter-eggs.md)"}

@@ -1,0 +1,19 @@
+# Start e01, then prove the script-done gate follows first_cycle and tick-0 setup.
+wait mci cmd=open file=~I.AVI timeout=40
+wait mci cmd=play timeout=10
+sleep 1
+key Escape
+wait dialog text=~MAIN timeout=20
+key n
+wait dialog text=~CAMPAIGN timeout=10
+key Return
+wait mci cmd=open file=~IE.AVI timeout=20
+wait mci cmd=play timeout=10
+sleep 1
+key Escape
+wait dialog text=~Menu timeout=30
+ctl START_MISSION
+wait game what=first_cycle timeout=30
+wait script what=done timeout=30
+shot script_done
+quit

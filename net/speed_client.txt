@@ -1,0 +1,14 @@
+# The game speed in a network game, the client's side (harness/net/speed_host.txt has the command line): LESS twice in
+# one turn (5 -> 3, one command) and once in the next turn, within the input delay (-> 2, a second command); the row
+# shows 2 throughout, not the 3 the first command runs with.
+200 click ui tab5
+202 click ui Change_Game
+204 click 900 235
+206 shot
+208 click 892 705
+209 click 892 705
+213 click 892 705
+214 shot
+218 shot
+230 shot
+340 shot

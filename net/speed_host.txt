@@ -1,0 +1,11 @@
+# The game speed in a network game (docs/multiplayer.md "Game speed"), the host's side, through the pane as a player
+# clicks it (Game Options > PREFERENCES > Game Speed, LESS / MORE at the harness's 1032x766 pixels):
+#   python3 -I tools/agent/netpair --tps 20.833333333333332 --ticks 400 --script harness/net/speed_host.txt \
+#       --client-script harness/net/speed_client.txt
+# The host starts the game at speed 5; the client slows it to 2 at tick 208-213; the host's MORE at 306 sets 3.
+300 click ui tab5
+302 click ui Change_Game
+304 click 900 235
+306 click 978 705
+310 shot
+330 shot

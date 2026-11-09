@@ -1,0 +1,10 @@
+# Chat in a network game between two op2-engines, the client's side (harness/net/chat_host.txt has the command line).
+# The client types hotkey letters with a vehicle-free selection (nothing to order): they go into the line.
+130 shot                       # the host's line, here too
+150 key enter
+151 type Reply from the client: m a d 1
+152 shot
+153 key enter
+180 shot                       # the client's line on both machines (chat_host.txt's 180 shot shows it on the host)
+230 shot                       # the host's allies-only line didn't come here
+330 shot
