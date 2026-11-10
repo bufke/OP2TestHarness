@@ -418,7 +418,7 @@ the telemetry of a run with `--state` is byte-identical to one without (measured
   the topic that makes it available), `objectives` (`met`, `text`: VictoryConditionImpl's text, read from the
   ScStub list), `units` (every player's: id, type, file tile, hp, cmd, action; vehicles: `truck` [CargoType, amount],
   a ConVec's `kit`, `weapon`, `dest`, `emp`; structures: `flags` (MoFlagBld*: 0x1 active, 0x2000 power, 0x4000
-  workers, 0x8000 scientists), `dock`, a lab's `research` {tech, team, left, cost} (ECONOMY.md section 7), a
+  workers, 0x8000 scientists), `dock`, a lab's `research` {tech, team, left, cost} ($ORACLE/ECONOMY.md section 7), a
   factory's `bays` and `producing`), `gaia` (beacons: ore 0 common / 1 rare, bar 0 = 3-bar, variant, surveyed by
   player 0; magma vents; fumaroles; wreckage: tech, discovered; disasters with their timer, action and flags
   (0x2000 started, 0x4000 first warning done, 0x8000 second warning done)) and `cells` (file
@@ -472,7 +472,7 @@ earlier run where the script up to it is unchanged (op2-rs tools/README.md "Chec
   0,6), which a resume puts back.
 - **The hives' counts.** A save doesn't hold the tube networks (HiveManager): saving rebuilds them in the game that goes
   on (new slots in HiveManager's array) and loading builds them afresh, both with each hive's counts (Command Centers
-  +0xC, an enabled one +0x10, DIRTs +0x14) at zero until its owner's next allocation pass recounts them (ECONOMY.md
+  +0xC, an enabled one +0x10, DIRTs +0x14) at zero until its owner's next allocation pass recounts them ($ORACLE/ECONOMY.md
   "Tube network"; a computer player's pass comes every 256 ticks): p12's Eden read [1,0,0,0] instead of [1,2,1,1]
   for 140 ticks after a save at 5000, **with no load**. DoDamage's Damage Prevention reads them in that window
   (0x430050). So a checkpoint save notes each structure's hive counts first, puts them back after SaveGame, and
