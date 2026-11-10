@@ -84,7 +84,13 @@ python -I windows\run_port.py install --port C:\Users\Desktop\GITHUB\outpost2-po
 python -I windows\compare_port.py %ORACLE%\scenarios\line_fast.json %ORACLE%\scenarios\cmb_duel_laser.json --op2rs
 ```
 `compare_port.py` writes, per scenario, to `build\compare-port\<scenario>\`: `port_diff.txt` (MATCH, or the first tick
-each field differs), `side_by_side.png` (original | port | op2-rs) and, with `--op2rs`, `sim_compare.txt`.
+each field differs), `side_by_side.png` (original | op2-rs | port) and, with `--op2rs`, `sim_compare.txt`.
+
+The port's upstream, [marcelomgoncalves/outpost2](https://github.com/marcelomgoncalves/outpost2), has the same
+`--harness` mode, so it is compared the same way: `run_port.py install --port <its checkout>`, then `compare_port.py ...
+--port-label marcel-outpost2` to name it in the pictures. On 2026-11-10 (its commit 1ac3673) it matched the original on
+cmb_duel_laser and cmb_duel_rail_gun; on line_fast every tick but one (tick 731, the arrival: x 16/65536 of a pixel
+short).
 `trace_diff.py` compares any two traces on its own. Fields both sides write are compared; `cmd`/`action` aren't (names
 in one, numbers in the other). `--ignore lights,rng` (on either script) sets known differences aside, to see what's
 under them; `--no-pictures` skips the screenshots for a quicker batch. Several scenarios end in a scoreboard, one line

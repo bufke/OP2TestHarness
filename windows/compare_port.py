@@ -51,18 +51,22 @@ def one(scn_path: Path, a, out: Path) -> dict:
     print("port vs original: " + "\n".join(lines))
     result = {"scenario": scn_path.stem, "line": "port " + trace_diff.summary_line(report), "match": report["match"]}
 
+    # Pictures in the order original | op2-rs (with --op2rs) | the port.
     panels = []
     if not a.no_pictures:
-        panels = [(original / f"shot_{tick:07d}.png", f"Outpost 2 (original), tick {tick}"),
-                  (port / f"shot_{tick:07d}.png", f"outpost2-port, tick {tick}")]
+        panels = [(original / f"shot_{tick:07d}.png", f"Outpost 2 (original), tick {tick}")]
     if a.op2rs:
         inspect, engine = compare.op2rs_tools(a.op2rs)
         sim = compare.op2rs_sim(inspect, scn_path, original, out, a.source)
-        verdict = next((l for l in sim.splitlines() if l.startswith(("MATCH", "DIFF", "DIVERGE"))), sim.splitlines()[-1] if sim else "?")
+        verdict = next((l for l in sim.splitlines() if l.startswith(("MATCH", "DIFF", "DIVERGE"))),
+                       sim.splitlines()[-1] if sim else "?")
         print(f"op2-rs vs original: {verdict.split(':')[0]}")
         result["line"] += f"; op2-rs {verdict.split(':')[0]}"
         if panels:
-            panels.append((compare.op2rs_picture(engine, scn_path, scn, tick, original, out, a.source), f"op2-rs, tick {tick}"))
+            panels.append((compare.op2rs_picture(engine, scn_path, scn, tick, original, out, a.source),
+                           f"op2-rs, tick {tick}"))
+    if panels:
+        panels.append((port / f"shot_{tick:07d}.png", f"{a.port_label}, tick {tick}"))
     missing = [str(p) for p, _ in panels if not p.exists()]
     if panels and not missing:
         compare.side_by_side(panels, out / "side_by_side.png")
@@ -84,6 +88,8 @@ def main() -> int:
                     help="trace fields left out of the port's comparison, comma separated (e.g. lights,rng)")
     ap.add_argument("--game", type=Path, default=run_win.DEFAULT_GAME, help="the private game copy")
     ap.add_argument("--source", type=Path, default=run_win.DEFAULT_SOURCE, help="the game install op2-rs reads data from")
+    ap.add_argument("--port-label", default="outpost2-port",
+                    help="the port's name in the pictures (e.g. marcel-outpost2 for marcelomgoncalves/outpost2)")
     a = ap.parse_args()
     a.ignore = tuple(f for f in a.ignore.split(",") if f)
     if a.out and len(a.scenarios) > 1:
