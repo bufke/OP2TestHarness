@@ -28,7 +28,7 @@ Every release notes its contract changes, if any, under **Contract**. A release 
 `harness.dll` replays op2-rs's recorded runs identically (op2-rs's `make accuracy`, 0 failures) unless its changelog
 says which runs change and why.
 
-## 1.0.0 (not yet released)
+## 1.0.0 (2026-11-10)
 
 The first version as a repository of its own (op2-rs issue #34), shown to work for the three projects it measures for:
 the original game, op2-rs and outpost2-port (see **Verified**). It was developed as 0.9.0, which was never released.
@@ -77,7 +77,9 @@ only in comments and in the command line written into a recording's header.
   differing telemetry is the economy runs' newer fields (hives, beacons). op2-rs's own `runs.py check --fresh` accepts
   such runs as `fresh_newer_fields`.
 - **outpost2-port.** Compared with `windows/compare_port.py`: 8 of 9 scenarios match the original (outpost2-port
-  958323a).
+  958323a). Its upstream, marcelomgoncalves/outpost2 (1ac3673), matches cmb_duel_laser and cmb_duel_rail_gun on every
+  compared field, and line_fast on every tick but its arrival (tick 731, x 16/65536 of a pixel short); op2-rs matches
+  all three.
 
 Not verified here: the Linux harness under Wine (`run.sh`, `make check`) since the move (CI builds it but can't run the
 game), and op2-rs's `runs.py check --fresh` / `make accuracy` against this version's DLLs, which needs op2-rs's stored
