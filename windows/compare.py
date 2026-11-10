@@ -64,7 +64,7 @@ def op2rs_sim(inspect: Path, scn_path: Path, original: Path, out: Path, source: 
                           "--out", str(out / "sim")], env=dict(os.environ, OP2_DIR=str(source)),
                          capture_output=True, text=True)
     report = (sim.stdout + sim.stderr).strip()
-    (out / "sim_compare.txt").write_text(report + "\n")
+    (out / "sim_compare.txt").write_text(newline="\n", data=report + "\n")
     return report
 
 
@@ -79,7 +79,7 @@ def op2rs_picture(engine: Path, scn_path: Path, scn: dict, tick: int, original: 
     if view:
         cmd += ["--focus", f"{view[0]},{view[1]}"]
     eng = subprocess.run(cmd, env=dict(os.environ, OP2_DIR=str(source)), capture_output=True, text=True, timeout=600)
-    (out / "engine.log").write_text(eng.stdout + eng.stderr)
+    (out / "engine.log").write_text(newline="\n", data=eng.stdout + eng.stderr)
     if not shot.exists():
         sys.exit(f"compare: op2-engine saved no picture (exit {eng.returncode}; see engine.log)")
     return shot

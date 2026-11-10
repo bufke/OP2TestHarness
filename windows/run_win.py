@@ -89,8 +89,9 @@ def run_scenario(a) -> int:
     ticks, seed = scn.get("ticks", 3000), scn.get("seed", 1)
     mission = run.scenario_mission(scn.get("map", "cm01.map"), scn.get("techtree", "multitek.txt"))
     script = out / "scenario_script.txt"
-    script.write_text(run.scenario_script(scn))
-    (out / "scenario.json").write_text(json.dumps(dict(scn, seed=seed, ticks=ticks), indent=1) + "\n")
+    script.write_text(newline="\n", data=run.scenario_script(scn))
+    (out / "scenario.json").write_text(newline="\n",
+                                       data=json.dumps(dict(scn, seed=seed, ticks=ticks), indent=1) + "\n")
     env = dict(OP2H_MISSION=mission, OP2H_OUT=str(out), OP2H_SCRIPT=str(script),
                OP2H_TICKS=str(ticks), OP2H_SEED=str(seed), OP2H_DIFFICULTY=str(scn.get("difficulty", 1)),
                OP2H_TRACE_EVERY=str(scn.get("traceEvery", 1)), OP2H_TELEM_EVERY=str(scn.get("telemetryEvery", 100)),
@@ -101,7 +102,7 @@ def run_scenario(a) -> int:
         env["OP2H_BOT"] = str(a.bot.resolve())
     summary = launch(env, out, a.timeout)
     summary = {"scenario": str(a.scenario), "mission": mission, **summary}
-    (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    (out / "summary.json").write_text(newline="\n", data=json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary))
     return 0 if summary["ok"] else 1
 
@@ -158,7 +159,7 @@ def selftest() -> int:
             env = dict(OP2H_MISSION="zHarnessEnd.dll", OP2H_OUT=str(out), OP2H_TICKS="3000", OP2H_SHOT_EVERY="400",
                        OP2H_TELEM_EVERY="100", OP2H_TURBO="1", OP2H_WIDTH="1024", OP2H_HEIGHT="768", **extra)
             s = launch(env, out, 120)
-            (out / "summary.json").write_text(json.dumps(s, indent=2) + "\n")
+            (out / "summary.json").write_text(newline="\n", data=json.dumps(s, indent=2) + "\n")
             problems = []
             if s["game_term_reason"] != "MissionAccomplished":
                 problems.append(f"ended {s['game_term_reason']}")

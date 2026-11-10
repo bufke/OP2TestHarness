@@ -43,11 +43,11 @@ def one(scn_path: Path, a, out: Path) -> dict:
         return {"scenario": scn_path.stem, "line": "the port's run failed (port\\harness.log, port_stdout.txt)"}
 
     report = trace_diff.compare(original / "trace.jsonl", port / "trace.jsonl", a.ignore)
-    (out / "port_diff.json").write_text(json.dumps(report, indent=1) + "\n")
+    (out / "port_diff.json").write_text(newline="\n", data=json.dumps(report, indent=1) + "\n")
     lines = [trace_diff.summary_line(report)] + [
         f"  {k}: tick {v['tick']}: original {json.dumps(v['a'])} / port {json.dumps(v['b'])}"
         for k, v in report["first_differences"].items()]
-    (out / "port_diff.txt").write_text("\n".join(lines) + "\n")
+    (out / "port_diff.txt").write_text(newline="\n", data="\n".join(lines) + "\n")
     print("port vs original: " + "\n".join(lines))
     result = {"scenario": scn_path.stem, "line": "port " + trace_diff.summary_line(report), "match": report["match"]}
 

@@ -52,8 +52,9 @@ def run_scenario(a) -> int:
         old.unlink(missing_ok=True)
     ticks, seed = scn.get("ticks", 3000), scn.get("seed", 1)
     script = out / "scenario_script.txt"
-    script.write_text(run_win.run.scenario_script(scn))
-    (out / "scenario.json").write_text(json.dumps(dict(scn, seed=seed, ticks=ticks), indent=1) + "\n")
+    script.write_text(newline="\n", data=run_win.run.scenario_script(scn))
+    (out / "scenario.json").write_text(newline="\n",
+                                       data=json.dumps(dict(scn, seed=seed, ticks=ticks), indent=1) + "\n")
     cmd = [str(exe), "--harness", "--script", str(script), "--out", str(out), "--map", scn.get("map", "cm01.map"),
            "--techtree", scn.get("techtree", "multitek.txt"), "--ticks", str(ticks), "--seed", str(seed),
            "--trace-every", str(scn.get("traceEvery", 1)), "--shot-every", str(a.shot_every)]
@@ -73,7 +74,7 @@ def run_scenario(a) -> int:
     summary = {"scenario": str(a.scenario), "game": "outpost2-port", "exit_code": code, "timed_out": timed_out,
                "wall_seconds": round(time.monotonic() - start, 1), "screenshots": run_win.to_png(out),
                "unsupported": unsupported, "quit": quit_line, "ok": bool(quit_line) and not timed_out and code == 0}
-    (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    (out / "summary.json").write_text(newline="\n", data=json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary))
     return 0 if summary["ok"] else 1
 
