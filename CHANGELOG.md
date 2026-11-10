@@ -1,7 +1,7 @@
 # Changelog
 
 All notable changes to OP2TestHarness. Versions follow [Semantic Versioning](https://semver.org/); the version is in
-`VERSION`, and each release is tagged `vX.Y.Z`. The rules below hold from 0.9.0 on: the contract is op2-rs's, which
+`VERSION`, and each release is tagged `vX.Y.Z`. The rules below hold from 1.0.0 on: the contract is op2-rs's, which
 its recordings already depend on.
 
 ## Versioning rules
@@ -28,11 +28,10 @@ Every release notes its contract changes, if any, under **Contract**. A release 
 `harness.dll` replays op2-rs's recorded runs identically (op2-rs's `make accuracy`, 0 failures) unless its changelog
 says which runs change and why.
 
-## 0.9.0 (not yet released)
+## 1.0.0 (not yet released)
 
-The first version as a repository of its own (op2-rs issue #34). 1.0.0 follows once the harness is shown to work for
-all three projects it measures for: the original game (Windows and Linux builds), op2-rs (its recorded runs replay
-identically) and outpost2-port.
+The first version as a repository of its own (op2-rs issue #34), shown to work for the three projects it measures for:
+the original game, op2-rs and outpost2-port (see **Verified**). It was developed as 0.9.0, which was never released.
 
 **Contract:** identical to op2-rs's `harness/` at commit ab5f74dd (2026-11-09): the same `OP2H_*` variables, `run.sh`
 options, script verbs, unit names, output fields and scenario format. `src/harness.cpp` behaves as op2-rs's; it differs
@@ -59,13 +58,27 @@ only in comments and in the command line written into a recording's header.
   inside op2-rs).
 - The Makefile reads TethysAPI from `vendor/include` in this folder first; `run.py` compares the installed DLLs with this
   folder's `build/`.
+- The Windows scripts write their text files (`scenario.json`, `scenario_script.txt`, summaries, reports) with LF, as
+  `run.py` does on Linux, so they hash the same as op2-rs's recordings.
 
-**Verified** on Windows 10, with the DLLs from both toolchains (MinGW from CI, MSVC):
-- line_fast, cmb_duel_laser and cmb_duel_rail_gun match op2-sim on every trace field of every tick;
-- the two toolchains' runs of those scenarios give byte-identical `trace.jsonl`, `telemetry.jsonl` and `gamedata.json`,
-  and two runs of a scenario are byte-identical too;
-- `run_win.py selftest` passes (the self-test mission ends MissionAccomplished, alone and with `sample_bot.dll`);
-- each toolchain's build is reproducible (two clean builds byte-identical; CI checks this on every push).
+**Verified** on Windows 10:
+- **The original game.** All 456 of op2-rs's scenarios (its `harness/oracle/scenarios`, at ab5f74dd) run to their tick
+  limit with no timeout, crash or dialog. `run_win.py selftest` passes (the self-test mission ends MissionAccomplished,
+  alone and with `sample_bot.dll`).
+- **Both toolchains.** The MinGW DLLs (CI) and the MSVC DLLs give byte-identical `trace.jsonl`, `telemetry.jsonl` and
+  `gamedata.json` on line_fast, cmb_duel_laser and cmb_duel_rail_gun, and so does op2-rs's own harness source at
+  ab5f74dd built with MSVC. Each toolchain's build is reproducible (CI checks this on every push).
+- **op2-rs.** op2-sim matches line_fast, cmb_duel_laser and cmb_duel_rail_gun on every trace field of every tick.
+  Against the hashes of op2-rs's recorded runs (`accuracy/manifest.json`, hashed with its `accuracy/runs.py`), over the
+  456 scenarios: `gamedata.json` and `scenario_script.txt` match on every run, `scenario.json` on 452 (the other 4
+  scenario files were edited after their runs were recorded), `audio.jsonl` on all 8 that have one, and 30 runs match
+  in every file. The other `trace.jsonl` and `telemetry.jsonl` files differ from recordings made by earlier harness
+  versions, which wrote fewer fields: no scenario added before 2026-10-31 matches and most added since do, and the
+  differing telemetry is the economy runs' newer fields (hives, beacons). op2-rs's own `runs.py check --fresh` accepts
+  such runs as `fresh_newer_fields`.
+- **outpost2-port.** Compared with `windows/compare_port.py`: 8 of 9 scenarios match the original (outpost2-port
+  958323a).
 
-Not yet verified: the Linux harness (Wine, `make check`) since the move, and op2-rs's full `make accuracy` against this
-version.
+Not verified here: the Linux harness under Wine (`run.sh`, `make check`) since the move (CI builds it but can't run the
+game), and op2-rs's `runs.py check --fresh` / `make accuracy` against this version's DLLs, which needs op2-rs's stored
+recordings.
