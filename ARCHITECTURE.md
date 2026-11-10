@@ -176,8 +176,10 @@ identical bytes.
 
 No services. Built locally (`windows\build.bat`, or `make` on Linux). "Installing" means copying the DLLs into a
 game's `OPU/Harness/` and adding one line to its `OPU/outpost2.ini`; on Windows that is always a private copy of the
-game. Source is on GitHub (github.com/leviathan400/OP2TestHarness); there is no CI yet (op2-rs issue #34 asks for a
-DLL build, and optionally `make check` under Xvfb and Wine).
+game. Source is on GitHub (github.com/leviathan400/OP2TestHarness). CI (GitHub Actions, `.github/workflows/build.yml`)
+builds the DLLs with MinGW on Ubuntu and MSVC on Windows on every push, checks each build is reproducible and packages
+it; a `vX.Y.Z` tag publishes a GitHub release with both packages. CI never runs the game: `selftest` and `make check`
+need the game's files, which stay off CI.
 
 ## 7. Security considerations
 

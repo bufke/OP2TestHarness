@@ -21,8 +21,8 @@ jobs:
     name: Python scripts parse
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Parse every Python file
@@ -39,7 +39,7 @@ jobs:
     name: Linux, MinGW (make)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install MinGW
         run: sudo apt-get update -q && sudo apt-get install -y -q g++-mingw-w64-i686 make
       - name: Fetch TethysAPI
@@ -58,7 +58,7 @@ jobs:
           diff "$RUNNER_TEMP/first.sha256" "$RUNNER_TEMP/second.sha256"
       - name: Package
         run: python3 -I windows/package.py --toolchain mingw
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: package-mingw
           path: build/release/
@@ -68,7 +68,7 @@ jobs:
     name: Windows, MSVC (build.bat)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Fetch TethysAPI
         shell: bash
         run: |
@@ -88,7 +88,7 @@ jobs:
           diff "$RUNNER_TEMP/first.sha256" "$RUNNER_TEMP/second.sha256"
       - name: Package
         run: python -I windows/package.py --toolchain msvc
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: package-msvc
           path: build/release/
@@ -102,13 +102,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: The tag matches VERSION
         run: |
           version="$(tr -d '[:space:]' < VERSION)"
           test "${GITHUB_REF_NAME}" = "v${version}" || { echo "tag ${GITHUB_REF_NAME} but VERSION is ${version}"; exit 1; }
           echo "VERSION=${version}" >> "$GITHUB_ENV"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: package-*
           path: dist

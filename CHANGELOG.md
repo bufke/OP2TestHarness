@@ -47,7 +47,10 @@ only in comments and in the command line written into a recording's header.
   `make check` on Windows; the release zip with `SHA256SUMS` (`package.py`); the original vs op2-rs on one
   scenario, with op2-sim's tick-by-tick compare and both pictures side by side (`compare.py`); the original vs
   outpost2-port (`run_port.py`, `trace_diff.py`, `compare_port.py`).
-- `ARCHITECTURE.md`, `PROVENANCE.md`, this changelog, `VERSION`, `.gitignore`.
+- CI (GitHub Actions): both toolchains build all ten DLLs on every push (`make` with MinGW on Ubuntu, `build.bat` with
+  MSVC on Windows), each build must be reproducible, and a `vX.Y.Z` tag publishes a GitHub release with
+  `OP2TestHarness-<VERSION>-mingw.zip` and `-msvc.zip`, their `.sha256` and this changelog's section.
+- `ARCHITECTURE.md`, `PROVENANCE.md`, this changelog, `VERSION`, `.gitignore`, `.gitattributes`.
 
 **Changed**
 - README.md describes a project of its own: Windows and Linux quick starts, requirements, where prefixes and the game
@@ -57,7 +60,12 @@ only in comments and in the command line written into a recording's header.
 - The Makefile reads TethysAPI from `vendor/include` in this folder first; `run.py` compares the installed DLLs with this
   folder's `build/`.
 
-**Verified** (Windows 10, MSVC build): line_fast, cmb_duel_laser and cmb_duel_rail_gun match op2-sim on every trace
-field of every tick, and two runs of a scenario give byte-identical traces. `run_win.py selftest` passes (the self-test
-mission ends MissionAccomplished, alone and with `sample_bot.dll`); two builds give byte-identical DLLs. Not yet verified: the MinGW build since the
-move, and op2-rs's full `make accuracy` against this version.
+**Verified** on Windows 10, with the DLLs from both toolchains (MinGW from CI, MSVC):
+- line_fast, cmb_duel_laser and cmb_duel_rail_gun match op2-sim on every trace field of every tick;
+- the two toolchains' runs of those scenarios give byte-identical `trace.jsonl`, `telemetry.jsonl` and `gamedata.json`,
+  and two runs of a scenario are byte-identical too;
+- `run_win.py selftest` passes (the self-test mission ends MissionAccomplished, alone and with `sample_bot.dll`);
+- each toolchain's build is reproducible (two clean builds byte-identical; CI checks this on every push).
+
+Not yet verified: the Linux harness (Wine, `make check`) since the move, and op2-rs's full `make accuracy` against this
+version.

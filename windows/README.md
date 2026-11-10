@@ -8,7 +8,7 @@ that needs; the rest of OP2TestHarness (src/, test/, run.py's scenario translati
 | `build.bat` | Builds every DLL a release ships into `build\win` (32-bit, MSVC, reproducible): `harness.dll`, `zScenario.dll`, `zHarnessEnd.dll` and the seven bots |
 | `msvc_compat.h` | Force-included by `build.bat`: C++20, `NOMINMAX`, `__builtin_return_address` -> `_ReturnAddress`, `#undef small` (a Windows SDK macro) |
 | `run_win.py` | `setup` makes a private copy of the game with the harness installed; `run` plays a scenario in it (`--bot` adds a bot); `selftest` is `make check` on Windows |
-| `package.py` | packs a release: `build\release\OP2TestHarness-<VERSION>.zip` with the DLLs, the scripts, the sources and `SHA256SUMS` |
+| `package.py` | packs a release: `build\release\OP2TestHarness-<VERSION>-<toolchain>.zip` (`msvc` or `mingw`) with the DLLs, the scripts, the sources and `SHA256SUMS` |
 | `compare.py` | the original vs op2-rs on one scenario: op2-sim's tick-by-tick compare, both pictures side by side |
 | `run_port.py` | `install` copies a built outpost2-port into the game copy; `run` plays a scenario in its `--harness` mode |
 | `trace_diff.py` | compares two `trace.jsonl` files field by field, tick by tick (MATCH, or each field's first difference) |
@@ -50,10 +50,21 @@ windows\build.bat
 python -I windows\run_win.py selftest
 python -I windows\package.py
 ```
-`build.bat` links with `/Brepro`, so the same sources give byte-identical DLLs. `package.py` refuses uncommitted
-changes, and writes `build\release\OP2TestHarness-<VERSION>.zip` and its `.sha256`. The zip holds one folder laid out
-like the repository (the DLLs in `build\win`, so the scripts work from it as they are), every file git tracks, and
-`SHA256SUMS` for every file in it. Entries are sorted and dated with the commit's time, so the zip is reproducible too.
+`build.bat` finds Visual Studio with `vswhere` (`VCVARS` overrides it) and links with `/Brepro`, so the same sources
+give byte-identical DLLs. `package.py` refuses uncommitted changes, and writes
+`build\release\OP2TestHarness-<VERSION>-msvc.zip` and its `.sha256` (`--toolchain mingw` packs `make`'s build in
+`build/` instead). The zip holds one folder laid out like the repository (the DLLs where that toolchain's tools look for
+them: `build\win` or `build/`), every file git tracks, and `SHA256SUMS` for every file in it. Entries are sorted and
+dated with the commit's time, so the zip is reproducible too.
+
+**CI** (`.github/workflows/build.yml`, GitHub Actions): on every push and pull request, the Python scripts must parse,
+both toolchains build all ten DLLs (`make` with MinGW on Ubuntu, `build.bat` with MSVC on Windows), a second clean
+build of each must be byte-identical, and each is packaged (the run's artifacts). A tag `vX.Y.Z` matching `VERSION`
+publishes a GitHub release with both packages and the version's CHANGELOG.md section. CI can't run the game (its files
+can't be in CI), so run `selftest` locally before tagging.
+
+The two builds behave the same: with the MinGW DLLs from CI and with the MSVC DLLs, line_fast, cmb_duel_laser and
+cmb_duel_rail_gun give byte-identical `trace.jsonl`, `telemetry.jsonl` and `gamedata.json`, and both pass `selftest`.
 
 ## The original vs op2-rs in one command
 ```
