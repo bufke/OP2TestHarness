@@ -10,17 +10,22 @@ It was written for [op2-rs](https://gitlab.com/bufke/op2-rs), a reimplementation
 recipes in its own simulation and compares every field, tick by tick ("Comparing with op2-rs"). It works for any
 reimplementation or tool that can read the outputs. ARCHITECTURE.md has the design, PROVENANCE.md the origin.
 
-**Version:** 1.0.0 (`VERSION`). What
-other projects' recordings rely on (options, script verbs, unit names, output fields, the scenario format) changes only
-with a version bump; CHANGELOG.md has the rules and the history.
+**Version:** 1.0.0 (`VERSION`). What other projects' recordings rely on (options, script verbs, unit names, output
+fields, the scenario format) changes only with a version bump; CHANGELOG.md has the rules and the history.
 
-**Licence:** GPL-3.0 (LICENSE), as op2-rs.
+**Releases:** https://github.com/leviathan400/OP2TestHarness/releases. Each has two packages,
+`OP2TestHarness-<VERSION>-mingw.zip` (built with `make`, as op2-rs's recorded runs were) and `-msvc.zip` (built with
+`windows\build.bat`), which behave identically. Each holds the ten DLLs, the Python driver, the sources and
+`SHA256SUMS`, and comes with a `.sha256`. CI (GitHub Actions) builds both on every push and checks each is reproducible.
+
+**Licence:** GPL-3.0 (LICENSE). op2-rs, where the harness was written, is GPL-3.0-or-later.
 
 **Windows** (native, no Wine; windows/README.md):
 
 ```bat
-windows\build.bat                                         :: build build\win\harness.dll and zScenario.dll (MSVC)
+windows\build.bat                                         :: build the ten DLLs into build\win (MSVC; or unpack a release)
 python -I windows\run_win.py setup                        :: private copy of the game in game\, harness installed
+python -I windows\run_win.py selftest                     :: make check on Windows
 python -I windows\run_win.py run %ORACLE%\scenarios\line_fast.json build\runs\line_fast --shot-every 350
 python -I windows\compare.py %ORACLE%\scenarios\cmb_duel_laser.json --tick 200   :: the original vs op2-rs
 ```
@@ -62,8 +67,8 @@ those recipe files write this harness's folder as `harness/`.
 ## Options (`run.sh --help`)
 
 The Linux launcher's options. On Windows, `windows/run_win.py run` covers scenarios so far (`--shot-every`,
-`--no-turbo`, `--timeout`; the scenario sets ticks, seed, trace and telemetry intervals); the module itself reads the
-same `OP2H_*` settings on both.
+`--no-turbo`, `--timeout`, `--bot`; the scenario sets ticks, seed, trace and telemetry intervals) and `run_win.py
+selftest` is `make check`; the module itself reads the same `OP2H_*` settings on both.
 
 | option | default | |
 |---|---|---|
@@ -865,8 +870,10 @@ Its tools come from a built op2-rs checkout (`cargo build -p op2-inspect -p op2-
   reproduce.
 
 The outputs are plain JSONL and PNG (see "Outputs"), so another reimplementation can be checked the same way: play the
-recipe, write the same fields, compare. outpost2-port does this through its `--harness` mode: `windows/compare_port.py`
-compares it with the original (and op2-rs), and `windows/trace_diff.py` compares any two traces (windows/README.md).
+recipe, write the same fields, compare. Marcelo Gonçalves's C++/SDL2 port
+([marcelomgoncalves/outpost2](https://github.com/marcelomgoncalves/outpost2), and its fork outpost2-port) does this
+through its `--harness` mode: `windows/compare_port.py` compares it with the original (and op2-rs) and draws the
+three side by side, and `windows/trace_diff.py` compares any two traces (windows/README.md).
 
 ## How it works
 

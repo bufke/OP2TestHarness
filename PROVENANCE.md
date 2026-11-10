@@ -26,12 +26,17 @@ as inside op2-rs).
 
 ## What this repository adds
 
-- `windows/`: an MSVC build (`build.bat`, `msvc_compat.h`), a native Windows launcher (`run_win.py`), the original-vs-
-  op2-rs runner (`compare.py`) and the outpost2-port comparison (`run_port.py`, `trace_diff.py`, `compare_port.py`).
+- `windows/`: an MSVC build of every release DLL (`build.bat`, `msvc_compat.h`), a native Windows launcher with
+  `make check`'s equivalent (`run_win.py`, `selftest`), the release packer (`package.py`), the original-vs-op2-rs runner
+  (`compare.py`) and the comparison with ports that have a `--harness` mode (`run_port.py`, `trace_diff.py`,
+  `compare_port.py`).
+- CI (`.github/workflows/build.yml`): both toolchains on every push, reproducibility, releases on a `vX.Y.Z` tag.
+- Versioning (`VERSION`, `CHANGELOG.md`): the contract below and how a change to it moves the version. 1.0.0 is the first
+  release.
 - Docs for a project of its own: README.md's introduction, quick starts and "Comparing with op2-rs", ARCHITECTURE.md,
   this file. Paths are relative to this folder; op2-rs's files and tools are named as op2-rs's.
 - The Makefile reads TethysAPI from `vendor/include` here (then `../vendor/include`); run.py compares the installed
-  DLLs with this folder's `build/`.
+  DLLs with this folder's `build/`; `.gitattributes` keeps `.bat` files CRLF and `.sh` files LF on every checkout.
 - `src/harness.cpp`'s behaviour is op2-rs's; only comments and the recording header's command line differ.
 
 ## What still follows op2-rs's layout

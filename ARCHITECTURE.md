@@ -5,11 +5,12 @@ architecture.md. Keep it current when modules or data flow change.
 
 OP2TestHarness turns the original Outpost 2 into a measuring instrument. A DLL loaded into the real game plays a
 scenario or mission unattended, with a fixed seed and scripted orders, and writes what happened (unit state every
-tick, telemetry, screenshots) as files. A reimplementation then plays the same recipe and the two are compared: op2-rs, which it was written for, compares
-its simulation field by field each tick and its engine's pictures with the original's; outpost2-port, a C++/SDL2
-port, plays the recipe through its own `--harness` mode and writes the same trace format, compared here by
-`trace_diff.py`. It started as op2-rs's `harness/` (PROVENANCE.md) and adds a native Windows build, launcher and the
-comparison tools in `windows/`.
+tick, telemetry, screenshots) as files. A reimplementation then plays the same recipe and the two are compared:
+op2-rs, which it was written for, compares its simulation field by field each tick and its engine's pictures with the
+original's; Marcelo Gonçalves's C++/SDL2 port (marcelomgoncalves/outpost2, and its fork outpost2-port) plays the
+recipe through its own `--harness` mode and writes the same trace format, compared here by `trace_diff.py`. It started
+as op2-rs's `harness/` (PROVENANCE.md) and adds a native Windows build, launcher, the comparison tools in `windows/`,
+CI and releases.
 
 ## 1. Project structure
 
@@ -24,13 +25,14 @@ OP2TestHarness/
 │   └── *_check.py         end-to-end checks: session state, checkpoints, play-and-record (Linux)
 ├── bots/*.cpp             optional per-tick plug-in DLLs (HarnessBotTick): hit masks, line of sight, cursor, edges
 ├── windows/               native Windows (no Wine; not in op2-rs's copy)
-│   ├── build.bat          MSVC x86 build of harness.dll and zScenario.dll into build\win
+│   ├── build.bat          MSVC x86 build of the ten release DLLs into build\win (reproducible)
 │   ├── msvc_compat.h      force-included under MSVC: C++20, NOMINMAX, _ReturnAddress, #undef small
-│   ├── run_win.py         `setup`: private game copy with the harness installed; `run`: play a scenario
+│   ├── run_win.py         `setup`: private game copy with the harness; `run`: play a scenario; `selftest`
+│   ├── package.py         the release zip of one toolchain's build, with SHA256SUMS
 │   ├── compare.py         original vs op2-rs on one scenario: sim compare, both pictures side by side
 │   ├── run_port.py        `install`: outpost2-port's build into the game copy; `run`: play a scenario in the port
 │   ├── trace_diff.py      any two traces field by field: MATCH, or the first tick each field differs
-│   ├── compare_port.py    original vs outpost2-port (and op2-rs) on one or more scenarios, with a scoreboard
+│   ├── compare_port.py    original vs a port with --harness (and op2-rs) on scenarios, with a scoreboard
 │   └── README.md          Windows usage, what's verified, known differences
 ├── run.py, run.sh         Linux launcher: a mission or scenario under Wine + Xvfb (also the scenario translator)
 ├── shell.py, shell.sh     Linux: boot the game normally and drive its menus with X input (shell mode)
@@ -45,6 +47,8 @@ OP2TestHarness/
 ├── PROVENANCE.md          where it came from; what still follows op2-rs's layout
 ├── LICENSE                GPL-3.0 (op2-rs's)
 ├── VERSION, CHANGELOG.md  the version and what changed; the contract and how changes to it move the version
+├── .github/workflows/build.yml   CI: both toolchains' builds, reproducibility, packages; a vX.Y.Z tag releases
+├── .gitattributes         LF in the repository; .bat files CRLF, .sh files LF on every checkout
 │
 │   ignored (.gitignore), never committed
 ├── game/                  the private copy of the game run_win.py runs (game files)
@@ -119,7 +123,8 @@ An empty mission with a 64-byte `MapName` slot after a marker. The launcher writ
 
 ### Launchers
 - **windows/build.bat**: the release's ten DLLs with MSVC (x86, `/MT`, `/Brepro`: reproducible), the Makefile's `all`.
-- **windows/package.py**: the release zip (repository layout, DLLs in `build/win`, `SHA256SUMS`), reproducible.
+- **windows/package.py**: one toolchain's release zip (`--toolchain msvc|mingw`: repository layout, the DLLs where that
+  toolchain's tools look for them, `SHA256SUMS`), reproducible.
 - **windows/run_win.py**: `setup` copies the game (robocopy, no movies or OPU backups) to `game/`, installs the DLLs
   and registers the module there. `run` builds the script with run.py's `scenario_script`, sets `OP2H_*`, starts
   `Outpost2.exe /OPU`, kills it on timeout (`taskkill /T`), converts BMPs through System.Drawing, writes summary.json.
@@ -166,9 +171,9 @@ identical bytes.
 - **op2-rs** (gitlab.com/bufke/op2-rs, GPL-3.0): the source of this code, and the other side of every comparison.
   `op2-inspect` (`compare`: op2-sim against a trace) and `op2-engine` (renders a scenario) come from a built checkout
   (`compare.py --op2rs`).
-- **outpost2-port** (github.com/leviathan400/outpost2-port, MIT; a fork of marcelomgoncalves/outpost2): its
+- **marcelomgoncalves/outpost2** (MIT; its fork github.com/leviathan400/outpost2-port is an archive copy): its
   `--harness` mode is the other side of `compare_port.py`. Built with CMake + MSVC (Win32), installed into the game
-  copy by `run_port.py install`. No code is shared: only the script and trace formats.
+  copy by `run_port.py install --port <checkout>`. No code is shared: only the script and trace formats.
 - **Toolchains:** MSVC 2022 Build Tools (Windows) or `i686-w64-mingw32-g++` (Linux); Python 3.11+ for the scripts;
   Wine and Xvfb for the Linux launchers; PIL optional on Linux for PNGs.
 
@@ -178,8 +183,8 @@ No services. Built locally (`windows\build.bat`, or `make` on Linux). "Installin
 game's `OPU/Harness/` and adding one line to its `OPU/outpost2.ini`; on Windows that is always a private copy of the
 game. Source is on GitHub (github.com/leviathan400/OP2TestHarness). CI (GitHub Actions, `.github/workflows/build.yml`)
 builds the DLLs with MinGW on Ubuntu and MSVC on Windows on every push, checks each build is reproducible and packages
-it; a `vX.Y.Z` tag publishes a GitHub release with both packages. CI never runs the game: `selftest` and `make check`
-need the game's files, which stay off CI.
+it; a `vX.Y.Z` tag publishes a GitHub release with both packages (the first: v1.0.0, 2026-11-10). CI never runs the
+game: `selftest` and `make check` need the game's files, which stay off CI, so they run locally before a tag.
 
 ## 7. Security considerations
 
@@ -195,10 +200,14 @@ need the game's files, which stay off CI.
   (windows/README.md). Rebuild + `setup` after every change to `harness.cpp`.
 - **Linux:** `make install`, `./run.sh ...`; `make check` (self-test mission + session checks), `make record-check`.
 - **The test that matters:** a scenario recorded twice gives byte-identical `trace.jsonl`, and op2-sim reports
-  `MATCH` against it. Verified on Windows 10 (2026-11-09) for line_fast, cmb_duel_laser and cmb_duel_rail_gun.
-- **outpost2-port:** `run_port.py install` after each port build, then `compare_port.py`. Results (2026-11-09, port
-  958323a): the eight cmb_duel_* scenarios match exactly; line_fast is a tick off where the path state is freed
-  (windows/README.md has the three differences the first runs found and fixed).
+  `MATCH` against it; across versions, op2-rs's recorded runs replay identically (its `runs.py check --fresh`, which
+  needs its stored recordings). For 1.0.0 on Windows 10: all 456 op2-rs scenarios run; the MinGW, MSVC and
+  op2-rs-source builds give identical output; op2-sim matches line_fast and both duels; gamedata and scripts match
+  op2-rs's recorded hashes on every run (CHANGELOG.md has the detail).
+- **The ports:** `run_port.py install --port <checkout>` after each port build, then `compare_port.py`. Results:
+  outpost2-port 958323a, the eight cmb_duel_* scenarios match exactly and line_fast is a tick off where the path state
+  is freed; marcelomgoncalves/outpost2 1ac3673, the laser and rail gun duels match and line_fast differs only at tick
+  731 (windows/README.md).
 - When adding a hook: cite the address it came from, check the expected bytes (`HookEntry`), keep the module inert
   without its environment variable, and add a scenario under `$ORACLE/scenarios/` that exercises it.
 - Clean-room rule inherited from op2-rs: behaviour is learned from disassembly and measurement, not pasted decompiled
@@ -213,21 +222,24 @@ need the game's files, which stay off CI.
 - **Crash dialogs:** Windows Error Reporting can hold a crashed run until the timeout; `SetErrorMode` in `InitMod`
   would end it at once.
 - **Checkpoint state check** (`CheckDllState`) was tuned on Wine's memory layout; unmeasured on Windows and on ARM64.
+- **op2-rs's acceptance** (issue #34): op2-rs moves to a release once `runs.py check --fresh` / `make accuracy` replay
+  its recorded runs identically against it; that needs op2-rs's stored recordings, so it runs on op2-rs's side.
+- **The Linux harness under Wine** (`run.sh`, `make check`) hasn't been run since the move; CI only builds it.
 - **op2-rs layout:** the Linux launchers look for the Wine prefixes beside this folder, and two tests for op2-inspect
   in `../tools` (PROVENANCE.md). Settings for those would make the Linux side independent of where the folder sits.
-- **outpost2-port's differences:** triage each one as a port difference, a harness-mode mapping mistake or a
+- **The ports' differences:** triage each one as a port difference, a harness-mode mapping mistake or a
   deliberate fix of the port's (it fixes the original's defects rather than reproduce them), and keep a list of the
   deliberate ones. Its harness mode covers scenarios only, and its trace has no path detail, status timers or
   action names yet.
-- **Keeping in step with op2-rs:** this started from op2-rs f7e9a15a; harness fixes made there need merging by hand.
+- **Keeping in step with op2-rs:** this started from op2-rs ab5f74dd; harness fixes made there need merging by hand.
 
 ## 10. Project identification
 
-- **Name:** OP2TestHarness (Outpost 2 Test Harness).
+- **Name:** OP2TestHarness (Outpost 2 Test Harness), version 1.0.0.
 - **Repository:** github.com/leviathan400/OP2TestHarness. Origin: gitlab.com/bufke/op2-rs, `harness/`, with its
   history (PROVENANCE.md).
 - **Authors:** David Burke and op2-rs contributors (the harness); Leviathan (leviathan400), the Windows additions.
-- **Last updated:** 2026-11-09.
+- **Last updated:** 2026-11-10.
 
 ## 11. Glossary
 
@@ -243,6 +255,7 @@ need the game's files, which stay off CI.
 - **Tick, mark:** game time; 100 ticks are a mark, and the game's speed setting decides how many ticks run per second.
 - **Prefix:** a Wine prefix, the fake Windows folder the Linux launchers run the game in.
 - **op2-sim, op2-engine, op2-inspect:** op2-rs's simulation, its game front end, and its inspection/compare tool.
-- **outpost2-port:** a C++17/SDL2 reimplementation (`outpost2_modern.exe`) that runs the original mission DLLs.
+- **outpost2-port, marcelomgoncalves/outpost2:** Marcelo Gonçalves's C++17/SDL2 reimplementation
+  (`outpost2_modern.exe`) that runs the original mission DLLs; outpost2-port is a fork of it.
 - **Spawn index:** a unit's place in the scenario's spawn list (`@N` in scripts); how traces from different games
   are matched, since unit ids can differ.

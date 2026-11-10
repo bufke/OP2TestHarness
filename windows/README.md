@@ -12,10 +12,12 @@ that needs; the rest of OP2TestHarness (src/, test/, run.py's scenario translati
 | `compare.py` | the original vs op2-rs on one scenario: op2-sim's tick-by-tick compare, both pictures side by side |
 | `run_port.py` | `install` copies a built outpost2-port into the game copy; `run` plays a scenario in its `--harness` mode |
 | `trace_diff.py` | compares two `trace.jsonl` files field by field, tick by tick (MATCH, or each field's first difference) |
-| `compare_port.py` | the original vs outpost2-port (and with `--op2rs`, op2-rs) on one or more scenarios, pictures side by side |
+| `compare_port.py` | the original vs a port with a `--harness` mode (outpost2-port, marcelomgoncalves/outpost2) and with `--op2rs` op2-rs, on one or more scenarios; pictures side by side (original \| op2-rs \| port) |
 
 ## Requirements
-- Visual Studio 2022 Build Tools (C++ workload; `build.bat` uses `vcvars32.bat`).
+- Visual Studio 2022 (Build Tools or any edition) with the C++ workload: `build.bat` finds it with `vswhere`.
+  Or skip building: unpack a release's `-msvc.zip` (its DLLs are in `build\win`) or `-mingw.zip` (copy its
+  `build\*.dll` into `build\win`).
 - TethysAPI at commit 141fd47 in `vendor\include\Tethys`:
   `git clone https://github.com/OutpostUniverse/TethysAPI.git vendor\include\Tethys` then
   `git -C vendor\include\Tethys checkout 141fd47`.
@@ -90,7 +92,8 @@ The port's upstream, [marcelomgoncalves/outpost2](https://github.com/marcelomgon
 `--harness` mode, so it is compared the same way: `run_port.py install --port <its checkout>`, then `compare_port.py ...
 --port-label marcel-outpost2` to name it in the pictures. On 2026-11-10 (its commit 1ac3673) it matched the original on
 cmb_duel_laser and cmb_duel_rail_gun; on line_fast every tick but one (tick 731, the arrival: x 16/65536 of a pixel
-short).
+short). In its pictures the damaged tanks have no health bars and the Plymouth tank is drawn in player 0's blue.
+
 `trace_diff.py` compares any two traces on its own. Fields both sides write are compared; `cmd`/`action` aren't (names
 in one, numbers in the other). `--ignore lights,rng` (on either script) sets known differences aside, to see what's
 under them; `--no-pictures` skips the screenshots for a quicker batch. Several scenarios end in a scoreboard, one line
@@ -113,10 +116,16 @@ How the first runs (port aca704a, nothing matched) got there:
 
 The port's own `--savetest` hangs after its save at tick 600; it did so before the harness work too (port 9db6cd8).
 
-## Verified (2026-11-09, Windows 10)
+## Verified (1.0.0, 2026-11-10, Windows 10)
+- All 456 op2-rs scenarios (`$ORACLE/scenarios` at op2-rs ab5f74dd) run to their tick limit, with no timeout, crash or
+  dialog: about 7 minutes for the set. `selftest` passes, alone and with `sample_bot.dll`.
+- The MinGW (CI), MSVC and op2-rs-source builds give byte-identical `trace.jsonl`, `telemetry.jsonl` and
+  `gamedata.json`; two runs of a scenario are byte-identical too.
 - line_fast, cmb_duel_laser and cmb_duel_rail_gun: `MATCH` against op2-sim, every trace field equal on every tick.
-- Two runs of cmb_duel_laser gave byte-identical trace.jsonl.
-- Speed: 1,700-5,800 ticks/s in turbo.
+- Against op2-rs's recorded-run hashes (`accuracy/manifest.json`): `gamedata.json` and `scenario_script.txt` match on
+  all 456 runs and 30 runs match in every file; the other traces and telemetry differ from recordings made by earlier
+  harness versions with fewer fields (CHANGELOG.md 1.0.0 has the detail).
+- Speed: 1,700-20,000 ticks/s in turbo.
 
 ## Known differences from the Linux harness
 - The window's client area is 1032x766, not 1024x768: the ini's frame padding (+48, +36) is Wine's. Screenshots
