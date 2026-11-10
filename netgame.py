@@ -47,12 +47,12 @@ sleep 3
 sleep 4
 {pick}{vehicles}{settings}{eden}dump lobby
 touch host_lobby
-{wait_joiners}{late}sleep 3
+{wait_joiners}{late}{chat}sleep 3
 shot lobby_ready
 ctl id=1045
 wait game what=first_cycle timeout=60
 touch host_game
-wait game what=tick tick={ticks} timeout={game_timeout}
+{game_wait}
 shot game_end
 touch host_done
 {wait_done}quit
@@ -84,13 +84,20 @@ sleep 6
 sleep 1
 shot lobby_joined
 touch {name}_ready
-{late}wait game what=first_cycle timeout=90
-wait game what=tick tick={ticks} timeout={game_timeout}
+{late}{chat}wait game what=first_cycle timeout=90
+{game_wait}
 shot game_end
 touch {name}_done
-waitfile host_done timeout=30
+waitfile host_done timeout={done_timeout}
 quit
 """
+
+
+def say(text: str) -> str:
+    """Drive steps that type a line into GAME SETTINGS' chat edit (40030) and send it with Return."""
+    names = {" ": "space", ".": "period", ",": "comma", "!": "exclam", "?": "question"}
+    keys = " ".join(names.get(c, c) for c in text.lower())
+    return f"ctl id=40030\nsleep 0.5\nkey {keys}\nsleep 0.5\nkey Return\nsleep 2\n"
 
 
 def side_name(player: int) -> str:
@@ -114,7 +121,7 @@ def lobby_ids(player: int) -> tuple[int, int]:
 LOCAL_UI = ("view", "selected")
 
 
-def compare(a: Path, b: Path) -> dict:
+def compare(a: Path, b: Path, until: int | None = None) -> dict:
     """Two games' telemetry over the ticks both have (each quits on its own a few ticks after --ticks), line for
     line: equal, or the first tick that differs and how."""
     if not a.exists() or not b.exists():
@@ -123,6 +130,10 @@ def compare(a: Path, b: Path) -> dict:
     whole = lambda text: text.splitlines() if text.endswith("\n") else text.splitlines()[:-1]  # noqa: E731
     la, lb = whole(a.read_text()), whole(b.read_text())
     n = min(len(la), len(lb))
+    # After a player quits each machine keeps its own view (who is human: the quitter's marks the others, the others
+    # it), so the copies are compared up to the tick the Quit ran.
+    if until is not None:
+        n = min(n, sum(1 for line in la[:n] if json.loads(line).get("tick", 0) < until))
     for i in range(n):
         if la[i] != lb[i]:
             ja, jb = json.loads(la[i]), json.loads(lb[i])
@@ -224,11 +235,18 @@ def main() -> int:
                                                    "comma-separated in player order; the joiners' once all are ready")
     ap.add_argument("--colors", default="", help="each player's Color as the host picks it (Blue, Red, ...), "
                                                 "comma-separated in player order (empty: the lobby's)")
+    ap.add_argument("--join-ticks", type=int, help="the first joiner plays only to this tick (its script leaves the game "
+                                                   "after it: End Mission, a quit), then waits for the host to end")
+    ap.add_argument("--ends", action="store_true", help="every copy's game ends by itself (a quit, a victory): each waits for "
+                                                     "its end after --ticks (or --join-ticks) instead of quitting there")
     ap.add_argument("--telemetry-every", type=int, default=1)
     ap.add_argument("--speed", help="each copy's Game Speed preference (outpost2.ini GameSpeed, 1-10), in player "
                                     "order, e.g. 10,3 (one value: every copy; default the prefix's ini)")
     ap.add_argument("--turbo", action="store_true", help="uncapped game speed (shell.py --turbo)")
     ap.add_argument("--timeout", type=float, default=900, help="wall-clock limit of each game")
+    ap.add_argument("--lobby-chat", default="", help="chat in GAME SETTINGS once every joiner is ready: the host's line, "
+                                                  "then '|' and the first joiner's reply (lower case, digits, spaces "
+                                                  "and . , ! ?); each machine shoots and dumps its lobby after each line")
     args = ap.parse_args()
     if args.ticks % 500:
         ap.error("--ticks must be a multiple of 500 (the shell's `game` tick events)")
@@ -295,18 +313,33 @@ def main() -> int:
     # its lobby once more after that.
     host_late = f"{late}dump lobby_set\ntouch host_set\n" if late else ""
     join_late = f"waitfile host_set timeout={120 * args.players}\nsleep 3\nshot lobby_set\ndump lobby_set\n" if late else ""
+    chat_lines = args.lobby_chat.split("|") if args.lobby_chat else []
+    host_chat = join_chat = ""
+    if chat_lines:
+        host_chat = f"{say(chat_lines[0])}shot lobby_chat\ndump lobby_chat\ntouch host_chat\n"
+        join_chat = "waitfile host_chat timeout=60\nsleep 2\nshot lobby_chat\ndump lobby_chat\n"
+        if len(chat_lines) > 1:
+            join_chat += f"{say(chat_lines[1])}shot lobby_reply\ndump lobby_reply\ntouch join_chat\n"
+            host_chat += "waitfile join_chat timeout=60\nsleep 2\nshot lobby_reply\ndump lobby_reply\n"
+    def game_wait(ticks: int, end: bool) -> str:
+        """The drive step that waits out a copy's game: to its tick, or (--ends) to its end, whatever the tick."""
+        tick = f"wait game what=tick tick={ticks} timeout={game_timeout}\n"
+        return tick + f"wait game what=end timeout={game_timeout}" if end else tick.rstrip("\n")
     drives = {"host": HOST.format(
-        ticks=args.ticks, game_timeout=game_timeout, pick=pick, create=create,
+        game_wait=game_wait(args.ticks, args.ends), ticks=args.ticks, game_timeout=game_timeout, pick=pick, create=create,
         vehicles=f"pick id=1018 ^{args.vehicles}$\nsleep 1\n" if args.vehicles is not None else "",
-        settings=settings, late=host_late,
+        settings=settings, late=host_late, chat=host_chat,
         eden=f"ctl id={lobby_ids(0)[0]}\nsleep 1\n" if 0 in eden else "",
         wait_joiners="".join(f"waitfile {j}_ready timeout={lobby_timeout}\n" for j in joiners),
         wait_done="".join(f"waitfile {j}_done timeout=30\n" for j in joiners))}
     for p in range(1, args.players):
         e, ready = lobby_ids(p)
         drives[side_name(p)] = JOIN.format(
-            ticks=args.ticks, game_timeout=game_timeout, lobby_timeout=lobby_timeout, name=side_name(p), ready=ready,
+            game_wait=game_wait(args.join_ticks if args.join_ticks is not None and p == 1 else args.ticks, args.ends),
+            ticks=args.join_ticks if args.join_ticks is not None and p == 1 else args.ticks, game_timeout=game_timeout,
+            done_timeout=game_timeout if args.join_ticks is not None and p == 1 else 30, lobby_timeout=lobby_timeout, name=side_name(p), ready=ready,
             after="host_lobby" if p == 1 else f"{side_name(p - 1)}_ready", late=join_late,
+            chat=join_chat if p == 1 else "",
             eden=f"ctl id={e}\nsleep 1\n" if p in eden else "")
     for name, text in drives.items():
         (out / f"{name}_drive.txt").write_text(text)
@@ -355,7 +388,8 @@ def main() -> int:
     tel, ords = {}, {"host": len(host_orders)}
     same_orders = True
     for j in joiners:
-        tel[j] = compare(out / "host" / "telemetry.jsonl", out / j / "telemetry.jsonl")
+        quits = [t for t, _, ty, _ in host_orders if ty == 49]
+        tel[j] = compare(out / "host" / "telemetry.jsonl", out / j / "telemetry.jsonl", min(quits) + 1 if quits else None)
         oj = orders(out / j)
         n = min(len(host_orders), len(oj))
         ords[j] = len(oj)

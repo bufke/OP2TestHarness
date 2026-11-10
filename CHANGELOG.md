@@ -28,6 +28,18 @@ Every release notes its contract changes, if any, under **Contract**. A release 
 `harness.dll` replays op2-rs's recorded runs identically (op2-rs's `make accuracy`, 0 failures) unless its changelog
 says which runs change and why.
 
+## Unreleased
+
+**Added** (MINOR: every existing recording replays identically)
+- `netgame.py --lobby-chat "HOST|JOINER"`: the host and the first joiner chat in GAME SETTINGS once every joiner is
+  ready; each machine shoots and dumps its lobby after each line.
+- `netgame.py --join-ticks T`: the first joiner plays only to tick T (its script leaves the game there: End Mission, a
+  quit), then waits for the host to end.
+- `netgame.py --ends`: every copy waits for its game to end by itself (a quit, a victory) after `--ticks` (or
+  `--join-ticks`) instead of quitting there.
+- After a player quits (command 49), the copies' telemetry is compared up to the tick the Quit ran: from then on each
+  machine keeps its own view of who is human.
+
 ## 1.0.0 (2026-11-10)
 
 The first version as a repository of its own (op2-rs issue #34), shown to work for the three projects it measures for:
