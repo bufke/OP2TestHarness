@@ -307,6 +307,9 @@ def main() -> int:
                     help="add the map tiles changed since the previous trace line (default: the scenario's traceMap)")
     ap.add_argument("--campaign", type=Path, metavar="FILE",
                     help="start as a campaign mission with this carry-over (key value lines, see harness.cpp)")
+    ap.add_argument("--unload", action="store_true",
+                    help="unload the mission DLL before quitting, so its DLL_PROCESS_DETACH runs (some missions "
+                         "write their campaign carry-over there)")
     ap.add_argument("--audio", action="store_true",
                     help="audio log: every sound, Savant line, message and music playlist the game asks for (also "
                          "scenario \"audio\"), see README \"Audio log\"")
@@ -462,6 +465,8 @@ def main() -> int:
         env["OP2H_BOT"] = win_path(args.bot.resolve())
     if args.campaign:
         env["OP2H_CAMPAIGN"] = win_path(args.campaign.resolve())
+    if args.unload:
+        env["OP2H_UNLOAD"] = "1"
     if args.resume:
         if args.record or scn:
             ap.error("--resume plays a mission's script on from a checkpoint (not a recording or a scenario)")

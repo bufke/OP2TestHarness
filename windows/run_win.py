@@ -13,6 +13,9 @@
       800) and requires MissionAccomplished with 4 screenshots, then plays it again with build\\win\\sample_bot.dll and
       requires the bot to load. The mission is in OPU\\maps\\HarnessTest only while the test runs.
 
+An OPU 1.3.x install (no OPU folder) works too: the harness goes in its Harness\\ and its own outpost2.ini's LoadAddons,
+and missions in its game folder (windows/README.md "OPU 1.3.6").
+
 The private copy (default: game\\ next to this folder's parent) keeps harness runs from touching the player's install
 and settings. The scenario translation is run.py's, imported unchanged.
 """
@@ -37,9 +40,16 @@ import run  # noqa: E402
 import ini  # noqa: E402
 
 
+def is_opu13(game: Path) -> bool:
+    """OPU 1.3.x (OPU's patched Outpost2.exe 1.3.0.x): no OPU folder; op2ext loads modules from the game folder's
+    outpost2.ini (LoadAddons) and missions from the game folder. Otherwise OPU 1.4.1 on GOG 1.2.0.7."""
+    return not (game / "OPU").is_dir()
+
+
 def use_game(game: Path) -> None:
     run.GAME_DIR = game
-    run.OPU_DIR = game / "OPU"
+    # On 1.3.x the harness, its ini and the scenario missions sit in the game folder itself (Harness\, outpost2.ini).
+    run.OPU_DIR = game if is_opu13(game) else game / "OPU"
 
 
 def setup(source: Path, game: Path) -> None:
@@ -47,20 +57,25 @@ def setup(source: Path, game: Path) -> None:
         sys.exit(f"setup: no Outpost2.exe in {source}")
     if game.resolve() == source.resolve():
         sys.exit("setup: the private copy must not be the game install itself")
+    opu13 = is_opu13(source)
+    if opu13 and b"LoadAddons" not in (source / "op2ext.dll").read_bytes():
+        sys.exit(f"setup: {source / 'op2ext.dll'} can't load modules (no LoadAddons): an older op2ext, e.g. one a mod's "
+                 "installer put there; the harness needs OPU 1.3.5's or later")
     print(f"setup: copying {source} -> {game}")
     subprocess.run(["robocopy", str(source), str(game), "/E", "/XF", "*.avi",
                     "/XD", str(source / "OPU" / "backups"), str(source / "OPU" / "logs"),
                     "/NFL", "/NDL", "/NJH", "/NJS", "/NP"], check=False)  # robocopy exits 1 on success.
-    harness_dir = game / "OPU" / "Harness"
+    use_game(game)
+    harness_dir = run.OPU_DIR / "Harness"
     harness_dir.mkdir(parents=True, exist_ok=True)
     for dll in ("harness.dll", "zScenario.dll"):
         built = ROOT / "build" / "win" / dll
         if not built.exists():
             sys.exit(f"setup: {built} missing: run windows\\build.bat first")
         shutil.copy2(built, harness_dir / dll)
-    ini_path = game / "OPU" / "outpost2.ini"
+    ini_path = run.OPU_DIR / "outpost2.ini"
     text = ini_path.read_bytes().decode("latin-1").replace("\r\n", "\n")
-    new = ini.install(text)
+    new = ini.install_addons(text) if opu13 else ini.install(text)
     if new != text:
         ini_path.write_bytes(new.replace("\n", "\r\n").encode("latin-1"))
     print(f"setup: harness installed in {harness_dir}")
@@ -88,6 +103,8 @@ def run_scenario(a) -> int:
         old.unlink(missing_ok=True)
     ticks, seed = scn.get("ticks", 3000), scn.get("seed", 1)
     mission = run.scenario_mission(scn.get("map", "cm01.map"), scn.get("techtree", "multitek.txt"))
+    if is_opu13(run.GAME_DIR):
+        mission = mission.removeprefix("OPU\\")  # Harness\zs_*.dll, relative to the game folder.
     script = out / "scenario_script.txt"
     script.write_text(newline="\n", data=run.scenario_script(scn))
     (out / "scenario.json").write_text(newline="\n",
@@ -107,12 +124,14 @@ def run_scenario(a) -> int:
     return 0 if summary["ok"] else 1
 
 
-def launch(harness_env: dict, out: Path, timeout: float) -> dict:
-    """Starts Outpost2.exe /OPU in the game copy with these OP2H_* settings and waits (killing it after `timeout` s).
+def launch(harness_env: dict, out: Path, timeout: float, args: list[str] | None = None) -> dict:
+    """Starts Outpost2.exe in the game copy (/OPU on OPU 1.4.1, then `args`, e.g. ["/loadmod", "NAME"]) with these
+    OP2H_* settings and waits (killing it after `timeout` s).
     Returns the run's summary: exit code, timeout, wall time, screenshots (converted to PNG), how the game ended (the
     last telemetry line's `end`), suppressed dialogs, the bot line, the quit line and `ok`."""
     start = time.monotonic()
-    game = subprocess.Popen([str(run.GAME_DIR / "Outpost2.exe"), "/OPU"], cwd=run.GAME_DIR,
+    cmd = [str(run.GAME_DIR / "Outpost2.exe"), *([] if is_opu13(run.GAME_DIR) else ["/OPU"]), *(args or [])]
+    game = subprocess.Popen(cmd, cwd=run.GAME_DIR,
                             env=dict(os.environ, **harness_env))
     try:
         code, timed_out = game.wait(timeout=timeout), False
@@ -146,7 +165,8 @@ def selftest() -> int:
     for f in (mission, bot):
         if not f.exists():
             sys.exit(f"selftest: {f} missing: run windows\\build.bat first")
-    maps = run.OPU_DIR / "maps" / "HarnessTest"
+    opu13 = is_opu13(run.GAME_DIR)  # OPU 1.3.x loads missions from the game folder only.
+    maps = run.GAME_DIR if opu13 else run.OPU_DIR / "maps" / "HarnessTest"
     maps.mkdir(parents=True, exist_ok=True)
     shutil.copy2(mission, maps / mission.name)
     failures = []
@@ -172,7 +192,10 @@ def selftest() -> int:
             print(f"selftest {name}: " + ("OK" if not problems else "FAILED: " + "; ".join(problems)) + f" ({out})")
             failures += [f"{name}: {p}" for p in problems]
     finally:
-        shutil.rmtree(maps, ignore_errors=True)
+        if opu13:
+            (maps / mission.name).unlink(missing_ok=True)
+        else:
+            shutil.rmtree(maps, ignore_errors=True)
     return 1 if failures else 0
 
 

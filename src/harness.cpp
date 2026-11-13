@@ -2829,6 +2829,15 @@ void Quit(const char* why) {
     Log("script: WARN %u `packet` lines never ran (their cycles didn't hand the local player's slot to ProcessCommandPacket):%s",
         unsigned(g_packetDue.size()), ticks.c_str());
   }
+  // OP2H_UNLOAD=1: unload the mission DLL first, so its DLL_PROCESS_DETACH runs with the game still in memory (the
+  // termination below skips it). Some campaign missions write their carry-over for the next mission there,
+  // e.g. when the game's end reason (0x56EB34) is MissionAccomplished.
+  if (EnvInt("OP2H_UNLOAD", 0) && g_started) {
+    const std::string name = cfg.mission.substr(cfg.mission.find_last_of("\\/") + 1);
+    int frees = 0;
+    for (HMODULE m; frees < 8 && (m = GetModuleHandleA(name.c_str())) != nullptr; ++frees) FreeLibrary(m);
+    Log("unload: %s freed %d time(s)%s", name.c_str(), frees, GetModuleHandleA(name.c_str()) ? ", still loaded" : "");
+  }
   ClosePresents();
   if (g_events) fclose(g_events);
   if (g_telem) fclose(g_telem);
@@ -4876,9 +4885,10 @@ void ShellInit() {
   ShellEvent("\"ev\":\"init\",\"screen\":[%d,%d]", GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
 }
 
-} // namespace
+const char* g_op2extFix = nullptr;  // FixOp2extModDir's outcome, for harness.log.
 
-extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
+// Sets up a harness run (or shell mode) right before TApp::Init(), after TApp::ParseCommandLine().
+void Start() {
   if (EnvInt("OP2H_SHELL", 0)) { g_shellMode = true;  ShellInit();  return; }  // Normal boot, watched (shell.py).
   cfg.mission = Env("OP2H_MISSION");
   if (cfg.mission.empty()) return;  // Not a harness run: stay completely inert.
@@ -4919,6 +4929,7 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
   g_events  = g_stateOn ? fopen((cfg.out + "\\events.jsonl").c_str(), "w") : nullptr;
   g_stopSpec = Env("OP2H_STOP");
   g_stopFrom = EnvInt("OP2H_STOP_FROM", 0);
+  if (g_op2extFix) Log("%s", g_op2extFix);
   Log("harness: mission=%s ticks=%d shot=%d telem=%d speed=%d turbo=%d seed=%d", cfg.mission.c_str(), cfg.ticks,
       cfg.shotEvery, cfg.telemEvery, cfg.speed, cfg.turbo, cfg.seed);
 
@@ -4944,7 +4955,7 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
     Log("config: could not redirect %s; the game may write window settings to it", g_configFile.iniPath_);
   }
 
-  // InitMod runs from op2ext's TApp::Init() hook, after TApp::ParseCommandLine(): force the /noshell startup path.
+  // After TApp::ParseCommandLine(), so this sticks: force the /noshell startup path.
   g_tApp.bShowShell_ = 0;
 
   RelinkCall(CallLoadDebugMap, reinterpret_cast<void*>(&StartMissionHook));
@@ -4972,6 +4983,184 @@ extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
     if (HMODULE h = LoadLibraryA(cfg.bot.c_str())) g_botTick = reinterpret_cast<BotTickFn>(GetProcAddress(h, "HarnessBotTick"));
     Log("bot: %s -> %s", cfg.bot.c_str(), g_botTick ? "ok" : "HarnessBotTick not found");
   }
+}
+
+// WinMain's call to TApp::Init() (0x485B20), after its TApp::ParseCommandLine() call at 0x4A886D. The same address in
+// GOG 1.2.0.7 and OPU 1.3.6's Outpost2.exe 1.3.0.6.
+constexpr uintptr_t CallTAppInit = 0x4A8877;
+using TAppInitFn = int(__fastcall*)(TApp* self, void* edx);
+TAppInitFn g_origTAppInit;
+
+// The process command line as it was before TApp::ParseCommandLine(), which cuts it up in place (it ends at the first
+// space afterwards). OPU 1.3.x's op2ext reads `/loadmod NAME` from it again on every GetCurrentModDir() call, which
+// mod DLLs make while running ("ModMgr.cpp:38:Argument missing" and no mod folder otherwise).
+std::string g_commandLine;
+
+// ---- OP2H_CRASHLOG=1: every access violation and other fault the game raises, logged to <out>\crash.txt from the
+// moment the harness loads (inside op2ext's start, before the game's own setup), with the module and offset it hit,
+// the code addresses on the stack and the loaded modules. It handles nothing: the game goes on, or dies, as it would.
+// Plain Win32 and fixed buffers only, since the process may be failing.
+char g_crashPath[MAX_PATH];
+LONG g_crashCount;
+
+void CrashWrite(const char* text) {
+  HANDLE f = CreateFileA(g_crashPath, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, 0, nullptr);
+  if (f == INVALID_HANDLE_VALUE) return;
+  DWORD n;
+  WriteFile(f, text, DWORD(strlen(text)), &n, nullptr);
+  CloseHandle(f);
+}
+
+// "module+offset" for an address, or the bare address outside any module.
+void Where(uintptr_t at, char* out, size_t size) {
+  HMODULE m = nullptr;
+  char path[MAX_PATH] = {};
+  if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                         reinterpret_cast<LPCSTR>(at), &m) && m && GetModuleFileNameA(m, path, sizeof(path))) {
+    const char* name = strrchr(path, '\\') ? strrchr(path, '\\') + 1 : path;
+    snprintf(out, size, "%08x %s+%x", unsigned(at), name, unsigned(at - reinterpret_cast<uintptr_t>(m)));
+  } else {
+    snprintf(out, size, "%08x", unsigned(at));
+  }
+}
+
+bool IsCode(uintptr_t v) {
+  MEMORY_BASIC_INFORMATION mi;
+  return v >= 0x10000 && VirtualQuery(reinterpret_cast<void*>(v), &mi, sizeof(mi)) && mi.State == MEM_COMMIT &&
+         (mi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY));
+}
+
+LONG CALLBACK CrashHandler(EXCEPTION_POINTERS* e) {
+  const DWORD code = e->ExceptionRecord->ExceptionCode;
+  // Faults only: not the C++ throws (0xE06D7363) and debugger notices the game makes on purpose.
+  if ((code & 0xF0000000) != 0xC0000000 || InterlockedIncrement(&g_crashCount) > 20) return EXCEPTION_CONTINUE_SEARCH;
+  char buf[4096], where[300];
+  const CONTEXT* c = e->ContextRecord;
+  Where(uintptr_t(e->ExceptionRecord->ExceptionAddress), where, sizeof(where));
+  int n = snprintf(buf, sizeof(buf), "\r\n#%ld exception %08lx at %s", g_crashCount, code, where);
+  if (code == EXCEPTION_ACCESS_VIOLATION && e->ExceptionRecord->NumberParameters >= 2)
+    n += snprintf(buf + n, sizeof(buf) - n, " (%s %08x)", e->ExceptionRecord->ExceptionInformation[0] ? "writing" : "reading",
+                  unsigned(e->ExceptionRecord->ExceptionInformation[1]));
+  n += snprintf(buf + n, sizeof(buf) - n, "\r\n  eax %08lx ebx %08lx ecx %08lx edx %08lx esi %08lx edi %08lx ebp %08lx esp %08lx\r\n  stack:",
+                c->Eax, c->Ebx, c->Ecx, c->Edx, c->Esi, c->Edi, c->Ebp, c->Esp);
+  const uintptr_t* sp = reinterpret_cast<const uintptr_t*>(c->Esp);
+  for (int i = 0, found = 0; i < 1024 && found < 24 && n < int(sizeof(buf)) - 320; ++i) {
+    MEMORY_BASIC_INFORMATION mi;
+    if (!VirtualQuery(sp + i, &mi, sizeof(mi)) || mi.State != MEM_COMMIT) break;
+    if (!IsCode(sp[i])) continue;
+    Where(sp[i], where, sizeof(where));
+    n += snprintf(buf + n, sizeof(buf) - n, "\r\n    [esp+%03x] %s", i * 4, where);
+    ++found;
+  }
+  CrashWrite(buf);
+  if (g_crashCount == 1) {  // The loaded modules, once.
+    CrashWrite("\r\n  modules:");
+    HMODULE mods[256];
+    DWORD bytes = 0;
+    // psapi's K32EnumProcessModules is in kernel32 on Windows 7 and later.
+    using EnumFn = BOOL(WINAPI*)(HANDLE, HMODULE*, DWORD, LPDWORD);
+    if (auto en = reinterpret_cast<EnumFn>(GetProcAddress(GetModuleHandleA("kernel32.dll"), "K32EnumProcessModules"));
+        en && en(GetCurrentProcess(), mods, sizeof(mods), &bytes)) {
+      for (DWORD i = 0; i < bytes / sizeof(HMODULE) && i < 256; ++i) {
+        char path[MAX_PATH] = {}, line[MAX_PATH + 40];
+        GetModuleFileNameA(mods[i], path, sizeof(path));
+        snprintf(line, sizeof(line), "\r\n    %08x %s", unsigned(reinterpret_cast<uintptr_t>(mods[i])), path);
+        CrashWrite(line);
+      }
+    }
+    CrashWrite("\r\n");
+  }
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// Where the run has got to, for a crash that leaves no exception behind.
+void CrashStage(const char* stage) {
+  if (!g_crashPath[0]) return;
+  char line[200];
+  snprintf(line, sizeof(line), "stage: %s (%lu ms)\r\n", stage, GetTickCount());
+  CrashWrite(line);
+}
+
+void InstallCrashLog() {
+  if (g_crashPath[0] || !EnvInt("OP2H_CRASHLOG", 0)) return;
+  snprintf(g_crashPath, sizeof(g_crashPath), "%s\\crash.txt", Env("OP2H_OUT", ".").c_str());
+  DeleteFileA(g_crashPath);
+  AddVectoredExceptionHandler(1, &CrashHandler);
+  CrashStage("crash log on");
+  // What a compatibility shim or another launcher could change, for comparing runs that behave differently.
+  char line[600], layer[300] = {}, self[MAX_PATH] = {};
+  GetEnvironmentVariableA("__COMPAT_LAYER", layer, sizeof(layer));
+  HMODULE me = nullptr;
+  GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                     reinterpret_cast<LPCSTR>(&InstallCrashLog), &me);
+  GetModuleFileNameA(me, self, sizeof(self));
+  const DWORD v = GetVersion();
+  snprintf(line, sizeof(line), "  GetVersion %lu.%lu build %lu, __COMPAT_LAYER '%s', harness at %p (%s)\r\n", v & 0xFF,
+           (v >> 8) & 0xFF, v >> 16, layer, static_cast<void*>(me), self);
+  CrashWrite(line);
+  // OPU 1.3.0.5's op2ext: its list of added .vol files (0x1000C4D8: vtable, count, array), which /loadmod's op2mod
+  // adds to next.
+  if (HMODULE ext = GetModuleHandleA("op2ext.dll"); ext && !IsBadReadPtr(reinterpret_cast<void*>(0x1000C4D8), 12)) {
+    const uint32_t* l = reinterpret_cast<const uint32_t*>(0x1000C4D8);
+    snprintf(line, sizeof(line), "  op2ext at %p, vol list %08x %08x %08x\r\n", static_cast<void*>(ext), l[0], l[1], l[2]);
+    CrashWrite(line);
+  }
+}
+
+// OPU 1.3.0.5's op2ext (53,248 bytes): GetCurrentModDir() (0x1000130E) returns _strdup(the mod folder) (0x100013F7),
+// and its /loadmod start (0x100013FF) appends "\op2mod.dll" to that copy with strcat (0x1000144D), 11 bytes past the
+// end of the block. Depending on the heap's layout (the environment's size moves it) that breaks op2ext's heap, and
+// the game dies in ntdll on op2ext's next allocation (AddVolToList, from the mod's mod_init). The harness loads before
+// /loadmod is handled, so it points that _strdup call at a copy with room for the name, from op2ext's own malloc.
+constexpr uintptr_t Op2extDupCall = 0x100013F7, Op2extStrcatCall = 0x1000144D, Op2extMalloc = 0x10003A58;
+
+char* __cdecl ModDirDup(const char* s) {
+  if (!s) return nullptr;
+  const size_t n = strlen(s);
+  char* p = reinterpret_cast<char* (__cdecl*)(size_t)>(Op2extMalloc)(n + 1 + 32);  // "\op2mod.dll" and spare
+  if (p) memcpy(p, s, n + 1);
+  return p;
+}
+
+void FixOp2extModDir() {
+  HMODULE ext = GetModuleHandleA("op2ext.dll");
+  const auto* dup = reinterpret_cast<const uint8_t*>(Op2extDupCall);
+  const auto* cat = reinterpret_cast<const uint8_t*>(Op2extStrcatCall);
+  if (reinterpret_cast<uintptr_t>(ext) != 0x10000000 || IsBadReadPtr(dup, 5) || IsBadReadPtr(cat, 5)) return;
+  static const uint8_t dupCode[5] = { 0xE8, 0x48, 0x69, 0x00, 0x00 }, catCode[5] = { 0xE8, 0xDE, 0x0A, 0x00, 0x00 };
+  if (memcmp(dup, dupCode, 5) != 0 || memcmp(cat, catCode, 5) != 0) return;  // Another op2ext build.
+  g_op2extFix = RelinkCall(Op2extDupCall, reinterpret_cast<void*>(&ModDirDup))
+                  ? "op2ext 1.3.0.5: /loadmod's mod folder copy made long enough for \\op2mod.dll (its strcat overflow)"
+                  : "op2ext 1.3.0.5: could not patch /loadmod's mod folder copy";
+  CrashStage(g_op2extFix);
+}
+
+int __fastcall TAppInitHook(TApp* self, void* edx) {
+  CrashStage("WinMain's TApp::Init() call");
+  if (char* cl = GetCommandLineA(); cl && !g_commandLine.empty()) memcpy(cl, g_commandLine.c_str(), g_commandLine.size() + 1);
+  Start();
+  CrashStage("harness set up");
+  const int ok = g_origTAppInit(self, edx);
+  CrashStage(ok ? "TApp::Init() done" : "TApp::Init() failed");
+  return ok;
+}
+
+} // namespace
+
+// OPU 1.4.1's op2ext calls this from its TApp::Init() hook. The op2ext of OPU 1.3.x (LoadAddons in outpost2.ini)
+// calls it as it loads, before Outpost2.exe's static data is set up (the ini path is still empty) and before WinMain
+// parses the command line, so the setup waits for WinMain's TApp::Init() call.
+extern "C" __declspec(dllexport) void InitMod(const char* /*iniSectionName*/) {
+  if (!EnvInt("OP2H_SHELL", 0) && Env("OP2H_MISSION").empty()) return;  // Not a harness run: stay completely inert.
+  InstallCrashLog();
+  if (g_configFile.iniPath_[0] != '\0') { Start();  return; }
+  CrashStage("InitMod, before the game's setup (OPU 1.3.x)");
+  FixOp2extModDir();
+  if (const char* cl = GetCommandLineA()) g_commandLine = cl;
+  // The previous callee may be another module's hook; it gets called in turn. No CALL there: an unknown exe, so set up
+  // now and let harness.log say what went wrong.
+  g_origTAppInit = reinterpret_cast<TAppInitFn>(RelinkCall(CallTAppInit, reinterpret_cast<void*>(&TAppInitHook)));
+  if (!g_origTAppInit) Start();
 }
 
 // op2ext calls this when OP2Shell.dll gets loaded. In a mission run that only happens if the game fell back to the

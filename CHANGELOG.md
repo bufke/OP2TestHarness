@@ -39,6 +39,23 @@ says which runs change and why.
   `--join-ticks`) instead of quitting there.
 - After a player quits (command 49), the copies' telemetry is compared up to the tick the Quit ran: from then on each
   machine keeps its own view of who is human.
+- OPU 1.3.6 (OPU's patched `Outpost2.exe` 1.3.0.6, op2ext with `LoadAddons`), for mods made for it.
+  Its op2ext calls `InitMod` as it loads, before the game's static data and command line, so `harness.dll` then waits
+  for WinMain's `TApp::Init()` call (0x4A8877), where OPU 1.4.1's op2ext calls it. On 1.4.1 nothing changes.
+  `run_win.py` takes a 1.3.x copy (no `OPU` folder): `setup` lists the module in the game folder's `outpost2.ini`
+  (`LoadAddons`) and refuses an op2ext without it; `selftest` and `run` pass there. `launch()` takes extra arguments
+  (`/loadmod NAME`). 1.3.x's op2ext doesn't call `RunMod`, so shell mode isn't available there, and a mission that ends
+  through the shell isn't noticed (`--ticks` or the timeout end it).
+  On 1.3.x the harness also puts back the process command line after `TApp::ParseCommandLine()` has cut it up in
+  place: that op2ext reads `/loadmod NAME` from it on every `GetCurrentModDir()` call, and failed ("ModMgr.cpp:38:
+  Argument missing") for mod DLLs calling it later.
+- `--unload` / `OP2H_UNLOAD=1`: unload the mission DLL before the run quits, so its `DLL_PROCESS_DETACH` runs (some
+  campaign missions write their carry-over there). Off by default.
+- `OP2H_CRASHLOG=1`: `crash.txt` with the start-up stages, every fault (module, offset, stack) and the loaded modules.
+- On OPU 1.3.0.5's op2ext, the harness fixes an overflow in its `/loadmod` start. `GetCurrentModDir()` returns
+  `_strdup(the mod folder)` and the start appends `\op2mod.dll` to that copy (`strcat`, 0x1000144D), 11 bytes past
+  the block. Depending on the heap's layout (the environment moves it; an administrator window happened to miss) the
+  game died in ntdll at start. The harness makes that copy long enough, and `harness.log` says so.
 
 ## 1.0.0 (2026-11-10)
 

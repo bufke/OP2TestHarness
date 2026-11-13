@@ -22,7 +22,7 @@ that needs; the rest of OP2TestHarness (src/, test/, run.py's scenario translati
   `git clone https://github.com/OutpostUniverse/TethysAPI.git vendor\include\Tethys` then
   `git -C vendor\include\Tethys checkout 141fd47`.
 - Python 3.11+ (no extra packages; screenshots are converted to PNG through System.Drawing).
-- Outpost 2 (GOG 1.2) with OPU 1.4.1.
+- Outpost 2 (GOG 1.2) with OPU 1.4.1, or OPU 1.3.6 (below).
 
 ## Use (from the OP2TestHarness folder)
 The scenarios are op2-rs's, in its `harness\oracle` folder (README.md "Scenarios and recorded runs"):
@@ -45,6 +45,29 @@ op2-inspect compare --scenario %ORACLE%\scenarios\line_fast.json --oracle build\
 `selftest` is the Makefile's `make check` on Windows: it plays the self-test mission (`zHarnessEnd.dll`, won at tick
 800), which must end MissionAccomplished with 4 screenshots, then plays it again with `sample_bot.dll`, which must load.
 The mission sits in `game\OPU\maps\HarnessTest` only while the test runs.
+
+## OPU 1.3.6
+Some mods only run on OPU 1.3.6 (OPU's own patched `Outpost2.exe` 1.3.0.6, no `OPU` folder), started with
+`/loadmod NAME`. Its code and data sit at the same addresses as GOG 1.2.0.7's. It differs in OPU's fixes written
+into the exe (the unit limit, rubble, the minimap, the CD check), none at a place the harness hooks.
+```
+python -I windows\run_win.py setup --from "C:\...\OP2-136" --game C:\...\op2-136-harness
+python -I windows\run_win.py selftest --game C:\...\op2-136-harness
+```
+- **op2ext.** `setup` needs an op2ext that loads ini modules (`LoadAddons` in `[Game]`, OPU 1.3.5 and later), and
+  refuses an older one. A mod's installer may have put an older op2ext there, such as a 2006 build (40,960 bytes)
+  without it. The one from an OPU 1.3.5 install (53,248 bytes) exports the same functions and adds the loader.
+- **Layout.** `setup` puts the DLLs in the copy's `Harness\` and adds `Harness` to `LoadAddons` in the copy's
+  `outpost2.ini`. Missions load from the game folder (`selftest` puts its mission there while it runs).
+- **What changes.** That op2ext calls `InitMod` as it loads, so `harness.dll` waits for WinMain's `TApp::Init()` call. It
+  never calls `RunMod`: no shell mode, and a mission that falls back to the shell isn't noticed (`--ticks` or the
+  timeout end the run). Recordings are of 1.4.1; don't compare 1.3.6 runs with them without checking.
+- **A mod's arguments.** `run_win.launch(env, out, timeout, ["/loadmod", "NAME"])`. From Git Bash, set
+  `MSYS_NO_PATHCONV=1` first, or it turns `/loadmod` into a path.
+- **op2ext's `/loadmod` overflow.** OPU 1.3.0.5's op2ext writes 11 bytes past a heap block when it handles
+  `/loadmod`. The game then dies at start in ntdll, or doesn't, depending on the heap's layout. The harness patches
+  it (`harness.log`: "op2ext 1.3.0.5: ..."). A start-up crash with no `harness.log`: run with `OP2H_CRASHLOG=1` and
+  read `crash.txt`.
 
 ## A release
 ```

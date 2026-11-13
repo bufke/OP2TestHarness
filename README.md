@@ -43,6 +43,7 @@ make check                         # end-to-end self-test
 - Outpost 2, the GOG release (1.2), with the **OPU 1.4.1** update: op2ext (part of OPU) loads `harness.dll` as an ini
   module, and every address in `src/harness.cpp` is for that `Outpost2.exe`. Recordings are of GOG 1.2 + OPU 1.4.1; a
   different OPU version can change them, so re-record and review the differences before switching.
+  OPU 1.3.6 also runs missions and scenarios on Windows (windows/README.md "OPU 1.3.6"), for mods made for it.
 - TethysAPI at commit 141fd47 in `vendor/include/Tethys` (`git clone https://github.com/OutpostUniverse/TethysAPI.git
   vendor/include/Tethys`, then `git -C vendor/include/Tethys checkout 141fd47`).
 - Windows: Visual Studio 2022 Build Tools (C++), Python 3.11+.
@@ -94,6 +95,8 @@ selftest` is `make check`; the module itself reads the same `OP2H_*` settings on
 | `--checkpoint SAVE` | | when the run stops with the game going on (`--ticks`, `--stop`), save it to SAVE (OPU/saves/SAVE, or a path) first, with the mission DLL's state beside it (see "Checkpoints") |
 | `--resume SAVE` | | load that save at the first game cycle and play the script on from its tick; every script line must be at that tick or later (see "Checkpoints") |
 | `--campaign FILE` | | start as a campaign mission with this carry-over (MissionResults): `key value` lines `food`, `common`, `rare`, `workers`, `scientists`, `kids`, `satellites`, `moraleLevel`, `morale`, `event`, `techLevel`, `mission` (the finished mission's number; default the DLL's minus one, as the game starts the next one), and `techs` followed by the completed topic ids. Older files without `techs` still start with no carried research |
+| `--unload` | `OP2H_UNLOAD=1` | unload the mission DLL just before the run quits, so its `DLL_PROCESS_DETACH` runs with the game still in memory (a run otherwise ends the process without it). Some campaign missions write their carry-over for the next mission there. The log says `unload: NAME freed N time(s)` |
+| | `OP2H_CRASHLOG=1` | write `crash.txt` beside the other outputs, from the moment the harness loads: how far start-up got (`stage:` lines), every fault the game raises (code, module and offset, registers, the code addresses on the stack) and the loaded modules. It handles nothing, so the game goes on or dies as it would. For a start-up crash that leaves no `harness.log` |
 | `--no-turbo` | | keep the game's frame limiter and render every frame (real time at `--speed`) |
 | `--presents` | | `present.log`: detail/minimap/command pane presents per game tick and per real second |
 | `--rng-log FROM-TO` | | `rng.log` (one tick: `--rng-log T`; a malformed range is reported in harness.log): each gameplay RNG draw (Random::Rand 0x46F000, Rand(n) 0x46F060) in those ticks as `tick caller n` (`-` for a plain Rand()), the caller being the return address: which code drew where op2-sim's RNG first differs |
